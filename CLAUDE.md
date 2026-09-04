@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots and quotes
 
 This repository is a pnpm workspace with two packages, one per toon app it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -30,7 +30,8 @@ This repository is a pnpm workspace with two packages, one per toon app it ships
 use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoint with
 tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
 to `main`. The slot app is the newer and by far the smaller of the two — see
-[the slot app](#the-slot-app) below for exactly what it does today, which is boot.
+[the slot app](#the-slot-app) below for exactly what it does today, which is boot and quote a
+slot.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
@@ -236,8 +237,9 @@ certificate is plain RTMP and says so loudly at boot; a station on the internet 
 app and the hub's admission desk: a broadcaster buys a **slot** with a paid request and the hub's
 operator key creates the **peering** and writes the routes that make their station reachable.
 [#32](https://github.com/toon-protocol/slop_machine/issues/32) is the whole spec;
-[#33](https://github.com/toon-protocol/slop_machine/issues/33) is what exists, and it is **the boot
-and only the boot**.
+[#33](https://github.com/toon-protocol/slop_machine/issues/33) and
+[#34](https://github.com/toon-protocol/slop_machine/issues/34) are what exists, and they are **the
+boot and the quote**.
 
 It takes the origin's shape rather than inventing one: it exports
 `startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
@@ -249,9 +251,38 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   reads none. It is **unpriced, has no route on the hub's connector and never may** — the app port is
   published on no interface, so unpriced never means free to the internet. It is not a claim about
   the roster or about the hub's capacity; those are separate addresses and are not written yet.
+- `GET /quote` on the app port — **paid**, at a floor price, and beneath **its own connector
+  prefix**, never the buy's, so neither address is ever reachable at the other's price. `200
+  application/json`, `Cache-Control: no-store`, carrying `{"prefix": string, "label": string,
+  "hubAddress": string, "slotPrice": number, "slotPeriodSeconds": number, "hasCapacity": boolean,
+  "slotCap": number, "slotsHeld": number, "slot": {"lapsesAt": number} | null}`. This is what a
+  broadcaster asks **before** they buy: `prefix` is the ILP address the hub would grant them, which
+  they write into their own station's `connector.toml` and boot against, rather than buying twice.
+  **The handle is the hub's to assign** — a hex digest of `X-TOON-Payer`, the client channel key a
+  terminating connector states only where it verified a covering claim itself (connector ADR 0040).
+  Same payer, same handle, for ever, and unavailable to anybody else; **there is no "that handle is
+  taken" case**, because where two payers would derive one label the app lengthens it
+  deterministically rather than refusing either. **A hub at its cap answers `200` with
+  `hasCapacity: false`** — the refusal lives here, at the cheap address, so nobody pays the slot
+  price to be turned away. **A request with no `X-TOON-Payer` is refused** `403 {"error":
+  "no_paid_termination"}`, and the message names the missing paid termination rather than blaming
+  the caller's body: absent means the packet did not arrive through a termination this connector
+  verified, and a caller's own spelling of that header never survives the connector's strip.
 - Configuration: `--slot-port`/`TOON_SLOT_PORT`, `--host`/`TOON_SLOT_HOST`,
   `--data-dir`/`TOON_DATA_DIR`. Port `0` binds an ephemeral port, which is how the suite runs slot
   apps side by side. **The port is configuration, not a constant.**
+- **The hub's admission policy is configuration too, all of it**: `--hub-address`/`TOON_HUB_ADDRESS`
+  (default `g.toon.slopmachine`), `--slot-price`/`TOON_SLOT_PRICE` (default `1000000`),
+  `--slot-period-seconds`/`TOON_SLOT_PERIOD_SECONDS` (default `2592000`, thirty days) and
+  `--slot-cap`/`TOON_SLOT_CAP` (default `100`). Admission is a price, not a judgement, so those
+  numbers *are* the policy and changing one must never be a code change. A cap of `0` is a legal
+  setting and means the hub is admitting nobody. The period is in **seconds** because that is what
+  makes a lapse testable without a fake clock, the same way `--ingest-idle-seconds` is. Every one is
+  validated fail-closed at boot — a `SlotPolicyError` and a non-zero exit, never a degraded run.
+  **`--slot-price` is not payment code**: it is what the quote *reports* so a broadcaster learns the
+  cost before buying, and it is the floor the buy will check the connector's own stated
+  `X-TOON-Amount` against. Charging is the connector's job, so `TOON_SLOT_PRICE` and the hub's
+  `connector.toml` buy route are **one pair**, changed in one commit.
 - **The hub's two operator credentials are the exception with no default, and both are named by path
   only**: `--operator-write-key-file`/`TOON_OPERATOR_WRITE_KEY_FILE` for the ed25519 write key whose
   public half sits on the connector's `write_keys` allowlist, and
@@ -269,8 +300,10 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 below just because it is the app that reaches back into a connector's operator surface: no claim
 validation, no settlement key, no payment-header parsing, no pricing logic.
 
-The quote, the buy, the peering, the routes, the roster, the lapse, the boot reconciliation and the
-hub deploy bundle are #34 onward and **do not exist**. There is no `deploy/hub/`.
+The buy, the peering, the routes, the roster's **writer**, the lapse, the boot reconciliation and
+the hub deploy bundle are #35 onward and **do not exist**. There is no `deploy/hub/`. The roster the
+quote reads is a read surface only — `size()`, `find(payer)`, `holderOf(label)` — and it is always
+empty, because nothing writes a slot yet; #35 hangs a writer off it rather than reshaping it.
 
 ### The deploy bundle
 
@@ -332,11 +365,12 @@ keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compo
 and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
 image. This repo publishes those two app images and no others — never a connector.
 
-**What is still design:** the slot app boots and answers liveness, but the slot itself — the quote,
-the buy, the peering, the routes, the roster and the lapse ([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s
-remaining slices, [#34](https://github.com/toon-protocol/slop_machine/issues/34) onward) — is not
-written yet, there is no hub deploy bundle, and there is no devnet node. Do not infer other commands
-from the sibling repos.
+**What is still design:** the slot app boots, answers liveness and quotes a slot, but the purchase
+itself — the buy, the peering, the routes, the roster's writer and the lapse
+([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s remaining slices,
+[#35](https://github.com/toon-protocol/slop_machine/issues/35) onward) — is not written yet, there
+is no hub deploy bundle, and there is no devnet node. Do not infer other commands from the sibling
+repos.
 
 What does exist, all run from the repo root:
 
@@ -388,8 +422,15 @@ and image need none of the three: a hub carries no vibes of its own and that app
 
 Tests assert at the app's boundary only — they boot the real app and speak HTTP and real RTMP at it.
 Nothing reaches into the data directory's layout, the RTMP chunk parser, the stream-key comparison,
-the segmenter, the `ffmpeg` argument construction or the slot app's credential reading; all of them
-must stay rewritable without touching a test. The suite's ladder is ordinary configuration — two
+the segmenter, the `ffmpeg` argument construction, the slot app's credential reading or its roster;
+all of them must stay rewritable without touching a test. The slot app's quote suite is the same
+shape: a payer goes in as a header and a prefix comes back, and it never learns how one becomes the
+other. **`packages/slot-app/src/slot/handle.test.ts` is the one deliberate exception in the repo**,
+and its own header says why: the collision path it covers cannot be reached over HTTP until a roster
+writer exists (#35), it is the path that decides whether "there is no *that handle is taken*
+refusal" is true rather than intended, and it would otherwise run for the first time on a real hub
+against a broadcaster who paid. It takes the narrowest seam available — one pure function of a payer
+key and a predicate — and asserts no digest. The suite's ladder is ordinary configuration — two
 small rungs, one of them sound only — so a broadcaster's four real rungs never have to be encoded to
 prove the ladder works. **No credential literal belongs in this repository, not even a test's**: the
 slot app's suite mints throwaway credentials per boot and mounts them at real files in a temporary
@@ -423,6 +464,14 @@ Scope the credential to the writes it needs. Writes are RFC 9421 signature-gated
 bearer-gated — the app's bearer token is for **reads only**, and do not add a bearer path for a
 write for convenience. Both credentials are mounted files named by path, both are required at boot,
 and neither value may reach a log line, an error message or `SlotAppInstance.config`.
+
+**A refusal at a paid address is paid for.** The connector fulfills on any complete answer from an
+app whatever its HTTP status — a status is envelope content, never a packet outcome — so an app in
+this repo cannot decline payment by refusing. Every foreseeable refusal therefore belongs at the
+slot app's cheap `/quote`, never at the buy, and adding a new refusal at a paid address is adding a
+new way to charge a broadcaster for nothing. This corrected
+[ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md), which used to claim a
+refusal was free; read its amendment before adding one.
 
 **A segment is bounded to 2 MiB on purpose.** Nothing enforces this: the connector's 2 MiB body
 limit is request-only and the response direction has no cap at all. That absence is an open question

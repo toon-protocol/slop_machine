@@ -9,20 +9,22 @@
  * a handle or signs an operator write must all stay rewritable without
  * touching this file.
  *
- * What is covered at this point in the chain (issue #33) is the boot, and only
- * the boot:
+ * What is covered in THIS file is the boot, and only the boot — the quote a
+ * broadcaster buys against lives in `../quote/quote.test.ts`:
  *   - the app boots on a *configured* port against a *configured* directory
  *     and answers liveness there;
  *   - the port is configuration, not a constant — two apps run side by side;
  *   - liveness is unpriced: it requires no payment header, reads none, and
- *     echoes none;
+ *     echoes none, and stays that way now that a paid address exists beside
+ *     it;
  *   - both operator credentials are named by path, both are required, and the
  *     refusal says which one is wrong;
  *   - neither credential value reaches a log line, an error message, or the
  *     app's own resolved configuration.
  *
- * The paid surface a broadcaster buys at is #34 onward and is deliberately not
- * asserted here — there is nothing to assert yet.
+ * The paid surface a broadcaster buys at — `GET /quote` (#34), and the buy
+ * that establishes the peering (#35 onward) — is deliberately not asserted
+ * here. The quote has its own suite beside the module that serves it.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

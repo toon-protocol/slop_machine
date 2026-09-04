@@ -87,9 +87,35 @@ and drops them to `480p` under contention. Low enough that trying a station is n
 
 - **Price:** `1000000` (about $1.00) per period.
 - **Period:** 30 days.
+- **Cap:** `100` slots held at once.
 
 Deliberately cheap. The slot exists to make admission self-service and to lapse dead stations, not
 to be revenue — carriage is where a hub earns.
+
+The cap is the hub's **collateral** bound rather than a performance one: every admission opens a
+channel the hub fronts collateral toward, so at the placeholder collateral figure below a full
+roster is about $5,000 committed. It is the number a hub operator is most likely to change first.
+Zero is a legal setting and means the hub is admitting nobody — full, closed, or not yet funded —
+and the quote says so at its own cheap address rather than the buy refusing at the expensive one.
+
+The slot app resolves all three the way everything else here resolves: flags over environment over
+defaults, `--slot-price`/`TOON_SLOT_PRICE`,
+`--slot-period-seconds`/`TOON_SLOT_PERIOD_SECONDS` and `--slot-cap`/`TOON_SLOT_CAP`. The period is
+in **seconds** because that is what makes a lapse testable without a fake clock.
+
+## The slot quote
+
+**`50` per pull.** What a broadcaster pays to ask what a slot costs, which prefix the hub would
+grant them, and whether there is room — the same floor price, and for the same reason, as a
+station's own *now*.
+
+It is priced apart from the buy because it is where **every foreseeable refusal lives**. A
+connector fulfills on any complete answer from an app whatever its status, so a refusal at the buy
+address is a refusal the broadcaster paid `1000000` for
+([ADR 0003](adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md)'s amendment). Moving "no
+capacity" and "here is what you would be granted" onto a floor-priced address is what keeps the
+expensive one for purchases that are already going to succeed. The two sit beneath **different
+connector prefixes** and always must, or one is reachable at the other's price.
 
 ## Hub carriage
 
