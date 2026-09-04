@@ -46,7 +46,13 @@ them at every rung, serve the result by address, and say where the live edge is:
   `publish` command, before a byte is read or transcoded, and a wrong or absent key is answered with
   an RTMP error status and the socket closed, so it shows up in OBS at once. Ingest is
   authenticated and **never paid**. Accepted vibes go to the origin's own segmenter as an FLV
-  stream; the `onIngest` callback sees the same stream as an extra observer.
+  stream; the `onIngest` callback sees the same stream as an extra observer. **A dropped uplink does
+  not end the station**: the origin keeps serving the window it already holds, `/now` reports no
+  ingest, and a reconnect with the right key **continues the sequence** rather than resetting it, so
+  no address a viber already paid for is quietly re-let with different vibes. Because a dropped
+  connection is usually a half-open one rather than a closed one, an accepted publish **supersedes**
+  whatever publish was open and drops it — a station has one broadcaster, and a reconnect is not a
+  second one.
 - `GET /segments/<rung>/<sequence>.ts` on the segment port — one MPEG-TS span of the broadcast at
   that rung, `200` with `Content-Type: video/mp2t`. A rung the station does not offer and a
   sequence it does not hold are both `404`, told apart by an `error` of `unknown_rung` or
@@ -133,7 +139,7 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** Retention, reconnect, encode-lag reporting and
+**Everything else in the design is still design.** Retention, encode-lag reporting and
 the `deploy/` bundle are
 [#10–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
 started. There is no `deploy/` bundle, no published image, no CI and no devnet
