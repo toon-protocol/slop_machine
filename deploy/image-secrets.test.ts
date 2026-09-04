@@ -257,6 +257,11 @@ describe('operator key material and the origin image', () => {
     // today's does.
     await run('docker', [
       'build',
+      // `--load` because a buildx builder on the container driver — what CI
+      // sets up — otherwise discards the image instead of handing it to the
+      // daemon this test then runs. It is accepted and ignored by the
+      // ordinary builder.
+      '--load',
       '--no-cache',
       '-f',
       join(scratch, 'Dockerfile'),
@@ -301,6 +306,7 @@ describe('operator key material and the origin image', () => {
     // from the repo root, with an operator's keys sitting beside the bundle.
     await run('docker', [
       'build',
+      '--load',
       '-f',
       ORIGIN_DOCKERFILE_PATH,
       '-t',
