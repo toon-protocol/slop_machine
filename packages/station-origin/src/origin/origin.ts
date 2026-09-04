@@ -60,7 +60,13 @@
  * runs for days does not fill the broadcaster's disk, and a span past the
  * window is a clean not-found a viber re-syncs from rather than a stale body.
  *
- * Encode-lag reporting (#12) is not here yet.
+ * And a broadcaster can ask whether their box is big enough for the ladder they
+ * chose (#12): `GET /encode` on the segment port reports, per rung, whether the
+ * encode is keeping pace with ingest and what its segments actually measured.
+ * Like `/health` it is unpriced, sits outside every prefix the connector routes,
+ * and is reachable only from inside the node — a broadcaster-operator asking
+ * about their own hardware is not a viber buying anything. It is deliberately
+ * not the station's *now*, which is paid, viber-facing, and about the live edge.
  *
  * The two ports, the data directory and the rung ladder are configuration
  * rather than constants: the integration suite boots real instances on fresh
@@ -91,6 +97,7 @@ import {
 } from '../segmenter/segmenter.js';
 import { segmentRoutes, SEGMENTS_ROUTE_PREFIX } from '../segmenter/routes.js';
 import { nowRoutes, NOW_ROUTE_PREFIX } from '../now/now.js';
+import { encodeRoutes, ENCODE_ROUTE_PREFIX } from '../encode/encode.js';
 import { DEFAULT_SEGMENT_SECONDS, type Rung } from '../segmenter/rung.js';
 import {
   DEFAULT_RETAIN_SEGMENTS,
@@ -390,6 +397,16 @@ export async function startOrigin(
   // every prefix the connector routes, which is what keeps it unpaid and
   // reachable from inside the node only.
   app.get('/health', (c) => c.json(livenessResponse()));
+
+  // The broadcaster's own diagnostic, on the same footing: unpriced, outside
+  // every routed prefix, reachable from inside the node and nowhere else. It
+  // is what tells a ladder that is too ambitious for this box apart from a bad
+  // uplink, which is a question about the operator's hardware rather than
+  // anything a viber buys.
+  app.route(
+    ENCODE_ROUTE_PREFIX,
+    encodeRoutes({ segmenter, isLive: () => ingest.isLive() })
+  );
 
   // The paid surface, in two kinds. Each sits beneath its own prefix, and no
   // prefix sits beneath another: one connector route per rung at that rung's

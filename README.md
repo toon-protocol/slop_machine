@@ -26,8 +26,9 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > defaulting to the four-rung placeholder ladder, and a ladder that could break the 2 MiB segment
 > budget is refused at boot. Segments are kept on a sliding window evicted by count
 > (`TOON_RETAIN_SEGMENTS`), so a long broadcast does not fill the broadcaster's disk and a span past
-> the window is a clean not-found rather than a stale body. There is no deploy bundle, no published
-> image and no devnet node. The diagrams below are the intended shape, not a description of a
+> the window is a clean not-found rather than a stale body. `GET /encode`, unpriced and reachable
+> only from inside the node, tells the broadcaster whether their box is actually keeping up with the
+> ladder they chose. There is no deploy bundle, no published image and no devnet node. The diagrams below are the intended shape, not a description of a
 > running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
 
 ## A station
