@@ -31,10 +31,16 @@
  *     stopped rather than restarting at zero and serving different vibes at an
  *     address a viber has already paid for.
  *
- * What this module does not do: it does not evict (issue #10), it does not
- * restart a dropped ingest (issue #11), and it holds no payment code of any
- * kind. It is where the station's *now* is read from — `latest()` is one
- * rung's live edge — but the address that reports it is `../now/now.ts`.
+ *   - **The window is bounded.** Segments are retained on a sliding window
+ *     evicted by count, so a broadcast that runs for days does not fill the
+ *     broadcaster's disk. A segment past the window is unlinked and gone, and
+ *     asking for it is the same clean not-found as asking for a sequence that
+ *     never existed — the policy is `./retention.ts`.
+ *
+ * What this module does not do: it does not restart a dropped ingest (issue
+ * #11), and it holds no payment code of any kind. It is where the station's
+ * *now* is read from — `latest()` is one rung's live edge — but the address
+ * that reports it is `../now/now.ts`.
  *
  * Generated media lives under `<dataDir>/segments/<rung>/` — ignored by
  * **directory**, never by extension, because an HLS segment is an MPEG-TS
@@ -46,11 +52,16 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdirSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { assertLadder } from './ladder.js';
+import {
+  assertRetention,
+  DEFAULT_RETAIN_SEGMENTS,
+  staleSequences,
+} from './retention.js';
 import {
   hasVideo,
   SEGMENT_BYTE_BUDGET,
@@ -116,6 +127,12 @@ export interface SegmenterConfig {
   rungs: readonly Rung[];
   /** Fixed segment duration, in seconds. */
   segmentSeconds: number;
+  /**
+   * How many segments to keep at each rung (default:
+   * {@link DEFAULT_RETAIN_SEGMENTS}). Older ones are unlinked as the broadcast
+   * runs, so a long broadcast does not fill the disk.
+   */
+  retainSegments?: number;
   /** The `ffmpeg` binary to supervise (default: `ffmpeg`, found on PATH). */
   ffmpegPath?: string;
 }
@@ -126,6 +143,11 @@ export interface SegmenterInstance {
   readonly rungs: readonly Rung[];
   /** The fixed duration every segment covers, in seconds. */
   readonly segmentSeconds: number;
+  /**
+   * How many segments this station keeps at each rung. Everything older has
+   * been unlinked and is a clean not-found.
+   */
+  readonly retainSegments: number;
   /** Whether this station offers a rung by that name. */
   hasRung(rung: string): boolean;
   /**
@@ -146,22 +168,32 @@ export interface SegmenterInstance {
  * Create a segmenter over a data directory.
  *
  * Creates each rung's directory and indexes whatever finished segments it
- * already holds, so a restarted origin keeps serving the window it had and
- * numbers the next segment after the last one it produced.
+ * already holds — read off the directory rather than walked from zero, because
+ * eviction means the window a previous run left behind need not start at
+ * sequence 0 — so a restarted origin keeps serving the window it had and
+ * numbers the next segment after the last one it produced. That window is
+ * trimmed to the configured retention at once, so a station restarted with a
+ * smaller window is immediately the size it was told to be.
  *
  * @throws RungError if a rung cannot be addressed, if two rungs share a name,
  * if the duration is unusable, or if a rung's capped bitrate times that
  * duration exceeds the byte budget of ADR 0001.
+ * @throws RetentionError if the retention window is not a whole number of
+ * segments, or would keep none.
  */
 export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
   const { dataDir, segmentSeconds } = config;
   const rungs = [...config.rungs];
   const ffmpegPath = config.ffmpegPath ?? 'ffmpeg';
+  const retainSegments = config.retainSegments ?? DEFAULT_RETAIN_SEGMENTS;
 
   // The whole ladder, before a directory is created or an encoder spawned.
   // The byte-budget arithmetic is re-run here on every start, so a bitrate
   // raised between runs is refused at the next one rather than quietly served.
   assertLadder(rungs, segmentSeconds);
+  // And the window, for the same reason and with the same posture: a station
+  // that kept nothing would look live and sell nothing.
+  assertRetention(retainSegments);
 
   const tracks = new Map<string, RungTrack>();
   for (const rung of rungs) {
@@ -170,14 +202,16 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
     const track: RungTrack = {
       rung,
       directory,
+      retain: retainSegments,
       segments: new Map<number, Segment>(),
       next: 0,
       latest: undefined,
     };
     // Whatever a previous run left behind is already finished and already
     // paid-for-able. Indexing it is what makes a restart continue rather than
-    // start over at sequence zero.
-    sweep(track);
+    // start over at sequence zero — and what it left behind may begin well
+    // past zero, because eviction has been at it.
+    indexExisting(track);
     tracks.set(rung.name, track);
   }
 
@@ -188,6 +222,7 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
   return {
     rungs,
     segmentSeconds,
+    retainSegments,
 
     hasRung(rung) {
       return tracks.has(rung);
@@ -377,6 +412,11 @@ interface Encoder {
 interface RungTrack {
   rung: Rung;
   directory: string;
+  /**
+   * How many of the newest sequences this rung keeps. Everything older is
+   * unlinked as the broadcast runs.
+   */
+  retain: number;
   segments: Map<number, Segment>;
   /** The sequence number the encoder is expected to finish next. */
   next: number;
@@ -384,12 +424,16 @@ interface RungTrack {
 }
 
 /**
- * Index every segment that has finished since the last look.
+ * Index every segment that has finished since the last look, then evict
+ * whatever that pushed out of the window.
  *
  * The encoder writes each span to a temporary name and renames it into place
  * only when the span is complete, and it numbers them consecutively — so
  * "has the next one appeared" is a single `stat`, and a file that has appeared
- * is by construction whole.
+ * is by construction whole. Eviction rides along here rather than on a timer
+ * of its own: the window only ever overflows when a segment finishes, and
+ * doing both in one pass is what makes "a segment past the window is gone"
+ * true at every moment a viber could be looking.
  */
 function sweep(track: RungTrack): void {
   for (;;) {
@@ -398,29 +442,122 @@ function sweep(track: RungTrack): void {
     try {
       bytes = statSync(join(track.directory, `${sequence}.ts`)).size;
     } catch {
-      return;
+      break;
     }
     track.next = sequence + 1;
+    admit(track, sequence, bytes);
+  }
 
-    if (bytes === 0) continue;
-    if (bytes > SEGMENT_BYTE_BUDGET) {
-      // The arithmetic is the guarantee; this is the alarm for an encoder that
-      // broke it anyway. Serving it would hand a viber a span their connector
-      // may refuse to carry, having already charged them for asking.
-      console.error(
-        `[station-origin] rung "${track.rung.name}" produced sequence ${String(sequence)} at ${String(bytes)} bytes, over the ${String(SEGMENT_BYTE_BUDGET)}-byte budget (ADR 0001) — it will not be served; lower the rung's bitrate or shorten the segment`
-      );
+  evict(track);
+}
+
+/**
+ * Index whatever a previous run left in a rung's directory, read off the
+ * directory itself.
+ *
+ * Deliberately not the consecutive walk {@link sweep} uses: a station that has
+ * been evicting is holding a window that starts well past sequence 0, and
+ * walking from zero would find nothing, restart the numbering, and serve
+ * different vibes at an address a viber has already paid for.
+ */
+function indexExisting(track: RungTrack): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(track.directory);
+  } catch {
+    /* c8 ignore next */
+    return;
+  }
+
+  const sequences: number[] = [];
+  for (const entry of entries) {
+    // Only finished segments: the encoder's temporary names and the playlist
+    // it insists on writing are not spans anybody can buy.
+    const match = /^(\d{1,15})\.ts$/.exec(entry);
+    if (match?.[1] === undefined) continue;
+    sequences.push(Number(match[1]));
+  }
+  sequences.sort((a, b) => a - b);
+
+  for (const sequence of sequences) {
+    let bytes: number;
+    try {
+      bytes = statSync(join(track.directory, `${sequence}.ts`)).size;
+    } catch {
+      /* c8 ignore next */
       continue;
     }
+    track.next = sequence + 1;
+    admit(track, sequence, bytes);
+  }
 
-    const segment: Segment = {
-      rung: track.rung.name,
-      sequence,
-      bytes,
-      producedAt: Date.now(),
-    };
-    track.segments.set(sequence, segment);
-    track.latest = segment;
+  evict(track);
+}
+
+/**
+ * Take one finished file into the window, or refuse it and remove it.
+ *
+ * A segment that will never be served is disk nobody can buy back: the byte
+ * budget is the alarm for an encoder that misbehaved, and leaving its output
+ * lying around would be a leak the sliding window could not reach, because
+ * eviction only ever moves what is indexed.
+ */
+function admit(track: RungTrack, sequence: number, bytes: number): void {
+  if (bytes === 0) {
+    discard(track, sequence);
+    return;
+  }
+  if (bytes > SEGMENT_BYTE_BUDGET) {
+    // The arithmetic is the guarantee; this is the alarm for an encoder that
+    // broke it anyway. Serving it would hand a viber a span their connector
+    // may refuse to carry, having already charged them for asking.
+    console.error(
+      `[station-origin] rung "${track.rung.name}" produced sequence ${String(sequence)} at ${String(bytes)} bytes, over the ${String(SEGMENT_BYTE_BUDGET)}-byte budget (ADR 0001) — it will not be served; lower the rung's bitrate or shorten the segment`
+    );
+    discard(track, sequence);
+    return;
+  }
+
+  const segment: Segment = {
+    rung: track.rung.name,
+    sequence,
+    bytes,
+    producedAt: Date.now(),
+  };
+  track.segments.set(sequence, segment);
+  track.latest = segment;
+}
+
+/**
+ * Drop everything that has fallen out of the sliding window.
+ *
+ * The newest {@link RungTrack.retain} sequences are kept and the rest are
+ * unlinked, so the sequence the station's *now* names is by construction still
+ * on disk and a viber sent to the live edge can actually buy it. Forgotten
+ * before it is unlinked: a sequence that is out of the index is already a
+ * clean not-found, so a file the node could not remove costs a viber nothing.
+ */
+function evict(track: RungTrack): void {
+  // Sorted rather than trusted to insertion order: what is kept has to be the
+  // newest sequences, and an index that was touched out of order would
+  // otherwise evict the live edge.
+  const held = [...track.segments.keys()].sort((a, b) => a - b);
+  for (const sequence of staleSequences(held, track.retain)) {
+    track.segments.delete(sequence);
+    discard(track, sequence);
+  }
+}
+
+/** Remove one segment file. It is gone; a request for it is a clean miss. */
+function discard(track: RungTrack, sequence: number): void {
+  try {
+    rmSync(join(track.directory, `${sequence}.ts`), { force: true });
+  } catch (error) {
+    // A file that will not go is a disk problem, not a reason to stop
+    // broadcasting — and it is already unservable either way.
+    console.error(
+      `[station-origin] could not remove sequence ${String(sequence)} at rung "${track.rung.name}": ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 

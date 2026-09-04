@@ -42,6 +42,25 @@ start, naming the rung**, if one exceeds the byte budget.
 Do not add a rung above 3 Mbit/s without re-reading ADR 0001 — the ceiling is what keeps a station
 working if the connector ever caps responses the way it caps requests.
 
+## Retention
+
+**60 segments per rung.** At the 4-second default that is a four-minute sliding window, evicted by
+count — a segment past it is unlinked and a request for it is a clean `unknown_segment` the viber
+re-syncs from.
+
+Count rather than age or bytes is what makes the disk bound arithmetic an operator can do from the
+two lines they wrote: the window times the ladder's worst-case segment. On the default ladder at
+4-second segments that is 60 × (64 000 + 464 000 + 964 000 + 1 564 000) bytes ≈ **175 MiB**, and the
+origin prints the number at boot.
+
+```
+TOON_RETAIN_SEGMENTS=60
+```
+
+Far more slack than a viber pulling at the live edge needs, and small enough that a station runs on
+the cheapest box a broadcaster would rent. Raise it and re-read the arithmetic above; a window of
+zero is refused at boot, because a station that kept nothing would look live and sell nothing.
+
 ## Viber defaults
 
 **Default budget: `20000`/minute** (about $0.02/min, $1.20/hour), which settles a viber at `720p`

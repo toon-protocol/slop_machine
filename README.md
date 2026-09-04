@@ -24,8 +24,10 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > sequence number, the fixed segment duration, and whether ingest is live — so a viber starts at the
 > live edge instead of at the beginning. The ladder is ordinary configuration (`TOON_RUNGS`),
 > defaulting to the four-rung placeholder ladder, and a ladder that could break the 2 MiB segment
-> budget is refused at boot. There is no eviction, no deploy bundle, no published image and no
-> devnet node. The diagrams below are the intended shape, not a description of a running system. See
+> budget is refused at boot. Segments are kept on a sliding window evicted by count
+> (`TOON_RETAIN_SEGMENTS`), so a long broadcast does not fill the broadcaster's disk and a span past
+> the window is a clean not-found rather than a stale body. There is no deploy bundle, no published
+> image and no devnet node. The diagrams below are the intended shape, not a description of a running system. See
 > [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
 
 ## A station

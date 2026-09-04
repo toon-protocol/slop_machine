@@ -48,8 +48,12 @@
  * encoder rather than depending on a separately-scheduled one is what keeps
  * ingest, encoding and serving inside a single testable surface.
  *
- * Retention (#10), reconnect (#11) and encode-lag reporting (#12) are not here
- * yet.
+ * Segments do not accumulate for ever: they are kept on a sliding window
+ * evicted by count (`--retain-segments`), so a broadcast that runs for days
+ * does not fill the broadcaster's disk, and a span past the window is a clean
+ * not-found a viber re-syncs from rather than a stale body.
+ *
+ * Reconnect (#11) and encode-lag reporting (#12) are not here yet.
  *
  * The two ports, the data directory and the rung ladder are configuration
  * rather than constants: the integration suite boots real instances on fresh
@@ -82,6 +86,10 @@ import { segmentRoutes, SEGMENTS_ROUTE_PREFIX } from '../segmenter/routes.js';
 import { nowRoutes, NOW_ROUTE_PREFIX } from '../now/now.js';
 import { DEFAULT_SEGMENT_SECONDS, type Rung } from '../segmenter/rung.js';
 import {
+  DEFAULT_RETAIN_SEGMENTS,
+  describeRetention,
+} from '../segmenter/retention.js';
+import {
   DEFAULT_LADDER,
   DEFAULT_LADDER_SPEC,
   describeLadder,
@@ -108,6 +116,7 @@ export const DEFAULT_DATA_DIR = './data';
 
 export { DEFAULT_INGEST_PORT, DEFAULT_INGEST_HOST };
 export { DEFAULT_SEGMENT_SECONDS };
+export { DEFAULT_RETAIN_SEGMENTS };
 export { DEFAULT_LADDER, DEFAULT_LADDER_SPEC };
 
 // ---------- Configuration ----------
@@ -182,6 +191,21 @@ export interface OriginConfig {
    * covers the same span (ADR 0001).
    */
   segmentSeconds?: number;
+  /**
+   * How many segments to keep at each rung (default: 60).
+   *
+   * Retention is a **sliding window evicted by count**: the newest this many
+   * sequences at each rung are on disk, everything older has been unlinked,
+   * and a request for one of those is the same clean `unknown_segment` as a
+   * sequence that never existed — so a viber re-syncs from the station's *now*
+   * rather than paying for nothing. Count rather than age or bytes is what
+   * makes the disk bound arithmetic an operator can do from their own
+   * configuration: the window times the ladder's worst-case segment.
+   *
+   * A window that would keep nothing is a refusal to start, like a ladder that
+   * breaks the byte budget.
+   */
+  retainSegments?: number;
 
   /**
    * Called once per accepted publish, with the broadcaster's vibes attached as
@@ -217,6 +241,11 @@ export interface ResolvedOriginConfig {
   rungs: readonly string[];
   /** The fixed duration every segment covers, in seconds. */
   segmentSeconds: number;
+  /**
+   * How many segments this station keeps at each rung. Anything older has been
+   * evicted and is a clean not-found.
+   */
+  retainSegments: number;
 }
 
 /** A running station origin returned by `startOrigin()`. */
@@ -287,6 +316,8 @@ function livenessResponse(): LivenessResponse {
  * if the segment duration is not a whole number of seconds, or if any rung's
  * capped bitrate times that duration exceeds the 2 MiB budget of ADR 0001 —
  * the refusal names the rung.
+ * @throws RetentionError if the retention window is not a whole number of
+ * segments to keep, or would keep none.
  *
  * @example
  * ```ts
@@ -324,10 +355,12 @@ export async function startOrigin(
   // between runs is refused at the next one.
   const rungs = resolveLadder(config.rungs);
   const segmentSeconds = config.segmentSeconds ?? DEFAULT_SEGMENT_SECONDS;
+  const retainSegments = config.retainSegments ?? DEFAULT_RETAIN_SEGMENTS;
   const segmenter = createSegmenter({
     dataDir,
     rungs,
     segmentSeconds,
+    retainSegments,
   });
 
   const ingest = await startIngest({
@@ -382,6 +415,7 @@ export async function startOrigin(
     ingestTls: ingest.tls,
     rungs: segmenter.rungs.map((offered) => offered.name),
     segmentSeconds: segmenter.segmentSeconds,
+    retainSegments: segmenter.retainSegments,
   };
 
   console.log(
@@ -389,6 +423,9 @@ export async function startOrigin(
   );
   console.log(
     `[station-origin] ladder: ${describeLadder(rungs, segmentSeconds)} — each served from ${SEGMENTS_ROUTE_PREFIX}/<rung>/<sequence>.ts in ${String(segmentSeconds)}s segments, with the station's now at ${NOW_ROUTE_PREFIX}`
+  );
+  console.log(
+    `[station-origin] retaining ${describeRetention(rungs, retainSegments, segmentSeconds)} — older segments are evicted and answered as unknown_segment`
   );
 
   let running = true;
