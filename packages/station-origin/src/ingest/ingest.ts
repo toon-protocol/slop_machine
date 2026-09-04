@@ -24,8 +24,15 @@
  * when a certificate is mounted.
  *
  * Accepted vibes are handed to `onPublish` as an FLV byte stream, which is what
- * `ffmpeg` reads from a pipe. Nothing in this repo consumes it yet; the
- * segmenter that will is issue #7.
+ * `ffmpeg` reads from a pipe. The segmenter is what consumes it.
+ *
+ * A station has exactly one broadcaster, and this listener enforces that
+ * rather than counting. A dropped uplink is usually not a closed socket — the
+ * far end vanishes and the connection sits half-open while the broadcaster's
+ * software reconnects on a fresh one — so an accepted publish **supersedes**
+ * whatever publish was open, dropping it. That is what keeps a reconnect from
+ * looking like a second broadcaster, and what keeps the station's *now* honest
+ * about whether anybody is actually supplying vibes.
  *
  * @module
  */
@@ -94,8 +101,11 @@ export interface IngestConfig {
   tls?: IngestTlsConfig | undefined;
   /**
    * Called once per accepted publish, with the vibes attached. Omit it and
-   * accepted media is counted and discarded rather than buffered — which is
-   * what the origin does until the segmenter exists.
+   * accepted media is counted and discarded rather than buffered.
+   *
+   * Called again on a reconnect, with the new publish's vibes: the publish it
+   * supersedes has already had its own vibes ended, so a consumer sees one
+   * stream end and another begin rather than two at once.
    */
   onPublish?: ((session: IngestSession) => void) | undefined;
 }
@@ -108,7 +118,13 @@ export interface IngestInstance {
   host: string;
   /** Whether the listener terminates TLS, i.e. whether it is RTMPS. */
   tls: boolean;
-  /** Whether a broadcaster is publishing right now. */
+  /**
+   * Whether a broadcaster is publishing right now.
+   *
+   * One publish is on the air at a time: a reconnect takes the air from the
+   * connection that held it, so this does not stay true because a dead socket
+   * has not noticed yet.
+   */
   isLive(): boolean;
   /** Stop listening and drop any publisher. Idempotent. */
   stop(): Promise<void>;
@@ -140,7 +156,21 @@ export async function startIngest(
   const { streamKey, onPublish } = config;
 
   const sockets = new Set<Socket>();
-  let live = 0;
+
+  /**
+   * The one publish that is on the air, if any.
+   *
+   * A station has one broadcaster, so this is a single slot rather than a
+   * count. A count is what a flaky uplink breaks: a dropped connection is
+   * frequently *not* a closed one — the far end vanishes and the socket sits
+   * half-open until TCP eventually gives up, which can be minutes or, behind a
+   * NAT that has forgotten the flow, never. The broadcaster's software mean-
+   * while reconnects on a fresh socket within seconds. Counting publishes
+   * would then have the station reporting ingest live for as long as the
+   * corpse of the old connection lasts, which is exactly the lie this address
+   * exists to prevent.
+   */
+  let onAir: OpenPublish | undefined;
 
   const onConnection = (socket: Socket): void => {
     sockets.add(socket);
@@ -174,11 +204,12 @@ export async function startIngest(
     host,
     tls: config.tls !== undefined,
     isLive() {
-      return live > 0;
+      return onAir !== undefined;
     },
     async stop() {
       if (!running) return;
       running = false;
+      onAir = undefined;
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       await new Promise<void>((resolveStop, rejectStop) => {
@@ -188,6 +219,9 @@ export async function startIngest(
   };
 
   function attach(socket: Socket): void {
+    /** This connection's publish, while it is the one on the air. */
+    let mine: OpenPublish | undefined;
+
     handleRtmpConnection(socket, {
       onPublish(request) {
         if (!isAuthorized(request)) {
@@ -208,14 +242,26 @@ export async function startIngest(
           };
         }
 
-        live += 1;
+        // The reconnect *is* the drop, seen from this end: a broadcaster whose
+        // uplink died comes back on a new socket, and the origin often has no
+        // way to know the old one is dead. So an accepted publish takes the
+        // air from whatever held it, and the station stays what it is — one
+        // broadcaster, one now, one sequence.
+        supersede(request.remoteAddress);
+
         console.log(
           `[station-origin] ingest accepted a publish on app "${request.app}" from ${request.remoteAddress ?? 'an unknown address'}`
         );
 
-        if (onPublish === undefined) return { accepted: true };
+        if (onPublish === undefined) {
+          mine = { socket };
+          onAir = mine;
+          return { accepted: true };
+        }
 
         const { sink, vibes } = flvStream(socket);
+        mine = { socket };
+        onAir = mine;
         onPublish({
           app: request.app,
           remoteAddress: request.remoteAddress,
@@ -225,7 +271,11 @@ export async function startIngest(
         return { accepted: true, media: sink };
       },
       onPublishEnd(request, bytes) {
-        live = Math.max(0, live - 1);
+        // Only if this connection is still the one on the air. A publish that
+        // was superseded lost the air the moment the new one was accepted, and
+        // its socket finally noticing is not the station going quiet.
+        if (mine !== undefined && onAir === mine) onAir = undefined;
+        mine = undefined;
         console.log(
           `[station-origin] ingest ended for ${request.remoteAddress ?? 'an unknown address'} after ${String(bytes)} bytes of vibes`
         );
@@ -238,10 +288,33 @@ export async function startIngest(
     });
   }
 
+  /**
+   * Take the air from the publish that holds it, for the one about to.
+   *
+   * The old connection is dropped outright rather than left to expire. Its
+   * session ends the way any other ended publish does — the vibes it was
+   * feeding are closed, `onPublishEnd` fires — but by then it is no longer the
+   * publish on the air, so it cannot take the station off it.
+   */
+  function supersede(by: string | undefined): void {
+    const previous = onAir;
+    if (previous === undefined) return;
+    onAir = undefined;
+    console.log(
+      `[station-origin] ingest is taking the air from the publish already open for the reconnect from ${by ?? 'an unknown address'}`
+    );
+    previous.socket.destroy();
+  }
+
   function isAuthorized(request: RtmpPublishRequest): boolean {
     if (request.streamName === '') return false;
     return streamKeyMatches(streamKey, request.streamName);
   }
+}
+
+/** The publish that is on the air, and the socket carrying it. */
+interface OpenPublish {
+  socket: Socket;
 }
 
 /**

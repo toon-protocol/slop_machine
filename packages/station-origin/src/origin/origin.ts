@@ -48,8 +48,14 @@
  * encoder rather than depending on a separately-scheduled one is what keeps
  * ingest, encoding and serving inside a single testable surface.
  *
- * Retention (#10), reconnect (#11) and encode-lag reporting (#12) are not here
- * yet.
+ * A dropped uplink does not end any of that (#11). The origin keeps serving
+ * the window it already holds, `GET /now` reports no ingest so a viber can
+ * tell a stalled edge from a station that ended, and a reconnect with the
+ * right stream key takes the air back and continues the sequence rather than
+ * resetting it — a broadcaster on a flaky connection resumes instead of
+ * starting over.
+ *
+ * Retention (#10) and encode-lag reporting (#12) are not here yet.
  *
  * The two ports, the data directory and the rung ladder are configuration
  * rather than constants: the integration suite boots real instances on fresh
