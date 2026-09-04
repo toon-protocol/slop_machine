@@ -75,6 +75,9 @@ const FETCH_TIMEOUT_MS = 10_000;
  */
 const MAX_DOCUMENT_BYTES = 64 * 1024;
 
+/** The most of a non-document answer that is quoted back in a refusal. */
+const MAX_DETAIL_BYTES = 200;
+
 /**
  * An ILP address: dot-separated segments of the characters an address allows.
  *
@@ -153,7 +156,7 @@ export async function readStationDescription(
   if (!response.ok) {
     throw unreadable(
       'the station connector at that URL answered something other than a self-description',
-      `${String(response.status)} ${(await safeText(response)).slice(0, 200)}`
+      `${String(response.status)} ${await safeText(response)}`
     );
   }
 
@@ -288,10 +291,27 @@ function unreadable(message: string, detail = ''): PeeringError {
   return new PeeringError('station', message, detail);
 }
 
+/**
+ * The first {@link MAX_DETAIL_BYTES} of whatever a URL answered instead of a
+ * document, for the message that names it.
+ *
+ * Bounded on the same reasoning the document is: a host that answers a
+ * refusal with a gigabyte is still a host the buyer chose, and the hub is
+ * reading it inside a paid request.
+ */
 async function safeText(response: Response): Promise<string> {
+  const body = response.body;
+  if (body === null) return '';
+  const reader = body.getReader();
   try {
-    return (await response.text()).trim();
+    const chunk = await reader.read();
+    if (chunk.done) return '';
+    return new TextDecoder()
+      .decode(chunk.value.subarray(0, MAX_DETAIL_BYTES))
+      .trim();
   } catch {
     return '';
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
 }
