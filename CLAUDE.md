@@ -4,7 +4,7 @@ Paid live broadcast over TOON. Vibers pay per segment as they watch or listen; t
 the broadcaster. Two toon apps ship from this repo, both sitting behind the connector so neither
 ever sees a payment:
 
-- the **station origin** — ingests a broadcaster's RTMP stream and serves HLS segments of it;
+- the **station origin** — ingests a broadcaster's vibes over RTMP and serves HLS segments of them;
 - the **slot app** — sells the routing-table entries that make a station reachable from a hub.
 
 A **hub** deployment is otherwise stock: the announcement surface is the **relay** toon app's
