@@ -17,9 +17,10 @@ either one it is already paid for. That separation is the whole design, and it i
 The vocabulary is not decoration — it is written down in [`CONTEXT.md`](./CONTEXT.md), and the
 decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 
-> **Status: nothing is implemented yet.** This repository holds the design, the glossary and three
-> ADRs. There is no code, no image, no deployment and no devnet node. The diagrams below are the
-> intended shape, not a description of a running system.
+> **Status: the station origin boots, and that is all it does.** It answers `GET /health` on its
+> segment port and nothing else — no ingest, no encoding, no segments, no deploy bundle, no image
+> published, no devnet node. The diagrams below are the intended shape, not a description of a
+> running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
 
 ## A station
 

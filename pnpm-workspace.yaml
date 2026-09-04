@@ -1,0 +1,12 @@
+packages:
+  - "packages/*"
+
+# Peer dependencies are declared, never conjured: an auto-installed peer is a
+# dependency nothing in the repo asked for.
+autoInstallPeers: false
+
+# esbuild ships its platform binary via a postinstall script. pnpm refuses to
+# run install scripts unless the dependency is allowed here, and without this
+# every `tsup` build fails on a missing binary.
+allowBuilds:
+  esbuild: true

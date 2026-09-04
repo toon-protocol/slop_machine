@@ -22,15 +22,45 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: design only — there is no code here
+## Status: the station origin boots, and that is all it does
 
-This repository contains `README.md`, `CONTEXT.md`, `docs/`, `.gitignore` and `LICENSE`.
-Nothing else. There is no package, no image, no deployment and no devnet node.
+This repository is a pnpm workspace with one package — `packages/station-origin`
+(`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
+use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoint with
+tsup/esbuild, tested with vitest.
 
-**Do not infer commands from the sibling repos.** There is no `pnpm install`, no `pnpm test`, no
-`deploy/` bundle and no CI here yet — `relay` and `store` have those because they are built. If you
-are asked to "run the tests" or "deploy", the honest answer is that neither exists yet. Add this
-section's replacement in the same commit that adds the thing it describes.
+What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5))
+is boot and answer liveness:
+
+- `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
+  broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
+  none. It is not a claim about ingest; the station's *now* will be a separate, paid address.
+
+Configuration is flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
+`--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`. Port `0` binds an ephemeral port, which
+is how the suite runs stations side by side.
+
+**Everything else in the design is still design.** RTMP ingest, `ffmpeg`, the rung ladder, segments,
+retention, the station's *now* and the `deploy/` bundle are
+[#6–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+started. There is no `deploy/` bundle, no published image, no CI and no devnet node — do not infer
+those commands from the sibling repos.
+
+What does exist, all run from the repo root:
+
+```
+pnpm install
+pnpm build       # bundles the origin to packages/station-origin/dist (dist/cli.js is the entrypoint)
+pnpm test        # vitest: boots the real origin on fresh ports against temp directories
+pnpm lint        # eslint
+pnpm typecheck   # tsc --noEmit
+pnpm format      # prettier
+docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
+```
+
+Tests assert at the app's boundary only — they boot the real app and speak HTTP at it. Nothing
+reaches into the data directory's layout, and nothing may reach into the segmenter or the `ffmpeg`
+invocation once those exist. Replace this section in the same commit that invalidates it.
 
 The design is settled and written down; the open questions the README used to list — which
 direction pays, the unit of payment, and how discovery works — are all answered. Vibers pay, per

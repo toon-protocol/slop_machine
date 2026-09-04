@@ -72,8 +72,8 @@ media-out/
 
 # ─── Build output ─────────────────────────────────────────────────────────
 #
-# The stack is not chosen yet; both the Node and Rust shapes are covered so
-# the first commit of real code cannot leak build artefacts.
+# The stack is TypeScript on Node (see CLAUDE.md); the Rust shape is left
+# covered because these rules predate that choice and cost nothing to keep.
 node_modules/
 .pnpm-store/
 dist/
