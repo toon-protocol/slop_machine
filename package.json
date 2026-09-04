@@ -8,8 +8,8 @@
     "build": "pnpm -r run build",
     "test": "vitest run",
     "lint": "eslint .",
-    "format": "prettier --write \"packages/*/src/**/*.ts\"",
-    "format:check": "prettier --check \"packages/*/src/**/*.ts\"",
+    "format": "prettier --write \"packages/*/src/**/*.ts\" \"deploy/*.ts\"",
+    "format:check": "prettier --check \"packages/*/src/**/*.ts\" \"deploy/*.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [

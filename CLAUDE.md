@@ -132,8 +132,10 @@ The origin binds two listeners and they are not alike:
 A docker `ports:` publish **without** a host-IP prefix is internet-reachable even with `ufw` locked
 to 22/80/443/1935 — Docker's iptables chain runs ahead of ufw. Never convert the origin's
 `expose: 3100` into a `ports:`, not even on loopback, and never drop the `127.0.0.1:` from the
-connector's. [#14](https://github.com/toon-protocol/slop_machine/issues/14) is the guard that fails
-the build if either happens.
+connector's. [`deploy/bundle.test.ts`](deploy/bundle.test.ts) is the guard that fails the build if
+either happens — in **any** of the three compose files and in **any** file set an operator is told
+to run, because a publish added to an overlay is as much a free door as one added to the base file.
+It fails equally on a Caddy route to the origin, which is the same door reached through the front.
 
 ### The rung ladder
 
@@ -224,6 +226,8 @@ address's price, and `/health` and `/encode` are reachable at no price at all be
 route here and never may**. Never point a route at the bare origin or at `/segments`: the first puts
 the diagnostics on sale, the second makes every rung cost the same. **`per_kib` is never set on a
 station route** (ADR 0002) — every station price is flat per segment and the slope is always zero.
+[`deploy/bundle.test.ts`](deploy/bundle.test.ts) holds all of that still: it is the guard, it reads
+these real files rather than fixtures, and every value it expects is a literal in the test.
 
 `TOON_RUNGS` in `docker-compose.yml` and the routes in `connector.toml` are **one pair**: a rung with
 no route is unsellable, and a route naming a rung the origin does not offer is a paid 404. Change one
@@ -248,11 +252,11 @@ pnpm build       # bundles the origin to packages/station-origin/dist (dist/cli.
 pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTMP at it, and
                  # pulls the encoded segments back over HTTP. Deliberately slow — real encoding
                  # is the point, because ADR 0001 is a claim about bytes. The include list
-                 # also covers deploy/*.test.ts, so the bundle guard (#14) lands beside
+                 # also covers deploy/*.test.ts, so deploy/bundle.test.ts runs beside
                  # the files it guards; smol-toml and yaml are there to read them
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
-pnpm format      # prettier
+pnpm format      # prettier over packages/*/src/**/*.ts and deploy/*.ts
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 ```
 
@@ -308,7 +312,9 @@ upstream, not a guarantee — see
 bitrate or lengthening a segment.
 
 Related: **do not set `per_kib` on a station route.** A price is a schedule over the *inbound*
-payload, so it charges for the request, not the vibes in the fulfill. It will silently do nothing.
+payload, so it charges for the request, not the vibes in the fulfill. It will silently do nothing,
+and `deploy/bundle.test.ts` fails the build for it rather than letting the symptom show up on a live
+box as "revenue is flat and nobody knows why".
 Quality is priced per rung, by address ([ADR 0002](docs/adr/0002-bitrate-follows-the-vibers-budget.md)).
 
 ## This repo is public, and will hold key material on live boxes

@@ -14,7 +14,8 @@ broadcaster publishes, the origin encodes and cuts at every rung they configured
 the live edge is and whether the box is keeping up with the ladder, it survives a dropped uplink and
 evicts what has fallen out of the window, and a viber pulls segments by address at the rung — and so
 the price — they chose. [`deploy/`](../../deploy/) (#13) is the bundle that runs all of it behind a
-connector and a TLS front; #14 is the guard that holds its ports and prices still.
+connector and a TLS front; [`deploy/bundle.test.ts`](../../deploy/bundle.test.ts) (#14) is the
+guard that holds its ports and prices still.
 
 | Surface                         | Port                | Paid | What it is                                        |
 | ------------------------------- | ------------------- | ---- | ------------------------------------------------- |
