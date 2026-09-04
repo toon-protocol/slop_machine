@@ -44,6 +44,37 @@
  * connector, and every packet the hub forwarded would arrive somewhere they
  * do not terminate.
  *
+ * **A row the station has stopped publishing is taken back out.** Writing is
+ * keyed by prefix, so a repeat purchase rewrites what is still sold — but
+ * nothing about an upsert removes what is not, and a rung dropped from a
+ * ladder would otherwise leave its row behind for ever: an address the hub
+ * carries, priced, toward a node that no longer terminates it, where every
+ * forwarded packet arrives at an `F03`. So {@link retireForwardedRoutes}
+ * reads what the hub's own table currently holds and removes what the
+ * document no longer names, with one `DELETE /routes/peers/:prefix` each.
+ *
+ * **That removal is the one destructive write this app makes, and it is
+ * fenced twice.** A hub's routing table is shared by every broadcaster it
+ * admitted, and a runtime row is upserted by prefix rather than protected by
+ * an owner — only a *config* row is protected, by the connector's own `409`.
+ * So the fence is this module's to hold:
+ *
+ *   1. the candidates are read from the hub's own table and filtered to rows
+ *      **at or beneath the caller's granted prefix**, which is an address
+ *      space no other caller can ever hold — a handle is derived from a
+ *      verified payer and lengthened until it is free, so two grants never
+ *      nest;
+ *   2. and {@link removeOne}, the only function that issues the `DELETE`,
+ *      re-checks that fence itself against the grant it was given and refuses
+ *      rather than sending anything it cannot prove is beneath it.
+ *
+ * A row the config file owns is never a candidate — the read says which rows
+ * are the operator's own — and the connector would refuse it anyway.
+ *
+ * **The read is bearer-gated, and the removal is signature-gated**, which is
+ * the connector's own split: writes are RFC 9421 signatures and never a
+ * bearer token, reads are the bearer token and nothing else.
+ *
  * @module
  */
 
@@ -52,6 +83,28 @@ import type { PublishedRoute } from './station-description.js';
 
 /** Where on the operator surface a forwarded route is written. */
 const ROUTES_WRITE_PATH = '/routes/peers';
+
+/**
+ * Where on the operator surface the rows this hub already carries are read.
+ *
+ * The same address as the write, on the other verb — and behind the other
+ * gate: a read is the bearer token and nothing else.
+ */
+const ROUTES_READ_PATH = '/routes/peers';
+
+/**
+ * An ILP address, as the operator surface will accept one in a path.
+ *
+ * Checked before a prefix read back off the hub's own table is ever put in a
+ * URL. The row was written by whoever holds the hub's write key, which
+ * includes the hub operator's own hand, so it is not this app's to assume
+ * well-formed — and a prefix carrying a `/` or a `..` would be a `DELETE`
+ * aimed at a path nobody named.
+ */
+const ILP_ADDRESS = /^[a-zA-Z0-9_~-]+(\.[a-zA-Z0-9_~-]+)*$/;
+
+/** How long to wait for a read of the hub's own table, in milliseconds. */
+const READ_TIMEOUT_MS = 10_000;
 
 /** How many times one route write is attempted before it is given up on. */
 const WRITE_ATTEMPTS = 3;
@@ -143,6 +196,58 @@ export interface ForwardedRouteRequest {
   localLabel: string;
   /** The routes to write, already derived. */
   routes: readonly ForwardedRoute[];
+}
+
+/**
+ * What removing a route needs beyond what writing one does: the credential
+ * that gates a **read** of the hub's own table.
+ *
+ * Nothing can be removed without first knowing what is there, and what is
+ * there is a read. The token is here rather than on the peering policy
+ * because it is a credential and not a term: a policy is configuration an
+ * operator reads back, and this is a secret that never appears in one.
+ *
+ * **Reads only.** The connector gates its writes on an RFC 9421 signature and
+ * never on a bearer token, and this app does not invent a shortcut: the
+ * `DELETE` below is signed with the write key exactly as the `POST` is.
+ */
+export interface ForwardedRouteDependencies extends PeeringDependencies {
+  /** The mounted operator bearer token. Read-gating only, never a write. */
+  bearerToken: string;
+}
+
+/** One row the hub's own routing table holds right now, as this hub reads it. */
+export interface CarriedRoute {
+  /** The ILP prefix that row carries. */
+  prefix: string;
+  /** The peering it points at — the operator surface's `peer_id`. */
+  peerId: string;
+  /**
+   * `runtime` for a row written over the operator surface, `config` for one
+   * the hub operator's own file owns.
+   *
+   * Read rather than assumed, because it is the difference between a row this
+   * app may take back out and one it may never touch.
+   */
+  source: string;
+}
+
+/** What taking the stale rows back out needs. */
+export interface ForwardedRouteRetirement {
+  /**
+   * The prefix the hub granted this caller.
+   *
+   * **The whole fence.** Nothing outside this address space is a candidate
+   * for removal, and nothing outside it is sent even if it somehow became
+   * one: a hub's routing table is shared by every broadcaster it admitted,
+   * and a runtime row carries no owner for the connector to check.
+   */
+  grantedPrefix: string;
+  /**
+   * The routes the hub carries for this caller now. Everything else beneath
+   * the grant is what the station has stopped publishing, and goes.
+   */
+  keep: readonly ForwardedRoute[];
 }
 
 /**
@@ -309,6 +414,266 @@ async function writeOne(
       'hub',
       `the route for ${route.prefix} was never attempted`,
       route.prefix
+    )
+  );
+}
+
+/**
+ * Take back out every row beneath the granted prefix the station no longer
+ * publishes.
+ *
+ * Called **after** the writes rather than before them, so the hub's table is
+ * briefly a superset of what the station sells rather than briefly a subset:
+ * a rung is never unreachable in the middle of its own broadcaster's renewal.
+ *
+ * A `404` from the surface is a success, not a failure — the row is already
+ * gone, which is the state this was asking for, and a retried purchase must
+ * not be refused for finishing work its predecessor did.
+ *
+ * @returns the prefixes removed, in the order they were removed. Empty on a
+ * first purchase, and empty on a renewal that dropped nothing.
+ * @throws ForwardedRouteError with `failure: 'hub'` where the hub's own
+ * surface would not answer the read or take the removal, and
+ * `failure: 'config'` where the row turns out to be one the operator's
+ * configuration file owns.
+ */
+export async function retireForwardedRoutes(
+  deps: ForwardedRouteDependencies,
+  request: ForwardedRouteRetirement
+): Promise<string[]> {
+  const published = new Set(request.keep.map((route) => route.prefix));
+
+  const stale = (await readCarriedRoutes(deps)).filter(
+    (carried) =>
+      // A row the operator's own configuration file owns is never this app's
+      // to remove. The connector would refuse it with a 409 anyway; not
+      // asking is better than being told.
+      carried.source === 'runtime' &&
+      beneath(carried.prefix, request.grantedPrefix) &&
+      !published.has(carried.prefix)
+  );
+
+  const removed: string[] = [];
+  for (const carried of stale) {
+    await removeOne(deps, request.grantedPrefix, carried.prefix);
+    removed.push(carried.prefix);
+  }
+  return removed;
+}
+
+/**
+ * Every peer-forwarding row the hub's own connector holds, config and runtime
+ * alike, each saying which it is.
+ *
+ * Bearer-gated, because it is a read. Retried on the same terms a write is:
+ * a connector restarting under a broadcaster's paid request must not cost
+ * them the purchase.
+ *
+ * The answer is not size-bounded the way a station's self-description is —
+ * that document comes from a host the buyer named, and this one comes from
+ * the hub's own connector on the hub's own network.
+ */
+async function readCarriedRoutes(
+  deps: ForwardedRouteDependencies
+): Promise<CarriedRoute[]> {
+  const target = new URL(`${deps.policy.operatorUrl}${ROUTES_READ_PATH}`);
+  let lastError: ForwardedRouteError | undefined;
+
+  for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 500);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${deps.bearerToken}`,
+        },
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = new ForwardedRouteError(
+        'hub',
+        "the hub's own operator surface could not be reached",
+        '',
+        error instanceof Error ? error.message : String(error)
+      );
+      continue;
+    }
+
+    const said = await response.text();
+
+    if (response.ok) return readRows(said);
+
+    if (response.status < 500) {
+      // 401 is the bearer token, which is the hub operator's mount to fix and
+      // says the same thing however many times it is asked.
+      throw new ForwardedRouteError(
+        'hub',
+        `the hub's operator surface refused to say what it carries, with ${String(response.status)}`,
+        '',
+        said.trim()
+      );
+    }
+
+    lastError = new ForwardedRouteError(
+      'hub',
+      `the hub's operator surface answered ${String(response.status)} when asked what it carries`,
+      '',
+      said.trim()
+    );
+  }
+
+  throw (
+    lastError ??
+    new ForwardedRouteError('hub', "the hub's own table was never read")
+  );
+}
+
+/**
+ * The rows out of that answer, ignoring anything this app cannot read.
+ *
+ * Ignoring rather than refusing, and it is the opposite choice from the one
+ * the station's document gets: a row this app cannot parse is a row it will
+ * not remove, which is the safe direction. A price it cannot read is not read
+ * at all here — removing a route needs its prefix and nothing else.
+ */
+function readRows(said: string): CarriedRoute[] {
+  let answered: unknown;
+  try {
+    answered = JSON.parse(said);
+  } catch {
+    throw new ForwardedRouteError(
+      'hub',
+      "the hub's operator surface answered something that is not JSON when asked what it carries"
+    );
+  }
+  if (!Array.isArray(answered)) {
+    throw new ForwardedRouteError(
+      'hub',
+      "the hub's operator surface answered something that is not a routing table"
+    );
+  }
+
+  const rows: CarriedRoute[] = [];
+  for (const entry of answered) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const {
+      prefix,
+      peer_id: peerId,
+      source,
+    } = entry as Record<string, unknown>;
+    if (typeof prefix !== 'string' || typeof source !== 'string') continue;
+    rows.push({
+      prefix,
+      peerId: typeof peerId === 'string' ? peerId : '',
+      source,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Remove one row, and refuse to send anything that is not provably beneath
+ * the grant it was given.
+ *
+ * This is the choke point, and the check is repeated here on purpose. Every
+ * caller already filtered — but this is the only function in the app that
+ * issues a destructive write against a hub's routing table, and a fence that
+ * lives only in the caller is a fence one refactor away from not existing.
+ */
+async function removeOne(
+  deps: ForwardedRouteDependencies,
+  grantedPrefix: string,
+  prefix: string
+): Promise<void> {
+  if (!ILP_ADDRESS.test(prefix) || !beneath(prefix, grantedPrefix)) {
+    throw new ForwardedRouteError(
+      'hub',
+      `this hub will not remove ${prefix}: it is not an address beneath ${grantedPrefix}`,
+      prefix
+    );
+  }
+
+  const { policy, signer } = deps;
+  const target = new URL(
+    `${policy.operatorUrl}${ROUTES_WRITE_PATH}/${encodeURIComponent(prefix)}`
+  );
+  // A DELETE carries no body, and the digest of no body is still what binds
+  // the signature to the request the verifier reconstructs.
+  const body = '';
+
+  let lastError: ForwardedRouteError | undefined;
+
+  for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 500);
+    }
+
+    const signature = await signer.sign('DELETE', target.pathname, body);
+
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        method: 'DELETE',
+        headers: {
+          'signature-input': signature['signature-input'],
+          signature: signature.signature,
+          'content-digest': signature['content-digest'],
+        },
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = new ForwardedRouteError(
+        'hub',
+        "the hub's own operator surface could not be reached",
+        prefix,
+        error instanceof Error ? error.message : String(error)
+      );
+      continue;
+    }
+
+    const said = await response.text();
+
+    // Gone, or already gone. Both are the state this was asking for, and a
+    // retry that finds its predecessor's work done is not a failure.
+    if (response.ok || response.status === 404) return;
+
+    if (response.status === 409) {
+      throw new ForwardedRouteError(
+        'config',
+        `the hub's own configuration file already owns the route for ${prefix}`,
+        prefix,
+        said.trim()
+      );
+    }
+
+    if (response.status < 500) {
+      throw new ForwardedRouteError(
+        'hub',
+        `the hub's operator surface refused to remove the route for ${prefix} with ${String(response.status)}`,
+        prefix,
+        said.trim()
+      );
+    }
+
+    lastError = new ForwardedRouteError(
+      'hub',
+      `the hub's operator surface answered ${String(response.status)} removing ${prefix}`,
+      prefix,
+      said.trim()
+    );
+  }
+
+  throw (
+    lastError ??
+    new ForwardedRouteError(
+      'hub',
+      `the route for ${prefix} was never removed`,
+      prefix
     )
   );
 }

@@ -40,6 +40,21 @@
  * table answers (`PeerRouteTableError::OwnedByConfig`, connector ADR 0034: a
  * runtime row never shadows a config one).
  *
+ * The other two verbs on that same address are what a renewal needs, and this
+ * fake splits their gates exactly as the connector does:
+ *
+ *   - **`GET /routes/peers`** answers every row it holds as
+ *     `{ prefix, peer_id, price, source }` (`connector_runtime::PeerRouteView`,
+ *     with `RouteSource` spelled lower-case), gated by the **bearer token and
+ *     nothing else**. A read presenting the wrong token is a `401` however
+ *     well it is signed, which is what makes "the app's bearer token is for
+ *     reads only" something a suite can find out.
+ *   - **`DELETE /routes/peers/:prefix`** removes one row, gated by the
+ *     **signature and nothing else** — no body, and the digest of no body is
+ *     still covered, exactly as `remove_peer_route` verifies it. It answers
+ *     `204` on a row it held, `404` on one it never had, so a repeat is not a
+ *     failure, and `409` on a prefix the config file owns.
+ *
  * **This module is test scaffolding and ships in no bundle** — nothing the
  * app's entrypoints import reaches it. It is a `.ts` file beside the code it
  * fakes rather than inside a test file because more than one suite will want
@@ -130,6 +145,15 @@ export interface FakeOperatorSurfaceOptions {
    */
   writeKeys: readonly string[];
   /**
+   * The bearer token that gates every **read** — a hub operator's
+   * `[operator] bearer_token`.
+   *
+   * Required rather than optional: a fake whose reads were open by default
+   * would let an app that never sent the token pass, and the suite would
+   * never find out that the app had not been given one.
+   */
+  bearerToken: string;
+  /**
    * Whether the surface can read the self-description at a station URL.
    *
    * `false` is the connector's `502`: the counterparty's host was
@@ -170,7 +194,9 @@ export interface FakeOperatorSurface {
   peerings(): FakePeering[];
   /**
    * Every forwarded route it holds, in the order it first learned each one —
-   * the rows that decide what a hub actually carries.
+   * the rows that decide what a hub actually carries. A row removed over
+   * `DELETE /routes/peers/:prefix` is gone from here, which is how a suite
+   * sees that a renewal took a dropped rung back out.
    */
   routes(): FakeForwardedRoute[];
   /**
@@ -406,6 +432,73 @@ export async function startFakeOperatorSurface(
     forwarded.set(route.prefix, route);
 
     return c.json({ ...route, source: 'runtime' });
+  });
+
+  // Reads: the bearer token and nothing else, which is the connector's own
+  // split. A signature buys nothing here, and the token buys nothing on a
+  // write.
+  surface.get('/routes/peers', (c) => {
+    const presented = c.req.header('authorization');
+    if (presented !== `Bearer ${options.bearerToken}`) {
+      return c.text('missing or wrong bearer token', 401);
+    }
+    return c.json(
+      [...forwarded.values()].map((route) => ({
+        ...route,
+        // Every row this fake holds was written at runtime. A config row is
+        // the operator's own and this surface never invents one: what it has
+        // to say about them is the `409` below.
+        source: 'runtime',
+      }))
+    );
+  });
+
+  surface.delete('/routes/peers/:prefix', async (c) => {
+    // A DELETE carries no body, and the digest of no body is still covered —
+    // `authenticate_write` binds the signature to the whole request rather
+    // than to a body a DELETE need not have.
+    const body = await c.req.text();
+    const headers = headersOf(c.req.raw);
+    const path = new URL(c.req.url).pathname;
+
+    const authenticated = authenticate({
+      method: 'DELETE',
+      path,
+      headers,
+      body,
+      allowlist,
+      spent,
+    });
+    if ('reason' in authenticated) {
+      refused.push({ method: 'DELETE', path, reason: authenticated.reason });
+      return c.json({ error: authenticated.reason }, 401);
+    }
+
+    accepted.push({
+      method: 'DELETE',
+      path,
+      keyid: authenticated.keyid,
+      body,
+      headers,
+      created: authenticated.created,
+    });
+
+    if (failing(path)) {
+      return c.text('the route table did not answer in time', 503);
+    }
+
+    const prefix = c.req.param('prefix');
+
+    // Owned by the config file before found or not found, exactly as
+    // `remove_runtime_peer_route` orders its own two checks.
+    if (configOwns(prefix)) {
+      return c.text(`the route for ${prefix} is owned by the config file`, 409);
+    }
+    if (!forwarded.delete(prefix)) {
+      return c.text(`no runtime route for '${prefix}'`, 404);
+    }
+
+    return c.body(null, 204);
   });
 
   const { server, port } = await listen(surface.fetch);

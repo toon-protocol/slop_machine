@@ -116,6 +116,7 @@ export type {
 export {
   deriveForwardedRoutes,
   writeForwardedRoutes,
+  retireForwardedRoutes,
   ForwardedRouteError,
 } from './peering/routes.js';
 export type {
@@ -123,6 +124,9 @@ export type {
   ForwardedRouteFailure,
   ForwardedRouteTerms,
   ForwardedRouteRequest,
+  ForwardedRouteDependencies,
+  ForwardedRouteRetirement,
+  CarriedRoute,
   DerivedRoutes,
 } from './peering/routes.js';
 
