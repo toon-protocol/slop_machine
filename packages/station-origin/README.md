@@ -9,18 +9,63 @@ request paid. See the repo's [`CLAUDE.md`](../../CLAUDE.md) for why that split i
 
 ## What exists today
 
-Issues #5 and #6 built the boot path, one address, and the door a broadcaster's vibes come in
-through. The rung ladder, segments, retention and the station's *now* are issues #7–#14.
+Issues #5, #6 and #7 built the whole paid path at **one rung**: a broadcaster publishes, the origin
+encodes and cuts, and a viber pulls segments by address. The configurable rung ladder (#8), the
+station's *now* (#9), retention (#10), reconnect (#11) and the deploy bundle (#13/#14) are still to
+come.
 
-| Surface       | Port                | Paid | What it is                                          |
-| ------------- | ------------------- | ---- | --------------------------------------------------- |
-| `GET /health` | `TOON_SEGMENT_PORT` | no   | Liveness, for a supervisor **inside** the node      |
-| RTMP / RTMPS  | `TOON_INGEST_PORT`  | no   | A broadcaster's publish, gated on the stream key    |
+| Surface                              | Port                | Paid | What it is                                       |
+| ------------------------------------ | ------------------- | ---- | ------------------------------------------------ |
+| `GET /health`                        | `TOON_SEGMENT_PORT` | no   | Liveness, for a supervisor **inside** the node   |
+| `GET /segments/<rung>/<seq>.ts`      | `TOON_SEGMENT_PORT` | yes  | One span of the broadcaster's vibes at that rung |
+| RTMP / RTMPS                         | `TOON_INGEST_PORT`  | no   | A broadcaster's publish, gated on the stream key |
 
 `/health` is process liveness — "is the origin up enough to answer". It is not a claim about
 ingest: whether a broadcaster is currently supplying vibes will be the station's *now* address,
 which a viber pays for. `/health` sits outside every prefix the connector routes, so it is
 reachable from inside the node and from nowhere else.
+
+## Segments
+
+```
+GET /segments/<rung>/<sequence>.ts   →  200  video/mp2t, Cache-Control: no-store
+                                     →  404  {"error":"unknown_rung",    "message": "…"}
+                                     →  404  {"error":"unknown_segment", "message": "…"}
+```
+
+One MPEG-TS span of the broadcast, encoded at `<rung>` and numbered from zero. The two misses are
+told apart on purpose: a player whose rung has gone falls back to one that exists, and a player
+whose sequence has gone re-syncs to the live edge.
+
+- **The rung comes before the sequence** so that every path a viber can reach at one rung's price
+  sits strictly beneath that rung's own prefix, `/segments/<rung>/`. That is what lets the connector
+  terminate one route per rung at that rung's price, and it is why no address can be reached at
+  another address's price. Anything that is not a segment — `/health` today, the station's *now*
+  tomorrow — sits outside `/segments` entirely.
+- **A segment arrives whole or not at all.** `ffmpeg` writes each span under a temporary name and
+  renames it only once the span is complete; nothing is servable before that rename, and a segment
+  is read whole and sent with its length stated up front. A viber pays once for a span they can
+  actually play.
+- **A segment is bounded to 2 MiB** ([ADR 0001](../../docs/adr/0001-a-segment-is-bounded-so-a-response-cap-cannot-break-it.md)).
+  The bound is arithmetic — a hard bitrate cap times a fixed duration — and the origin measures what
+  it produced as well: a segment over the budget is logged loudly and never served.
+- **The bitrate is a hard cap, not a target.** The encoder runs constrained VBR (a maximum rate plus
+  a short buffer), never average targeting, because average targeting overshoots exactly when the
+  picture gets busy.
+- **Duration is fixed.** A flat per-segment price is only honestly a per-second rate — and a viber's
+  budget only a meaningful control — when every segment covers the same span.
+- **No playlist is served, and nothing free is.** The client daemon stands between the station and
+  the player and synthesizes whatever playlist its player wants over loopback.
+
+Segments are written to `$TOON_DATA_DIR/segments/<rung>/`. Generated media is ignored by
+**directory**, never by extension — an HLS segment is an MPEG-TS `.ts` file, which collides with the
+TypeScript extension. The corollary is that the code lives in `src/segmenter/`, not `src/segments/`:
+`.gitignore`'s `segments/` rule matches a directory of that name anywhere, source included.
+
+**One rung**, `720p` from [`docs/placeholder-numbers.md`](../../docs/placeholder-numbers.md), until
+issue #8 makes the ladder configuration. It is `OriginConfig.rung` programmatically — which is how
+the suite runs a small one — and deliberately has no flag yet rather than one that will change
+shape.
 
 ## Ingest
 
@@ -46,9 +91,9 @@ installed on the broadcaster's box.
   listener speaks plain RTMP and says so loudly at boot. A station reachable from the internet
   mounts one.
 
-Accepted vibes are handed to the `onIngest` callback as an FLV stream — an FLV header followed by
-one tag per audio, video or metadata message, which is what `ffmpeg -i pipe:0` reads. Nothing in
-this repo consumes it yet; the segmenter is issue #7.
+Accepted vibes are handed to the origin's segmenter as an FLV stream — an FLV header followed by one
+tag per audio, video or metadata message, which is what `ffmpeg -i pipe:0` reads. The `onIngest`
+callback sees the same stream, as an extra observer rather than the consumer.
 
 ## The stream key
 
@@ -69,7 +114,8 @@ Flags override environment variables, which override defaults.
 | -------------------- | ----------------------- | --------- | ------------------------------------------------------- |
 | `--segment-port`     | `TOON_SEGMENT_PORT`     | `3100`    | Port the origin serves on. `0` binds an ephemeral port  |
 | `--host`             | `TOON_SEGMENT_HOST`     | `0.0.0.0` | Bind host for that port                                 |
-| `--data-dir`         | `TOON_DATA_DIR`         | `./data`  | Directory the origin owns on disk                       |
+| `--data-dir`         | `TOON_DATA_DIR`         | `./data`  | Directory the origin owns on disk; segments land in `<path>/segments/<rung>/` |
+| `--segment-seconds`  | `TOON_SEGMENT_SECONDS`  | `4`       | How long each segment is, in whole seconds              |
 | `--ingest-port`      | `TOON_INGEST_PORT`      | `1935`    | Port a broadcaster publishes to. `0` binds an ephemeral port |
 | `--ingest-host`      | `TOON_INGEST_HOST`      | `0.0.0.0` | Bind host for the ingest port                           |
 | `--stream-key-file`  | `TOON_STREAM_KEY_FILE`  | —         | Mounted file holding the stream key                     |
@@ -111,9 +157,15 @@ const origin = await startOrigin({
   ingestPort: 0,
   dataDir: '/tmp/station',
   streamKeyFile: '/run/secrets/station.key',
-  onIngest: (session) => session.vibes.pipe(somewhere),
+  // One rung, ordinary configuration. Omitted, it is the 720p placeholder.
+  rung: { name: '480p', height: 480, videoBitrate: 800_000, audioBitrate: 96_000 },
+  segmentSeconds: 4,
 });
-await fetch(`http://127.0.0.1:${origin.config.segmentPort}/health`);
+
+const [rung] = origin.config.rungs;
+await fetch(
+  `http://127.0.0.1:${origin.config.segmentPort}/segments/${rung}/0.ts`
+);
 await origin.stop();
 ```
 
@@ -127,9 +179,16 @@ actually bound (and never the stream key). This is how the suite boots stations 
 and asserts only on what the publishing client sees — because "OBS says it worked" and "OBS says the
 key is wrong" are the only two outcomes a broadcaster ever has.
 
-Nothing in either reaches inside the app: the data directory's layout, the RTMP chunk parser, the
-stream-key comparison, and later the segmenter and the ffmpeg invocation, must all be rewritable
-without touching a test.
+`src/segmenter/segments.test.ts` is the one real seam: it boots the real app on fresh ports against a
+temporary directory, pushes a few seconds of synthetic RTMP — a generated picture and a tone — at
+the real ingest port, and then asserts **entirely over plain HTTP** on what a viber could observe.
+It is deliberately slow, because real encoding is the point: ADR 0001 is a claim about bytes, and a
+mocked segmenter cannot falsify it. Every expected value is a literal in the test rather than read
+back out of the code under test, and the byte bound is asserted against actual encoded bytes.
+
+Nothing in any of them reaches inside the app: the data directory's layout, the RTMP chunk parser,
+the stream-key comparison, the segmenter and the `ffmpeg` argument construction must all be
+rewritable without touching a test.
 
 `ffmpeg`, `ffprobe` and `openssl` must be on PATH — ingest is a wire protocol, and a suite that
 spoke it through a mock would be testing the mock. The RTMPS certificate is generated per run into a

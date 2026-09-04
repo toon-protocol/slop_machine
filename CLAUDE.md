@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin boots and ingests; nothing is encoded or served yet
+## Status: the station origin ingests, encodes and serves — at one rung
 
 This repository is a pnpm workspace with one package — `packages/station-origin`
 (`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
@@ -30,8 +30,10 @@ use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoi
 tsup/esbuild, tested with vitest.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
-[#6](https://github.com/toon-protocol/slop_machine/issues/6)) is boot, answer liveness, and take a
-broadcaster's vibes in:
+[#6](https://github.com/toon-protocol/slop_machine/issues/6),
+[#7](https://github.com/toon-protocol/slop_machine/issues/7)) is the whole paid path at **one
+rung** — boot, answer liveness, take a broadcaster's vibes in, encode and cut them, and serve the
+result by address:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
@@ -41,9 +43,23 @@ broadcaster's vibes in:
   which is exactly the Server/Stream Key pair OBS asks for). The key is checked on the RTMP
   `publish` command, before a byte is read or transcoded, and a wrong or absent key is answered with
   an RTMP error status and the socket closed, so it shows up in OBS at once. Ingest is
-  authenticated and **never paid**. Accepted vibes are handed to an `onIngest` callback as an FLV
-  stream — the seam the segmenter ([#7](https://github.com/toon-protocol/slop_machine/issues/7))
-  will attach to. Nothing consumes it yet.
+  authenticated and **never paid**. Accepted vibes go to the origin's own segmenter as an FLV
+  stream; the `onIngest` callback sees the same stream as an extra observer.
+- `GET /segments/<rung>/<sequence>.ts` on the segment port — one MPEG-TS span of the broadcast at
+  that rung, `200` with `Content-Type: video/mp2t`. A rung the station does not offer and a
+  sequence it does not hold are both `404`, told apart by an `error` of `unknown_rung` or
+  `unknown_segment`, because a player whose rung has gone falls back and a player whose sequence has
+  gone re-syncs. **The rung comes before the sequence** so every path a viber can reach at one
+  rung's price sits strictly beneath that rung's own prefix, `/segments/<rung>/` — one connector
+  route per rung, and no address reachable at another address's price. Anything that is not a
+  segment sits outside `/segments` entirely. The origin supervises a child `ffmpeg` that cuts the
+  vibes into **fixed-duration** segments at a **hard bitrate cap** (constrained VBR — a maximum rate
+  plus a short buffer, never average targeting), writes each span under a temporary name and renames
+  it only once complete, and serves it whole with its length stated. A segment over the 2 MiB budget
+  is logged loudly and never served. **No playlist is served** and nothing free is: the client
+  daemon synthesizes whatever its player needs over loopback. There is one rung, `720p` from the
+  placeholder numbers; the configurable ladder is
+  [#8](https://github.com/toon-protocol/slop_machine/issues/8).
 
 ### Ports, honestly, for what exists so far
 
@@ -61,10 +77,13 @@ The origin binds two listeners and they are not alike:
 ### Configuration
 
 Flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
-`--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`, `--ingest-port`/`TOON_INGEST_PORT`,
+`--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`,
+`--segment-seconds`/`TOON_SEGMENT_SECONDS`, `--ingest-port`/`TOON_INGEST_PORT`,
 `--ingest-host`/`TOON_INGEST_HOST`, `--ingest-tls-cert`/`TOON_INGEST_TLS_CERT`,
 `--ingest-tls-key`/`TOON_INGEST_TLS_KEY`. Port `0` binds an ephemeral port, which is how the suite
-runs stations side by side.
+runs stations side by side. Segments land in `<data dir>/segments/<rung>/`. The rung itself is
+`OriginConfig.rung` programmatically and has deliberately **no flag yet** — the ladder is #8, and a
+flag now would change shape then.
 
 The **stream key** is the exception with no default: `--stream-key-file`/`TOON_STREAM_KEY_FILE`
 names a mounted file, or `TOON_STREAM_KEY` carries the value. There is deliberately no flag for the
@@ -73,18 +92,20 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** `ffmpeg`, the rung ladder, segments, retention,
-the station's *now* and the `deploy/` bundle are
-[#7–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
-started. There is no `deploy/` bundle, no published image, no CI and no devnet node — do not infer
-those commands from the sibling repos.
+**Everything else in the design is still design.** The configurable rung ladder and its startup
+byte-budget refusal, the station's *now*, retention, reconnect, encode-lag reporting and the
+`deploy/` bundle are [#8–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot
+app has not been started. There is no `deploy/` bundle, no published image, no CI and no devnet
+node — do not infer those commands from the sibling repos.
 
 What does exist, all run from the repo root:
 
 ```
 pnpm install
 pnpm build       # bundles the origin to packages/station-origin/dist (dist/cli.js is the entrypoint)
-pnpm test        # vitest: boots the real origin on fresh ports and pushes real RTMP at it
+pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTMP at it, and
+                 # pulls the encoded segments back over HTTP. Deliberately slow — real encoding
+                 # is the point, because ADR 0001 is a claim about bytes
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
 pnpm format      # prettier
@@ -92,12 +113,13 @@ docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/stat
 ```
 
 `pnpm test` needs `ffmpeg`, `ffprobe` and `openssl` on PATH: ingest is a wire protocol, and a suite
-that spoke it through a mock would be testing the mock.
+that spoke it through a mock would be testing the mock. The **image** needs `ffmpeg` too — the
+origin owns its encoder, so the runtime stage installs it.
 
 Tests assert at the app's boundary only — they boot the real app and speak HTTP and real RTMP at it.
-Nothing reaches into the data directory's layout, the RTMP chunk parser or the stream-key
-comparison, and nothing may reach into the segmenter or the `ffmpeg` invocation once those exist.
-Replace this section in the same commit that invalidates it.
+Nothing reaches into the data directory's layout, the RTMP chunk parser, the stream-key comparison,
+the segmenter or the `ffmpeg` argument construction; all of them must stay rewritable without
+touching a test. Replace this section in the same commit that invalidates it.
 
 The design is settled and written down; the open questions the README used to list — which
 direction pays, the unit of payment, and how discovery works — are all answered. Vibers pay, per
@@ -150,7 +172,9 @@ default in code, never a literal in a test.
   key** — the rotation is what closes the exposure.
 - Do not add a `*.ts` ignore rule. HLS segments are MPEG-TS `.ts` files, which collides with the
   TypeScript extension; generated media is ignored by directory (`segments/`, `recordings/`) for
-  that reason.
+  that reason. The corollary: `segments/` matches a directory of that name anywhere, so **no source
+  directory may be called `segments`** — the origin's segmenter is `src/segmenter/`. Rename the
+  source, never the rule.
 
 ## Cross-repo dependencies
 

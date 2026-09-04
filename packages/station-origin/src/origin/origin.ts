@@ -10,8 +10,8 @@
  * `relay` uses — and it is what makes an ordinary HTTP app monetizable
  * without knowing ILP exists.
  *
- * What exists today (issues #5 and #6) is the boot path, one address, and the
- * door a broadcaster's vibes come in through:
+ * What exists today (issues #5, #6 and #7) is the whole paid path, end to end,
+ * at one rung:
  *
  *   - `GET /health` on the segment port: liveness, for a supervisor inside the
  *     node. It requires no payment header, reads none, and echoes none. It is
@@ -25,8 +25,19 @@
  *     is the origin's own listener that terminates TLS and checks the key.
  *     Ingest is authenticated and never paid.
  *
- * The rung ladder, segments, retention and the station's *now* are issues
- * #7-#14 and are not here yet.
+ *   - `GET /segments/<rung>/<sequence>.ts` on the segment port: one span of a
+ *     broadcaster's vibes, encoded at a rung and served whole. Every path a
+ *     viber can reach sits strictly beneath that rung's own prefix, so the
+ *     connector in front can terminate one route per rung at that rung's price
+ *     and no address can be reached at another address's price.
+ *
+ * The origin supervises the `ffmpeg` that produces those segments: owning the
+ * encoder rather than depending on a separately-scheduled one is what keeps
+ * ingest, encoding and serving inside a single testable surface.
+ *
+ * The configurable ladder and its startup byte-budget refusal (#8), the
+ * station's *now* (#9), retention (#10), reconnect (#11) and encode-lag
+ * reporting (#12) are not here yet.
  *
  * The two ports and the data directory are configuration rather than
  * constants: the integration suite boots real instances on fresh ports against
@@ -51,6 +62,16 @@ import {
   type IngestTlsConfig,
 } from '../ingest/ingest.js';
 import { resolveStreamKey } from '../ingest/stream-key.js';
+import {
+  createSegmenter,
+  type SegmenterInstance,
+} from '../segmenter/segmenter.js';
+import { segmentRoutes, SEGMENTS_ROUTE_PREFIX } from '../segmenter/routes.js';
+import {
+  DEFAULT_RUNG,
+  DEFAULT_SEGMENT_SECONDS,
+  type Rung,
+} from '../segmenter/rung.js';
 import { VERSION } from '../version.js';
 
 // ---------- Defaults ----------
@@ -71,6 +92,7 @@ export const DEFAULT_HOST = '0.0.0.0';
 export const DEFAULT_DATA_DIR = './data';
 
 export { DEFAULT_INGEST_PORT, DEFAULT_INGEST_HOST };
+export { DEFAULT_RUNG, DEFAULT_SEGMENT_SECONDS };
 
 // ---------- Configuration ----------
 
@@ -122,9 +144,27 @@ export interface OriginConfig {
   ingestTls?: IngestTlsConfig | undefined;
 
   /**
+   * The rung this station offers its vibes at (default: the `720p` placeholder).
+   *
+   * One rung, deliberately: the configurable ladder, and the startup refusal
+   * that re-runs ADR 0001's byte arithmetic over it, are issue #8. The suite
+   * runs a deliberately small rung, which costs nothing to arrange because
+   * this is ordinary configuration.
+   */
+  rung?: Rung;
+  /**
+   * Fixed segment duration, in seconds (default: 4).
+   *
+   * Fixed is the point: a flat per-segment price is only honestly a per-second
+   * rate, and a viber's budget only a meaningful control, when every segment
+   * covers the same span (ADR 0001).
+   */
+  segmentSeconds?: number;
+
+  /**
    * Called once per accepted publish, with the broadcaster's vibes attached as
-   * an FLV stream. This is the seam the segmenter (issue #7) attaches to.
-   * Omitted, accepted vibes are counted and discarded.
+   * an FLV stream. The origin's own segmenter is already attached to them;
+   * this is an extra observer, not the consumer.
    */
   onIngest?: ((session: IngestSession) => void) | undefined;
 }
@@ -147,6 +187,14 @@ export interface ResolvedOriginConfig {
    * secret the origin holds; it is never reported back, logged, or echoed.
    */
   ingestTls: boolean;
+  /**
+   * The rungs this station offers, by name — one, until issue #8. Each is
+   * served beneath `/segments/<rung>/`, which is the prefix its price attaches
+   * to.
+   */
+  rungs: readonly string[];
+  /** The fixed duration every segment covers, in seconds. */
+  segmentSeconds: number;
 }
 
 /** A running station origin returned by `startOrigin()`. */
@@ -213,6 +261,8 @@ function livenessResponse(): LivenessResponse {
  * @returns A running `OriginInstance`.
  * @throws StreamKeyError if no stream key is configured, or both are.
  * @throws IngestTlsError if a configured certificate or key cannot be read.
+ * @throws RungError if the rung cannot be addressed, or the segment duration
+ * is not a whole number of seconds.
  *
  * @example
  * ```ts
@@ -241,19 +291,39 @@ export async function startOrigin(
   // cannot create is a refuse-to-start, never a degraded run.
   mkdirSync(dataDir, { recursive: true });
 
+  // Likewise before anything binds: a rung the origin cannot address is a
+  // station whose vibes could be reached at another rung's price.
+  const rung = config.rung ?? DEFAULT_RUNG;
+  const segmentSeconds = config.segmentSeconds ?? DEFAULT_SEGMENT_SECONDS;
+  const segmenter = createSegmenter({
+    dataDir,
+    rungs: [rung],
+    segmentSeconds,
+  });
+
   const ingest = await startIngest({
     streamKey,
     port: config.ingestPort ?? DEFAULT_INGEST_PORT,
     host: config.ingestHost ?? DEFAULT_INGEST_HOST,
     tls: config.ingestTls,
-    onPublish: config.onIngest,
+    onPublish: (session) => {
+      // The origin's own encoder attaches first: cutting the vibes into
+      // segments is what the station is for, and any other observer is extra.
+      segmenter.cut(session.vibes);
+      config.onIngest?.(session);
+    },
   });
 
   const app = new Hono();
 
   // Liveness. No middleware runs before it, nothing reads a request header,
-  // and the response carries only what a supervisor needs.
+  // and the response carries only what a supervisor needs. It sits outside
+  // every prefix the connector routes, which is what keeps it unpaid and
+  // reachable from inside the node only.
   app.get('/health', (c) => c.json(livenessResponse()));
+
+  // The paid surface: one prefix per rung, strictly beneath this one.
+  app.route(SEGMENTS_ROUTE_PREFIX, segmentRoutes(segmenter));
 
   let server: ServerType;
   let port: number;
@@ -263,6 +333,7 @@ export async function startOrigin(
     // Half a station is not a station: an origin that ingests but cannot serve
     // would take a broadcaster live to nobody.
     await ingest.stop();
+    await segmenter.stop();
     throw error;
   }
 
@@ -273,10 +344,15 @@ export async function startOrigin(
     ingestPort: ingest.port,
     ingestHost: ingest.host,
     ingestTls: ingest.tls,
+    rungs: segmenter.rungs.map((offered) => offered.name),
+    segmentSeconds: segmenter.segmentSeconds,
   };
 
   console.log(
     `[station-origin] v${VERSION} serving on http://${host}:${port} (data dir: ${dataDir})`
+  );
+  console.log(
+    `[station-origin] rung "${rung.name}" at ${String(rung.videoBitrate)} bit/s, served from ${SEGMENTS_ROUTE_PREFIX}/${rung.name}/<sequence>.ts in ${String(segmentSeconds)}s segments`
   );
 
   let running = true;
@@ -291,26 +367,28 @@ export async function startOrigin(
     async stop() {
       if (!running) return;
       running = false;
-      await stopBoth(server, ingest);
+      await stopAll(server, ingest, segmenter);
     },
     config: resolvedConfig,
   };
 }
 
 /**
- * Stop both listeners, and report the first failure only after both have been
- * asked to stop — a segment port that will not close must not leave the ingest
- * port open behind it.
+ * Stop both listeners and the encoder, and report the first failure only after
+ * all three have been asked to stop — a segment port that will not close must
+ * not leave the ingest port open, or a child `ffmpeg` running, behind it.
  */
-async function stopBoth(
+async function stopAll(
   server: ServerType,
-  ingest: IngestInstance
+  ingest: IngestInstance,
+  segmenter: SegmenterInstance
 ): Promise<void> {
   const results = await Promise.allSettled([
     new Promise<void>((resolveStop, rejectStop) => {
       server.close((err) => (err ? rejectStop(err) : resolveStop()));
     }),
     ingest.stop(),
+    segmenter.stop(),
   ]);
   for (const result of results) {
     if (result.status === 'rejected') throw result.reason;

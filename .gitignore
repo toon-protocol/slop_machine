@@ -65,6 +65,12 @@ testnet-wallets.json
 # extension — a `*.ts` rule here would silently ignore every source file if
 # this repo is written in TypeScript (as relay and toon-client are). Do not
 # add one. Keep generated media confined to these paths instead.
+#
+# The corollary: `segments/` matches a directory of that name ANYWHERE, so no
+# source directory may be called `segments`. The origin's segmenter lives in
+# `packages/station-origin/src/segmenter/` for exactly this reason — an earlier
+# `src/segments/` was silently untracked, and the image build was what noticed.
+# Do not weaken the rule to make a source directory visible; rename it.
 segments/
 recordings/
 media-out/

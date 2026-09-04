@@ -29,6 +29,8 @@ import {
   DEFAULT_DATA_DIR,
   DEFAULT_INGEST_PORT,
   DEFAULT_INGEST_HOST,
+  DEFAULT_RUNG,
+  DEFAULT_SEGMENT_SECONDS,
 } from './origin.js';
 import type { OriginConfig } from './origin.js';
 import { VERSION } from '../version.js';
@@ -47,7 +49,13 @@ Options:
   --host <host>          Bind host for that port (default: ${DEFAULT_HOST};
                          env: TOON_SEGMENT_HOST)
   --data-dir <path>      Directory the origin owns on disk (default:
-                         ${DEFAULT_DATA_DIR}; env: TOON_DATA_DIR)
+                         ${DEFAULT_DATA_DIR}; env: TOON_DATA_DIR). Segments are
+                         written to <path>/segments/<rung>/
+  --segment-seconds <n>  How long each segment is, in whole seconds (default:
+                         ${DEFAULT_SEGMENT_SECONDS}; env: TOON_SEGMENT_SECONDS). Fixed on
+                         purpose: a flat per-segment price is only honestly a
+                         per-second rate when every segment covers the same
+                         span
   --ingest-port <port>   Port a broadcaster publishes to (default:
                          ${DEFAULT_INGEST_PORT}; env: TOON_INGEST_PORT). This port IS
                          published by the station node — stock Caddy does not
@@ -72,6 +80,13 @@ echoed, or reported back. A broadcaster publishes with it as their stream name:
   rtmps://<station>:${DEFAULT_INGEST_PORT}/live/<stream key>
 
 which is exactly the Server/Stream Key pair OBS asks for.
+
+The station offers one rung, ${DEFAULT_RUNG.name}, and serves its segments at
+
+  /segments/${DEFAULT_RUNG.name}/<sequence>.ts
+
+on the segment port. The configurable rung ladder is not built yet, so there is
+deliberately no flag for it rather than one that will change shape.
 `.trim()
   );
 }
@@ -84,6 +99,18 @@ function parsePort(raw: string, source: string): number {
     process.exit(1);
   }
   return port;
+}
+
+/** Parse a segment duration or fail closed — a bad number must not become 0. */
+function parseSeconds(raw: string, source: string): number {
+  const seconds = Number(raw);
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    console.error(
+      `[station-origin] ${source} must be a whole number of seconds: ${raw}`
+    );
+    process.exit(1);
+  }
+  return seconds;
 }
 
 /** A config error the operator can act on, rather than a stack trace. */
@@ -102,6 +129,7 @@ function configFromEnvironment(
       'segment-port': { type: 'string' },
       host: { type: 'string' },
       'data-dir': { type: 'string' },
+      'segment-seconds': { type: 'string' },
       'ingest-port': { type: 'string' },
       'ingest-host': { type: 'string' },
       'stream-key-file': { type: 'string' },
@@ -137,6 +165,14 @@ function configFromEnvironment(
 
   const dataDir = values['data-dir'] ?? env['TOON_DATA_DIR'];
   if (dataDir) config.dataDir = dataDir;
+
+  const secondsFlag = values['segment-seconds'];
+  const secondsEnv = env['TOON_SEGMENT_SECONDS'];
+  if (secondsFlag !== undefined) {
+    config.segmentSeconds = parseSeconds(secondsFlag, '--segment-seconds');
+  } else if (secondsEnv !== undefined && secondsEnv !== '') {
+    config.segmentSeconds = parseSeconds(secondsEnv, 'TOON_SEGMENT_SECONDS');
+  }
 
   const ingestPortFlag = values['ingest-port'];
   const ingestPortEnv = env['TOON_INGEST_PORT'];
@@ -197,7 +233,9 @@ main().catch((err: unknown) => {
   // what is wrong and stop, rather than printing a stack over it.
   if (
     err instanceof Error &&
-    (err.name === 'StreamKeyError' || err.name === 'IngestTlsError')
+    (err.name === 'StreamKeyError' ||
+      err.name === 'IngestTlsError' ||
+      err.name === 'RungError')
   ) {
     console.error(`[station-origin] ${err.name}: ${err.message}`);
     process.exit(1);
