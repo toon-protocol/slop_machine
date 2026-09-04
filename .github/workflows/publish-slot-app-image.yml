@@ -1,16 +1,15 @@
-name: Publish station origin image
+name: Publish slot app image
 
-# Builds the station origin image (packages/station-origin/Dockerfile) and
-# pushes it to GHCR as ghcr.io/toon-protocol/station-origin. Same shape as
-# relay's publish-relay-image.yml and store's publish-store-image.yml — one
+# Builds the slot app image (packages/slot-app/Dockerfile) and pushes it to
+# GHCR as ghcr.io/toon-protocol/slot-app. Same shape as
+# publish-station-origin-image.yml beside it, and as relay's and store's — one
 # publish workflow per app image, no fleet-specific machinery of its own.
 #
-# THIS REPOSITORY PUBLISHES APP IMAGES ONLY, one workflow each: this one and
-# publish-slot-app-image.yml beside it. It publishes NO CONNECTOR — the
+# This repository publishes exactly two images, both of them apps from
+# `packages/`: the station origin and this one. It publishes NO CONNECTOR — the
 # connector is the stock GHCR image on an immutable pin
-# (deploy/docker-compose.yml's `connector.image`, the pin of record); nothing
-# here builds or pushes one, and deploy/bundle.test.ts fails the build if that
-# ever changes.
+# (deploy/docker-compose.yml's `connector.image`, the pin of record), and
+# deploy/bundle.test.ts fails the build if that ever changes.
 #
 # `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
 # publish semver tags for pinning, plus an immutable sha tag.
@@ -18,25 +17,20 @@ name: Publish station origin image
 # `release` is this image's instance of the fleet-wide moving-tag convention
 # (toon-meta#403, relay and store run the same one): a box runs a label-scoped
 # Watchtower that watches `:release` rather than `:latest`, so an auto-redeploy
-# only ever follows a commit that landed on main and built here. It is the tag
-# deploy/docker-compose.yml defaults STATION_ORIGIN_IMAGE to, and the one
-# deploy/docker-compose.watchtower.yml describes Watchtower following. The
-# immutable `:sha-*` tag stays as the pinning/rollback handle — pointing
-# STATION_ORIGIN_IMAGE at one and running `up -d` puts a specific build back.
+# only ever follows a commit that landed on main and built here. The immutable
+# `:sha-*` tag stays as the pinning/rollback handle.
 #
-# A recreate of the origin drops the broadcaster's publish and the encoder with
-# it, so this workflow moving `:release` is a few seconds of stall for every
-# station running the Watchtower overlay. That is stated in that overlay's
-# header; it is the reason a broadcaster mid-broadcast may choose not to run it.
+# A recreate of the slot app is not the outage a recreate of a station origin
+# is — it drops no broadcaster's publish, and the peerings and routes it wrote
+# are the connector's, not this process's. It is a few seconds in which a
+# broadcaster's purchase would not be answered.
 #
-# ci.yml builds this same image on every PR (`image-build`) but pushes nothing,
-# so a Dockerfile that cannot build is caught BEFORE merge rather than leaving
-# `:release` silently pointing at the previous build.
+# ci.yml builds this same image on every PR (`slot-app-image-build`) but pushes
+# nothing, so a Dockerfile that cannot build is caught BEFORE merge rather than
+# leaving `:release` silently pointing at the previous build.
 #
 # Single-arch (amd64, the runner's own): the devnet boxes are x86, and no
-# consumer of this image asks for arm64. Adding platforms here without a real
-# consumer would multiply a build that already installs ffmpeg into the
-# runtime stage.
+# consumer of this image asks for arm64.
 
 on:
   push:
@@ -44,7 +38,7 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-concurrency: publish-station-origin-image-${{ github.ref }}
+concurrency: publish-slot-app-image-${{ github.ref }}
 
 jobs:
   build-push:
@@ -70,7 +64,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/station-origin
+          images: ghcr.io/${{ github.repository_owner }}/slot-app
           # `latest` and `release` both track main (release is the Watchtower
           # watch target, see the header above); semver tags publish on vX.Y.Z;
           # sha tags give an immutable handle. `enable={{is_default_branch}}`
@@ -91,7 +85,7 @@ jobs:
           # package.json, pnpm-workspace.yaml, pnpm-lock.yaml and
           # tsconfig.json, which is how the frozen install resolves.
           context: .
-          file: packages/station-origin/Dockerfile
+          file: packages/slot-app/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

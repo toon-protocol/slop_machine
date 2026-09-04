@@ -4,10 +4,10 @@ name: CI
 # `build` job that runs the whole verification set, the shared no-op merge
 # guard, and one aggregate `CI OK` check that is the single required context.
 #
-# It is also what makes publish-station-origin-image.yml safe to run on merge:
-# `image-build` builds the image exactly as that workflow builds it, so a
-# Dockerfile that cannot build fails a PR instead of leaving `:release`
-# silently pointing at the previous build.
+# It is also what makes the publish workflows safe to run on merge: there is
+# one image-build job per published image, each building it exactly as its
+# publish workflow builds it, so a Dockerfile that cannot build fails a PR
+# instead of leaving `:release` silently pointing at the previous build.
 
 on:
   pull_request:
@@ -164,10 +164,101 @@ jobs:
       - name: It carries no operator key material
         run: pnpm test:image
 
+  # The slot app image, built the way publish-slot-app-image.yml builds it, and
+  # for the same reason `image-build` exists: that workflow only runs on push
+  # to main, so a Dockerfile that cannot build would be discovered AFTER merge
+  # with `:release` left pointing at the previous build. Its own COPY list is
+  # explicit too, so a new build-time file at the package root breaks the image
+  # while every other gate stays green.
+  #
+  # A separate job rather than a step of `image-build`: it shares nothing with
+  # the origin's image and runs concurrently instead. Build only — no registry
+  # login, no push. The key-material guard (`pnpm test:image`) covers both
+  # images and runs in `image-build`, which is the job that already has the
+  # planting and the daemon.
+  slot-app-image-build:
+    name: Slot app image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the slot app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/slot-app/Dockerfile
+          push: false
+          load: true
+          tags: slot-app:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is the thing that ships, so assert what it reports rather
+      # than trusting that a successful build implies a working one.
+      - name: It reports the version package.json declares
+        run: |
+          set -euo pipefail
+          EXPECTED=$(jq -r .version packages/slot-app/package.json)
+          ACTUAL=$(docker run --rm --entrypoint node slot-app:ci \
+            -e "import('/app/dist/index.js').then(m => process.stdout.write(m.VERSION))")
+          echo "package.json=$EXPECTED image=$ACTUAL"
+          [ "$EXPECTED" = "$ACTUAL" ] || {
+            echo "::error::the image reports $ACTUAL but package.json declares $EXPECTED"
+            exit 1
+          }
+
+      # The bundled entrypoint has to RUN inside the image, not merely be in
+      # it. Both operator credentials are mounted files with no default, so the
+      # app refuses to start without them — which is exactly what makes this a
+      # usable smoke test: a refusal naming the missing credential proves the
+      # bundle loaded, and a stack trace or a silent start does not.
+      - name: Its bundled entrypoint runs, and refuses without its credentials
+        run: |
+          set -euo pipefail
+          REFUSAL=$(docker run --rm slot-app:ci 2>&1 || true)
+          echo "$REFUSAL"
+          case "$REFUSAL" in
+            *OperatorCredentialError*TOON_OPERATOR_WRITE_KEY_FILE*) ;;
+            *)
+              echo "::error::the image did not refuse to start naming the missing operator write key"
+              exit 1
+              ;;
+          esac
+
+      # And with both mounted it comes up and answers liveness — unpriced, with
+      # no payment header sent and none required.
+      - name: It answers liveness with both credentials mounted
+        run: |
+          set -euo pipefail
+          SECRETS=$(mktemp -d)
+          openssl rand -hex 32 > "$SECRETS/operator-write.key"
+          openssl rand -hex 32 > "$SECRETS/operator-bearer.token"
+          # The image runs unprivileged as `node`, and `mktemp -d` is 0700 —
+          # without this the container cannot traverse the mount and the
+          # refusal we would see is the one about an unreadable file.
+          chmod 755 "$SECRETS"
+          chmod 644 "$SECRETS/operator-write.key" "$SECRETS/operator-bearer.token"
+          docker run -d --name slot-app-ci \
+            -v "$SECRETS:/run/secrets:ro" \
+            -e TOON_OPERATOR_WRITE_KEY_FILE=/run/secrets/operator-write.key \
+            -e TOON_OPERATOR_BEARER_TOKEN_FILE=/run/secrets/operator-bearer.token \
+            -p 127.0.0.1:3200:3200 slot-app:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3200/health > /tmp/health.json; then break; fi
+            sleep 1
+          done
+          docker logs slot-app-ci
+          docker rm -f slot-app-ci > /dev/null
+          rm -rf "$SECRETS"
+          cat /tmp/health.json
+          jq -e '.status == "healthy" and .service == "slot-app"' /tmp/health.json
+
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
-    needs: [build, no-op-merge, image-build]
+    needs: [build, no-op-merge, image-build, slot-app-image-build]
     if: always()
     steps:
       # Fleet-wide aggregate required check (toon-meta#279): this job is the

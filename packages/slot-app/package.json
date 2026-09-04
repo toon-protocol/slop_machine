@@ -1,0 +1,50 @@
+{
+  "name": "@toon-protocol/slot-app",
+  "version": "0.1.0",
+  "description": "The slot app: it sells the routing-table entries that make a station reachable from a hub, behind the connector",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "slot-app": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "toon",
+    "ilp",
+    "hub",
+    "slot",
+    "broadcast"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/toon-protocol/slop_machine.git",
+    "directory": "packages/slot-app"
+  },
+  "author": "ALLiDoizCode",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.0.0",
+    "hono": "^4.11.10"
+  }
+}

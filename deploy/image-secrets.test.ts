@@ -1,7 +1,8 @@
 /**
- * Proves an operator's key material cannot reach the origin's build context or
- * its published image — by planting dummy key material where `deploy/README.md`
- * tells a broadcaster to generate the real thing, and then building.
+ * Proves an operator's key material cannot reach a build context or any image
+ * this repository publishes — by planting dummy key material where
+ * `deploy/README.md` tells a broadcaster to generate the real thing, and then
+ * building.
  *
  * WHY THIS IS NOT IN `pnpm test`. It needs a Docker daemon and it builds
  * images; the origin's own image installs ffmpeg and two dependency trees, so
@@ -25,13 +26,16 @@
  *     arrived. Delete the key-material patterns from `.dockerignore` and this
  *     test fails.
  *
- *  2. THE IMAGE. The end of user story 30 of #3: the key is in no published
- *     image. Today the origin's Dockerfile COPYs an explicit path list naming
- *     neither `deploy/` nor the context root, so this holds by that list AND by
- *     `.dockerignore` — which is the point of defence in depth, and also why
- *     breaking one of the two alone leaves this test passing. Break both — a
- *     `COPY . .` with the ignore rules gone, which is exactly how a Dockerfile
- *     gets shortened — and it fails.
+ *  2. THE IMAGES. The end of user story 30 of #3: the key is in no published
+ *     image. Every image this repository publishes is built here — the station
+ *     origin's and the slot app's — because "no published image carries a key"
+ *     is a claim about all of them and an image added later is exactly the one
+ *     nobody would think to check. Today both Dockerfiles COPY an explicit path
+ *     list naming neither `deploy/` nor the context root, so this holds by that
+ *     list AND by `.dockerignore` — which is the point of defence in depth, and
+ *     also why breaking one of the two alone leaves this test passing. Break
+ *     both — a `COPY . .` with the ignore rules gone, which is exactly how a
+ *     Dockerfile gets shortened — and it fails.
  *
  * The planted files are dummies containing a canary string and nothing else,
  * every one of them matches a `.gitignore` rule (the first test asserts that,
@@ -49,8 +53,24 @@ import { promisify } from 'node:util';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
-/** The origin's Dockerfile, built from the repo root — as the bundle builds it. */
-const ORIGIN_DOCKERFILE_PATH = 'packages/station-origin/Dockerfile';
+/**
+ * Every image this repository publishes, each built from the repo root the way
+ * its own publish workflow builds it. One entry per
+ * `.github/workflows/publish-*-image.yml`: an image that ships without an entry
+ * here is an image nobody has asked this question of.
+ */
+const PUBLISHED_IMAGES: { name: string; dockerfile: string; why: string }[] = [
+  {
+    name: 'station-origin',
+    dockerfile: 'packages/station-origin/Dockerfile',
+    why: 'a stream key in one is a station anybody can broadcast on, and a settlement key in one moves money',
+  },
+  {
+    name: 'slot-app',
+    dockerfile: 'packages/slot-app/Dockerfile',
+    why: "an operator write key in one mutates a hub's routing table, and an operator bearer token in one reads it",
+  },
+];
 
 /**
  * The string every planted dummy carries. Distinctive enough that a match
@@ -72,7 +92,11 @@ const CANARY_PATTERN = `${CANARY_PREFIX}-[0-9a-f]+`;
  */
 const RUN_ID = randomBytes(6).toString('hex');
 const PROBE_TAG = `slop-machine-build-context-probe:${RUN_ID}`;
-const ORIGIN_TAG = `slop-machine-origin-image-secrets:${RUN_ID}`;
+
+/** The tag one published image is built under for this run. */
+function tagOf(image: string): string {
+  return `slop-machine-image-secrets-${image}:${RUN_ID}`;
+}
 
 /**
  * A probe image whose whole job is to hold the build context as the daemon
@@ -186,7 +210,7 @@ async function run(command: string, args: string[]): Promise<string> {
   }
 }
 
-describe('operator key material and the origin image', () => {
+describe('operator key material and the images this repo publishes', () => {
   beforeAll(async () => {
     try {
       await run('docker', ['info', '--format', '{{.ServerVersion}}']);
@@ -221,7 +245,10 @@ describe('operator key material and the origin image', () => {
       rmSync(resolve(REPO_ROOT, path), { force: true });
     }
     if (scratch) rmSync(scratch, { recursive: true, force: true });
-    for (const tag of [PROBE_TAG, ORIGIN_TAG]) {
+    for (const tag of [
+      PROBE_TAG,
+      ...PUBLISHED_IMAGES.map((image) => tagOf(image.name)),
+    ]) {
       try {
         await run('docker', ['image', 'rm', '-f', tag]);
       } catch {
@@ -293,63 +320,71 @@ describe('operator key material and the origin image', () => {
       PROBE_TAG,
       'sh',
       '-c',
-      'ls /ctx/pnpm-lock.yaml /ctx/packages/station-origin/src/origin/origin.ts',
+      'ls /ctx/pnpm-lock.yaml /ctx/packages/station-origin/src/origin/origin.ts /ctx/packages/slot-app/src/slot-app/slot-app.ts',
     ]);
-    expect(
-      present,
-      '.dockerignore now excludes the origin source or the lockfile — the build context has to hold what the image is built from'
-    ).toContain('origin.ts');
-  });
-
-  it('publishes no image containing key material', async () => {
-    // Built the way CLAUDE.md and the Dockerfile's own header say to build it:
-    // from the repo root, with an operator's keys sitting beside the bundle.
-    await run('docker', [
-      'build',
-      '--load',
-      '-f',
-      ORIGIN_DOCKERFILE_PATH,
-      '-t',
-      ORIGIN_TAG,
-      '.',
-    ]);
-
-    // `docker export` flattens the image to the filesystem a container of it
-    // starts with — every byte the image actually ships, whichever layer put
-    // it there and whatever it ended up named. Grepping that asks the question
-    // user story 30 asks: is the operator's key in the image?
-    const filesystemTar = join(scratch, 'origin-filesystem.tar');
-    const container = (await run('docker', ['create', ORIGIN_TAG])).trim();
-    let inFilesystem: string[];
-    try {
-      await run('docker', ['export', '--output', filesystemTar, container]);
-      inFilesystem = leaksIn(
-        await run('sh', [
-          '-c',
-          `grep -a -o -h -E -e '${CANARY_PATTERN}' ${filesystemTar} || true`,
-        ])
-      );
-    } finally {
-      await run('docker', ['rm', '-f', container]);
-      rmSync(filesystemTar, { force: true });
+    for (const source of ['origin.ts', 'slot-app.ts']) {
+      expect(
+        present,
+        `.dockerignore now excludes ${source} or the lockfile — the build context has to hold what the images are built from`
+      ).toContain(source);
     }
-
-    expect(
-      inFilesystem,
-      `the origin image ships ${JSON.stringify(inFilesystem)}. A published station-origin image is public: a stream key in one is a station anybody can broadcast on, and a settlement key in one moves money. The Dockerfile COPYs an explicit path list for this reason — do not replace it with a whole-directory copy.`
-    ).toEqual([]);
-
-    // A key does not have to be in the filesystem to be in the image: a build
-    // argument or an ENV is carried in the image's own metadata, which anyone
-    // who pulls it can read back without ever running it.
-    const inMetadata = leaksIn(
-      (await run('docker', ['history', '--no-trunc', ORIGIN_TAG])) +
-        (await run('docker', ['image', 'inspect', ORIGIN_TAG]))
-    );
-
-    expect(
-      inMetadata,
-      `the origin image's metadata names ${JSON.stringify(inMetadata)} — an ARG or ENV is readable from a pulled image without running it`
-    ).toEqual([]);
   });
+
+  it.each(PUBLISHED_IMAGES)(
+    'publishes no $name image containing key material',
+    async ({ name, dockerfile, why }) => {
+      const tag = tagOf(name);
+
+      // Built the way CLAUDE.md and the Dockerfile's own header say to build
+      // it: from the repo root, with an operator's keys sitting beside the
+      // bundle.
+      await run('docker', [
+        'build',
+        '--load',
+        '-f',
+        dockerfile,
+        '-t',
+        tag,
+        '.',
+      ]);
+
+      // `docker export` flattens the image to the filesystem a container of it
+      // starts with — every byte the image actually ships, whichever layer put
+      // it there and whatever it ended up named. Grepping that asks the
+      // question user story 30 asks: is the operator's key in the image?
+      const filesystemTar = join(scratch, `${name}-filesystem.tar`);
+      const container = (await run('docker', ['create', tag])).trim();
+      let inFilesystem: string[];
+      try {
+        await run('docker', ['export', '--output', filesystemTar, container]);
+        inFilesystem = leaksIn(
+          await run('sh', [
+            '-c',
+            `grep -a -o -h -E -e '${CANARY_PATTERN}' ${filesystemTar} || true`,
+          ])
+        );
+      } finally {
+        await run('docker', ['rm', '-f', container]);
+        rmSync(filesystemTar, { force: true });
+      }
+
+      expect(
+        inFilesystem,
+        `the ${name} image ships ${JSON.stringify(inFilesystem)}. A published image is public: ${why}. The Dockerfile COPYs an explicit path list for this reason — do not replace it with a whole-directory copy.`
+      ).toEqual([]);
+
+      // A key does not have to be in the filesystem to be in the image: a
+      // build argument or an ENV is carried in the image's own metadata, which
+      // anyone who pulls it can read back without ever running it.
+      const inMetadata = leaksIn(
+        (await run('docker', ['history', '--no-trunc', tag])) +
+          (await run('docker', ['image', 'inspect', tag]))
+      );
+
+      expect(
+        inMetadata,
+        `the ${name} image's metadata names ${JSON.stringify(inMetadata)} — an ARG or ENV is readable from a pulled image without running it`
+      ).toEqual([]);
+    }
+  );
 });
