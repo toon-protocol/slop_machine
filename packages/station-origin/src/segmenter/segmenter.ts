@@ -37,10 +37,12 @@
  *     asking for it is the same clean not-found as asking for a sequence that
  *     never existed — the policy is `./retention.ts`.
  *
- * What this module does not do: it does not restart a dropped ingest (issue
- * #11), and it holds no payment code of any kind. It is where the station's
- * *now* is read from — `latest()` is one rung's live edge — but the address
- * that reports it is `../now/now.ts`.
+ * What this module does not do: it holds no payment code of any kind, and it
+ * does not decide when a broadcast has dropped — that is the ingest
+ * listener's judgement, and this module simply cuts whatever publish is
+ * handed to it, picking up the sequence where the last one left off. It is
+ * where the station's *now* is read from — `latest()` is one rung's live edge
+ * — but the address that reports it is `../now/now.ts`.
  *
  * Generated media lives under `<dataDir>/segments/<rung>/` — ignored by
  * **directory**, never by extension, because an HLS segment is an MPEG-TS
@@ -218,6 +220,19 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
   let encoders: Encoder[] = [];
   let poll: NodeJS.Timeout | undefined;
   let running = true;
+  /**
+   * The queue every `cut()` goes through.
+   *
+   * Stopping an encoder is asynchronous — it is given a moment to flush the
+   * span it holds — so two publishes arriving inside that moment would
+   * otherwise interleave: the second would find no encoders to stop, start its
+   * own, and then the first would start a second set on top. Two encoders
+   * writing one rung's directory means two different spans claiming one
+   * sequence number, at an address a viber has already paid for. A flapping
+   * uplink reconnecting twice in a second is exactly that case, so the
+   * handovers are made to queue rather than to race.
+   */
+  let handovers: Promise<void> = Promise.resolve();
 
   return {
     rungs,
@@ -237,9 +252,15 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
       // vibes from starting them flowing past us in the meantime.
       vibes.pause();
 
-      void stopEncoders().then(() => {
+      handovers = handovers.then(async () => {
+        await stopEncoders();
         if (!running) return;
 
+        // Each new encoder starts at the sequence the last one stopped at,
+        // read off what is on disk rather than kept in memory. That is what
+        // makes a reconnect a continuation: a broadcaster with a flaky uplink
+        // resumes the broadcast instead of starting it over, and a viber who
+        // was mid-window is not thrown back to the beginning.
         encoders = rungs.map((rung) => {
           const track = tracks.get(rung.name);
           /* c8 ignore next */
@@ -256,6 +277,15 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
         }
 
         startPolling();
+      });
+      // A failed handover must not wedge the queue: the next publish still has
+      // to be able to take the air.
+      handovers = handovers.catch((error: unknown) => {
+        console.error(
+          `[station-origin] could not hand the encoders over to a new publish: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       });
     },
 
@@ -290,6 +320,9 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
     async stop() {
       if (!running) return;
       running = false;
+      // After the queue, so an encoder a handover was midway through starting
+      // is stopped rather than left running behind a stopped segmenter.
+      await handovers;
       stopPolling();
       await stopEncoders();
     },

@@ -27,8 +27,8 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > budget is refused at boot. Segments are kept on a sliding window evicted by count
 > (`TOON_RETAIN_SEGMENTS`), so a long broadcast does not fill the broadcaster's disk and a span past
 > the window is a clean not-found rather than a stale body. There is no deploy bundle, no published
-> image and no devnet node. The diagrams below are the intended shape, not a description of a running system. See
-> [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
+> image and no devnet node. The diagrams below are the intended shape, not a description of a
+> running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
 
 ## A station
 

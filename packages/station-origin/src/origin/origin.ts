@@ -48,12 +48,19 @@
  * encoder rather than depending on a separately-scheduled one is what keeps
  * ingest, encoding and serving inside a single testable surface.
  *
- * Segments do not accumulate for ever: they are kept on a sliding window
- * evicted by count (`--retain-segments`), so a broadcast that runs for days
- * does not fill the broadcaster's disk, and a span past the window is a clean
- * not-found a viber re-syncs from rather than a stale body.
+ * A dropped uplink does not end any of that (#11). The origin keeps serving
+ * the window it already holds, `GET /now` reports no ingest so a viber can
+ * tell a stalled edge from a station that ended, and a reconnect with the
+ * right stream key takes the air back and continues the sequence rather than
+ * resetting it — a broadcaster on a flaky connection resumes instead of
+ * starting over.
  *
- * Reconnect (#11) and encode-lag reporting (#12) are not here yet.
+ * Nor does that window accumulate for ever (#10): segments are kept on a
+ * sliding window evicted by count (`--retain-segments`), so a broadcast that
+ * runs for days does not fill the broadcaster's disk, and a span past the
+ * window is a clean not-found a viber re-syncs from rather than a stale body.
+ *
+ * Encode-lag reporting (#12) is not here yet.
  *
  * The two ports, the data directory and the rung ladder are configuration
  * rather than constants: the integration suite boots real instances on fresh

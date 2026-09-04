@@ -34,10 +34,11 @@ What the station origin does today ([#5](https://github.com/toon-protocol/slop_m
 [#7](https://github.com/toon-protocol/slop_machine/issues/7),
 [#8](https://github.com/toon-protocol/slop_machine/issues/8),
 [#9](https://github.com/toon-protocol/slop_machine/issues/9),
-[#10](https://github.com/toon-protocol/slop_machine/issues/10)) is the whole paid path across a
+[#10](https://github.com/toon-protocol/slop_machine/issues/10),
+[#11](https://github.com/toon-protocol/slop_machine/issues/11)) is the whole paid path across a
 **configurable rung ladder** — boot, answer liveness, take a broadcaster's vibes in, encode and cut
-them at every rung, serve the result by address, say where the live edge is, and drop what has
-fallen out of the window:
+them at every rung, serve the result by address, say where the live edge is, survive a dropped
+uplink, and drop what has fallen out of the window:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
@@ -48,7 +49,13 @@ fallen out of the window:
   `publish` command, before a byte is read or transcoded, and a wrong or absent key is answered with
   an RTMP error status and the socket closed, so it shows up in OBS at once. Ingest is
   authenticated and **never paid**. Accepted vibes go to the origin's own segmenter as an FLV
-  stream; the `onIngest` callback sees the same stream as an extra observer.
+  stream; the `onIngest` callback sees the same stream as an extra observer. **A dropped uplink does
+  not end the station**: the origin keeps serving the window it already holds, `/now` reports no
+  ingest, and a reconnect with the right key **continues the sequence** rather than resetting it, so
+  no address a viber already paid for is quietly re-let with different vibes. Because a dropped
+  connection is usually a half-open one rather than a closed one, an accepted publish **supersedes**
+  whatever publish was open and drops it — a station has one broadcaster, and a reconnect is not a
+  second one.
 - `GET /segments/<rung>/<sequence>.ts` on the segment port — one MPEG-TS span of the broadcast at
   that rung, `200` with `Content-Type: video/mp2t`. A rung the station does not offer and a
   sequence it does not hold are both `404`, told apart by an `error` of `unknown_rung` or
@@ -154,9 +161,9 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** Reconnect, encode-lag reporting and
+**Everything else in the design is still design.** Encode-lag reporting and
 the `deploy/` bundle are
-[#11–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+[#12–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
 started. There is no `deploy/` bundle, no published image, no CI and no devnet
 node — do not infer those commands from the sibling repos.
 
