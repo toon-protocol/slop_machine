@@ -15,7 +15,7 @@
  * this app — the one that reaches back into a connector's operator surface —
  * does not become the exception to it.
  *
- * What exists today (issue #33) is the boot, and only the boot:
+ * What exists today (issues #33 and #34) is the boot and the quote:
  *
  *   - `GET /health` on the app port: process liveness, for a hub operator's
  *     supervisor inside the node. It requires no payment header, reads none,
@@ -24,18 +24,30 @@
  *     interface, which is what makes "unpriced" mean "in-node" rather than
  *     "free to the internet".
  *
+ *   - `GET /quote` on the app port: **paid**, at a floor price, beneath its
+ *     own connector prefix and never the buy's. It answers the prefix this
+ *     hub would grant the caller, what a slot costs, how long it lasts, and
+ *     whether there is capacity under the operator's cap — see
+ *     `../quote/quote.ts` for why every foreseeable refusal is moved here.
+ *
  *   - the two operator credentials, resolved from their mounted files before
  *     anything binds. Both are named by path only and the app refuses to start
  *     without either, saying which one — see `../operator/credentials.ts`.
  *
- * The paid surface a broadcaster actually buys at — a cheap quote and the buy
- * that establishes the peering — is #34 onward and is deliberately not here
- * yet. Nothing in this file anticipates it beyond leaving the shape it will
- * hang off.
+ *   - the hub's admission policy — price, period, cap and the hub's own
+ *     address — resolved and checked before anything binds, and reported back
+ *     on the resolved configuration. See `../slot/policy.ts`.
  *
- * The app port and the data directory are configuration rather than constants:
- * the suite boots real instances on fresh ports against temporary directories,
- * and a hub operator moves either without a code change.
+ * The buy that establishes the peering, the roster's writer, the lapse and the
+ * boot reconciliation are #35 onward and are deliberately not here yet.
+ * Nothing in this file anticipates them beyond leaving the shape they hang
+ * off: the roster this app reads has no write path, because nothing here
+ * needs one.
+ *
+ * The app port, the data directory and every number in the hub's admission
+ * policy are configuration rather than constants: the suite boots real
+ * instances on fresh ports against temporary directories, and a hub operator
+ * changes their admission policy without a code change.
  *
  * @module
  */
@@ -45,6 +57,10 @@ import { resolve } from 'node:path';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 import { resolveOperatorCredentials } from '../operator/credentials.js';
+import { QUOTE_ROUTE_PREFIX, quoteRoutes } from '../quote/quote.js';
+import { describeSlotPolicy, resolveSlotPolicy } from '../slot/policy.js';
+import type { SlotPolicy } from '../slot/policy.js';
+import { createSlotRoster } from '../slot/roster.js';
 import { VERSION } from '../version.js';
 
 // ---------- Defaults ----------
@@ -71,6 +87,14 @@ export const DEFAULT_DATA_DIR = './data';
  */
 export const HEALTH_ROUTE_PATH = '/health';
 
+/**
+ * Where the quote answers. **Paid**, beneath its own connector prefix and
+ * never the buy's, so neither address is ever reachable at the other's price.
+ * Re-exported here so a hub operator writing `connector.toml` reads the app's
+ * whole surface off one module.
+ */
+export { QUOTE_ROUTE_PREFIX } from '../quote/quote.js';
+
 // ---------- Configuration ----------
 
 /** Configuration for starting a slot app via `startSlotApp()`. */
@@ -90,6 +114,29 @@ export interface SlotAppConfig {
    * does not exist.
    */
   dataDir?: string;
+
+  /**
+   * The hub's own ILP address (default: `g.toon.slopmachine`). Every prefix
+   * this hub grants sits directly beneath it.
+   */
+  hubAddress?: string | undefined;
+  /**
+   * What a slot costs for one period, in the settlement token's smallest unit
+   * (default: `1000000`). Reported by the quote; never charged here.
+   */
+  slotPrice?: number | string | undefined;
+  /**
+   * How long one purchase lasts, in seconds (default: 30 days).
+   *
+   * Seconds, because that is the unit that makes a lapse testable without a
+   * fake clock — the suite sets it to a second or two.
+   */
+  slotPeriodSeconds?: number | string | undefined;
+  /**
+   * How many slots may be held at once (default: `100`). `0` is a legal
+   * policy and means the hub is admitting nobody.
+   */
+  slotCap?: number | string | undefined;
 
   /**
    * Path to the mounted file holding the hub's operator **write key**.
@@ -120,6 +167,12 @@ export interface ResolvedSlotAppConfig {
   host: string;
   /** Absolute path to the data directory. */
   dataDir: string;
+  /**
+   * The hub's admission policy, resolved and checked — its own address, what a
+   * slot costs, how long one lasts, and how many may exist at once. Ordinary
+   * configuration, all of it readable back, none of it secret.
+   */
+  policy: SlotPolicy;
   /** The path the operator write key was read from. Never its contents. */
   operatorWriteKeyFile: string;
   /** The path the operator bearer token was read from. Never its contents. */
@@ -181,12 +234,15 @@ function livenessResponse(): LivenessResponse {
  * @returns A running `SlotAppInstance`.
  * @throws OperatorCredentialError if either credential path is unset, or the
  * file it names is unreadable or empty. The refusal names which credential.
+ * @throws SlotPolicyError if the hub's admission policy cannot be read. A hub
+ * must not admit broadcasters on a number nobody chose.
  *
  * @example
  * ```ts
  * const app = await startSlotApp({
  *   slotPort: 0,
  *   dataDir: '/tmp/hub',
+ *   hubAddress: 'g.toon.slopmachine',
  *   operatorWriteKeyFile: '/run/secrets/operator-write.key',
  *   operatorBearerTokenFile: '/run/secrets/operator-bearer.token',
  * });
@@ -213,9 +269,20 @@ export async function startSlotApp(
   // the same one it will be when the writes exist.
   const { writeKeyFile, bearerTokenFile } = resolveOperatorCredentials(config);
 
+  // The hub's admission policy, on the same terms: checked before anything
+  // binds, because a hub quoting a price nobody set is worse than a hub that
+  // did not come up.
+  const policy = resolveSlotPolicy(config);
+
   // Fail at boot rather than at the first write: a directory the app cannot
   // create is a refuse-to-start, never a degraded run.
   mkdirSync(dataDir, { recursive: true });
+
+  // The roster the quote reads. Nothing writes a slot yet — the buy is #35 —
+  // so a hub booted from here holds none, and every caller's quote says so.
+  // What replaces this line is a read-back off the data directory, not a
+  // different shape of reader.
+  const roster = createSlotRoster();
 
   const app = new Hono();
 
@@ -225,12 +292,19 @@ export async function startSlotApp(
   // and reachable from inside the node only.
   app.get(HEALTH_ROUTE_PATH, (c) => c.json(livenessResponse()));
 
+  // The quote, mounted at its own prefix and beneath nothing. The connector in
+  // front terminates one route on exactly this path at its own floor price;
+  // the buy will get another, at the slot price, and the two must never be the
+  // same prefix.
+  app.route(QUOTE_ROUTE_PREFIX, quoteRoutes({ policy, roster }));
+
   const { server, port } = await listen(app.fetch, host, requestedPort);
 
   const resolvedConfig: ResolvedSlotAppConfig = {
     slotPort: port,
     host,
     dataDir,
+    policy,
     // The paths, never the contents. This record is what a caller reads back
     // and what a log line may safely repeat.
     operatorWriteKeyFile: writeKeyFile,
@@ -243,6 +317,7 @@ export async function startSlotApp(
   console.log(
     `[slot-app] operator credentials mounted at ${resolvedConfig.operatorWriteKeyFile} (write key) and ${resolvedConfig.operatorBearerTokenFile} (bearer token) — neither value is ever logged`
   );
+  console.log(`[slot-app] admission policy: ${describeSlotPolicy(policy)}`);
 
   let running = true;
 

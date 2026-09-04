@@ -13,22 +13,74 @@ proven the request paid. Pricing a route is connector configuration. See the rep
 
 ## What exists today
 
-Issue [#33](https://github.com/toon-protocol/slop_machine/issues/33) is the boot, and only the boot:
-the app comes up from its bundled entrypoint on a configured port, holds the hub's two operator
-credentials, and answers liveness from inside the node.
+Issues [#33](https://github.com/toon-protocol/slop_machine/issues/33) and
+[#34](https://github.com/toon-protocol/slop_machine/issues/34): the app comes up from its bundled
+entrypoint on a configured port, holds the hub's two operator credentials, answers liveness from
+inside the node, and **quotes a slot**.
 
-| Surface       | Port            | Paid | What it is                                     |
-| ------------- | --------------- | ---- | ---------------------------------------------- |
-| `GET /health` | `TOON_SLOT_PORT` | no  | Liveness, for a supervisor **inside** the node |
+| Surface       | Port             | Paid                | What it is                                         |
+| ------------- | ---------------- | ------------------- | -------------------------------------------------- |
+| `GET /health` | `TOON_SLOT_PORT` | **never**           | Liveness, for a supervisor **inside** the node      |
+| `GET /quote`  | `TOON_SLOT_PORT` | yes, a floor price  | What a slot costs, and which prefix you'd be granted |
 
 `/health` is process liveness — "is the slot app up enough to answer". It is not a claim about the
 roster, about the hub's capacity, or about whether anybody holds a slot. It sits outside every
 prefix the hub's connector routes and **must never acquire one**: the app port is published on no
 interface, so "unpriced" here means "in-node", never "free to the internet".
 
-The paid surface a broadcaster actually buys at — a cheap quote and the buy that establishes the
-peering — is [#34](https://github.com/toon-protocol/slop_machine/issues/34) onward, under the spec
-in [#32](https://github.com/toon-protocol/slop_machine/issues/32).
+### `GET /quote`
+
+What a broadcaster asks before they buy. It sits beneath **its own connector prefix** at a floor
+price — never the buy's, so neither address is reachable at the other's price — and answers:
+
+```json
+{
+  "prefix": "g.toon.slopmachine.7a1c93f0be42",
+  "label": "7a1c93f0be42",
+  "hubAddress": "g.toon.slopmachine",
+  "slotPrice": 1000000,
+  "slotPeriodSeconds": 2592000,
+  "hasCapacity": true,
+  "slotCap": 100,
+  "slotsHeld": 0,
+  "slot": null
+}
+```
+
+`200 application/json`, `Cache-Control: no-store`. `slot` is the caller's own slot — `{ "lapsesAt":
+<epoch ms> }` if they hold one, `null` if they do not, which is every caller until the buy (#35)
+writes the first one.
+
+**`prefix` is what the address exists for.** A broadcaster writes it into their own station's
+`connector.toml`, brings the station up, and is ready to be pointed at *before* they have paid the
+slot price — otherwise they would have to buy twice, once to learn the label and once after
+configuring for it.
+
+**The handle is the hub's to assign, derived from the payer the connector verified.** `X-TOON-Payer`
+is the client channel key a terminating connector admitted a covering claim under, and it is the one
+identity in the request that is not self-asserted
+([connector ADR 0040](https://github.com/toon-protocol/connector/blob/main/docs/adr/0040-a-verified-payment-is-stated-to-the-app.md)).
+The label is a hex digest of it, so the same broadcaster reads the same prefix for ever and nobody
+else can take it. **There is therefore no "that handle is taken" refusal**: where two payers would
+derive one label the app lengthens it deterministically until it is free rather than turning either
+away. The cost is that nobody gets a vanity handle, and that is accepted — see
+[ADR 0003's amendment](../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md#amendment-2026-09-04-a-refusal-is-paid-for-so-the-design-moves-refusals-rather-than-pricing-them-at-nothing)
+for why a refusal at the buy address is one the broadcaster pays for.
+
+**A hub at its cap is a `200`, not a refusal.** `hasCapacity: false` is the answer, at the cheap
+address, so a broadcaster never pays the slot price to be turned away. That is the whole reason the
+quote is priced apart from the buy.
+
+**A request with no `X-TOON-Payer` is refused** with `403` and
+`{"error": "no_paid_termination", "message": ...}`. Absent means the request did not arrive through
+a paid termination this connector verified — a peer-wire arrival, an unclaimed request, or a route
+priced at zero — and the message says so rather than blaming the caller's body. A caller's own
+spelling of that header never survives the connector's strip, so there is nothing in their request
+to fix.
+
+The buy that establishes the peering, the roster's writer, the lapse and the boot reconciliation are
+[#35](https://github.com/toon-protocol/slop_machine/issues/35) onward, under the spec in
+[#32](https://github.com/toon-protocol/slop_machine/issues/32).
 
 ## The two operator credentials
 
@@ -69,17 +121,37 @@ excluded from every Docker build context by `.dockerignore`, before either exist
 
 Flags over environment over defaults, exactly as the station origin resolves its own:
 
-| Flag                             | Environment                        | Default  |
-| -------------------------------- | ---------------------------------- | -------- |
-| `--slot-port`                    | `TOON_SLOT_PORT`                   | `3200`   |
-| `--host`                         | `TOON_SLOT_HOST`                   | `0.0.0.0`|
-| `--data-dir`                     | `TOON_DATA_DIR`                    | `./data` |
-| `--operator-write-key-file`      | `TOON_OPERATOR_WRITE_KEY_FILE`     | none     |
-| `--operator-bearer-token-file`   | `TOON_OPERATOR_BEARER_TOKEN_FILE`  | none     |
+| Flag                             | Environment                        | Default              |
+| -------------------------------- | ---------------------------------- | -------------------- |
+| `--slot-port`                    | `TOON_SLOT_PORT`                   | `3200`               |
+| `--host`                         | `TOON_SLOT_HOST`                   | `0.0.0.0`            |
+| `--data-dir`                     | `TOON_DATA_DIR`                    | `./data`             |
+| `--hub-address`                  | `TOON_HUB_ADDRESS`                 | `g.toon.slopmachine` |
+| `--slot-price`                   | `TOON_SLOT_PRICE`                  | `1000000`            |
+| `--slot-period-seconds`          | `TOON_SLOT_PERIOD_SECONDS`         | `2592000` (30 days)  |
+| `--slot-cap`                     | `TOON_SLOT_CAP`                    | `100`                |
+| `--operator-write-key-file`      | `TOON_OPERATOR_WRITE_KEY_FILE`     | none                 |
+| `--operator-bearer-token-file`   | `TOON_OPERATOR_BEARER_TOKEN_FILE`  | none                 |
 
 Port `0` binds an ephemeral port, which is how the suite boots apps side by side. The port is
 configuration and not a constant for that reason — and because a hub operator moving it must not
 need a code change.
+
+**The last four before the credentials are the hub's admission policy**, and they are configuration
+for the same reason: admission here is a price rather than a judgement, so those numbers *are* the
+policy and changing one must never be a code change. `--slot-cap` of `0` is a legal setting and
+means the hub is admitting nobody. `--slot-period-seconds` is in seconds because that is what makes
+a lapse testable without a fake clock — the suite sets it to a second or two, exactly as the station
+origin's `--ingest-idle-seconds` made a time rule ordinary configuration.
+
+**`--slot-price` is not payment code.** It is the number the app *reports* at the quote so a
+broadcaster learns what a slot costs before buying one, and (from the buy onward) the floor the app
+checks the connector's own stated `X-TOON-Amount` against so an under-charging route cannot sell
+slots below policy. Charging is the connector's job and pricing a route is connector configuration —
+so this number and the hub's `connector.toml` buy route are **one pair**, to change in one commit.
+
+Every one of them is validated **fail-closed at boot**: a price, period or cap nobody could have
+meant is a `SlotPolicyError` and a non-zero exit, not a degraded run.
 
 ## Programmatically
 
@@ -89,6 +161,10 @@ import { startSlotApp } from '@toon-protocol/slot-app';
 const app = await startSlotApp({
   slotPort: 0,
   dataDir: '/srv/hub/data',
+  hubAddress: 'g.toon.slopmachine',
+  slotPrice: 1_000_000,
+  slotPeriodSeconds: 30 * 24 * 60 * 60,
+  slotCap: 100,
   operatorWriteKeyFile: '/run/secrets/operator-write.key',
   operatorBearerTokenFile: '/run/secrets/operator-bearer.token',
 });

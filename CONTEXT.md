@@ -33,6 +33,34 @@ creates in response to the purchase, and it remains the operator's act.
 _Avoid_: peering (the connector owns that word, and conflating them is exactly
 the confusion to avoid), listing, subscription, licence
 
+## Handle
+
+The label a hub grants a broadcaster, and the last segment of the ILP prefix
+their station is reachable at. **The hub assigns it; the broadcaster does not
+pick it.** It is derived from the payer the hub's connector verified, so the
+same broadcaster gets the same handle for ever and nobody else can take it —
+and so there is no "that handle is taken" refusal to pay for at a paid address.
+A broadcaster reads their handle from a quote before they buy, and writes it
+into their own station's configuration.
+_Avoid_: username, name, vanity name, alias, slug
+
+## Roster
+
+Who holds a slot on a hub, and when each one lapses. The hub's own record of
+what it sold, kept apart from the connector's peer and route tables, which are
+the record of what the hub *did* about it. The roster is what the hub's cap is
+measured against.
+_Avoid_: registry, directory, peer list, membership (a slot is bought, not
+joined)
+
+## Quote
+
+What a hub answers when a broadcaster asks what a slot would cost them: the
+prefix they would be granted, the price, the period, and whether there is room.
+Cheap, and its own address, because it is where every refusal a hub can foresee
+is moved — a broadcaster must never pay a slot's price to be turned down.
+_Avoid_: estimate, price check, preview, dry run
+
 ## Broadcaster
 
 The party that supplies a station's vibes and operates the node that carries it.
