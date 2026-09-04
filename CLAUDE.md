@@ -110,3 +110,20 @@ Cross-cutting agent skills, docs, and the canonical project context live in
 
 Canonical rules/decisions: `toon-meta` → [`context/context.md`](https://github.com/toon-protocol/toon-meta/blob/main/context/context.md),
 with `architecture.md`, `repos.md`, `decisions.md` and `glossary.md` beside it.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `toon-protocol/slop_machine`, via the `gh` CLI. See
+[`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See
+[`docs/agents/triage-labels.md`](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See
+[`docs/agents/domain.md`](docs/agents/domain.md).
