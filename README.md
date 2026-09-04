@@ -9,7 +9,7 @@ slop_machine is two toon apps that ship together. Both sit behind the
 either one it is already paid for. That separation is the whole design, and it is the same one
 [relay](https://github.com/toon-protocol/relay) uses.
 
-- A **station** is one broadcaster's node: an **origin** that ingests their stream and serves
+- A **station** is one broadcaster's node: an **origin** that ingests their vibes and serves
   segments of it.
 - A **hub** is the node broadcasters peer with and announce to. It routes vibers' packets on to
   stations and sells the **slots** that make a station reachable.
