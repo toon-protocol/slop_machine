@@ -12,3 +12,63 @@
 **/segments
 **/recordings
 *.log
+
+# ─── Key material and secrets ─────────────────────────────────────────────
+#
+# The same wildcards `.gitignore` and `deploy/.gitignore` carry, for the same
+# reason and against the same incident (connector#490): an operator's key
+# material sits in a checkout on a live box. `docker-compose.local.yml` builds
+# the origin with `context: ..`, so `deploy/README.md`'s own steps —
+# `openssl rand -hex 32 > stream.key` beside the bundle — hand the build a
+# stream key, the RTMPS private key, and the connector's signer and settlement
+# keys.
+#
+# Nothing reaches the image through the Dockerfile today: it COPYs an explicit
+# path list that names neither `deploy/` nor the repository root. These rules
+# are the second line, so that a future `COPY . .` — the ordinary way to make a
+# Dockerfile shorter — cannot turn a key in a working directory into a key in a
+# published image. Wildcarded rather than listed by name so a re-derived,
+# per-box, or additional key cannot reintroduce the gap by being named slightly
+# differently.
+#
+# `**/` on every pattern, unlike `.gitignore`: a bare `*.key` here matches the
+# context ROOT only, and the keys an operator generates live one directory
+# down, in `deploy/`.
+#
+# NOTE: no `*.ts` rule belongs in this file either. HLS segments are MPEG-TS
+# `.ts` files and so is every source file in this repository — generated media
+# is excluded by directory above, never by extension.
+**/*.key
+**/*.pem
+**/*.secret
+
+# The operator surface's credentials. The bearer token is a secret outright;
+# the write-key allowlist and `ingest-tls.crt` are public halves, but both are
+# per box, and neither is a build input.
+**/operator-bearer.token
+**/operator-write.keys
+**/*.allow
+**/ingest-tls.crt
+
+# Wallets and chain deploy output — private keys or per-cluster state.
+**/*-wallet.json
+**/*-keypair.json
+**/testnet-wallets.json
+
+# Every `.env*` variant, not the bare name: operator copies like
+# `.env.bak-20260718` slipped past a bare `.env` rule and got committed
+# (connector, store). No stage reads one — the image's configuration arrives as
+# compose `environment:` at run time — so the committed `.env.example` is
+# excluded with the rest rather than re-allowed.
+**/.env
+**/.env.*
+
+# Operator snapshot copies of live-box edits. A `connector.toml.bak-20260718`
+# is not key material, but it is the shape of file an operator leaves beside
+# one, and none of it is a build input.
+**/*.bak
+**/*.bak-*
+**/*.bak.*
+**/*.bak[0-9]*
+**/*.orig
+**/*.rej
