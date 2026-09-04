@@ -41,6 +41,9 @@ export {
   ROUTE_UNDER_CHARGES,
   NO_STATION_URL,
   STATION_UNREADABLE,
+  STATION_NOT_AT_PREFIX,
+  ROUTE_OWNED_BY_CONFIG,
+  ROUTES_NOT_WRITTEN,
   PEERING_NOT_ESTABLISHED,
   SLOT_NOT_RECORDED,
 } from './buy/buy.js';
@@ -49,6 +52,7 @@ export type {
   BoughtSlot,
   BoughtPeering,
   BoughtChannel,
+  BoughtRoute,
 } from './buy/buy.js';
 
 // The refusals both paid addresses share. A refusal at a paid address is paid
@@ -98,6 +102,29 @@ export {
   describePeeringPolicy,
 } from './peering/policy.js';
 export type { PeeringPolicy, PeeringPolicyConfig } from './peering/policy.js';
+
+// The station's own self-description — the document every route price is
+// derived from, so that nothing is declared by the buyer and nothing drifts.
+export { readStationDescription } from './peering/station-description.js';
+export type {
+  StationDescription,
+  PublishedRoute,
+} from './peering/station-description.js';
+
+// The forwarded routes: being peered is not yet being reachable, and a hub
+// carries only what its routing table names.
+export {
+  deriveForwardedRoutes,
+  writeForwardedRoutes,
+  ForwardedRouteError,
+} from './peering/routes.js';
+export type {
+  ForwardedRoute,
+  ForwardedRouteFailure,
+  ForwardedRouteTerms,
+  ForwardedRouteRequest,
+  DerivedRoutes,
+} from './peering/routes.js';
 
 // Signing an operator write: RFC 9421, held to the verifier it targets.
 export {

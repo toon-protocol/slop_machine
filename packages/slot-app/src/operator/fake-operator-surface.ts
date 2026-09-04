@@ -33,7 +33,12 @@
  * that surface's: `POST /peers` answers the peering with
  * `channel: { id, status: "found" | "created", chain }`, and repeating a write
  * against an established peering finds the same channel rather than opening a
- * second one.
+ * second one. `POST /routes/peers` is the other half of the same surface — it
+ * takes `{ prefix, peer_id, price }`, keys the row on `prefix` so a repeat
+ * updates rather than duplicates, refuses a route toward a peering it does not
+ * hold, and refuses a prefix the **config file** owns with the `409` the real
+ * table answers (`PeerRouteTableError::OwnedByConfig`, connector ADR 0034: a
+ * runtime row never shadows a config one).
  *
  * **This module is test scaffolding and ships in no bundle** — nothing the
  * app's entrypoints import reaches it. It is a `.ts` file beside the code it
@@ -104,6 +109,18 @@ export interface FakePeering {
   channel: { id: string; status: string; chain: string };
 }
 
+/** One forwarded route this surface holds, as it would answer it. */
+export interface FakeForwardedRoute {
+  prefix: string;
+  peer_id: string;
+  /**
+   * Exactly as the write spelled it: a bare integer for a flat price, a
+   * `{ base, per_kib }` object for one with a slope (connector ADR 0065).
+   * Kept unparsed so a suite asserts what the hub actually asked for.
+   */
+  price: number | { base: number; per_kib: number };
+}
+
 /** How the fake behaves. */
 export interface FakeOperatorSurfaceOptions {
   /**
@@ -127,6 +144,18 @@ export interface FakeOperatorSurfaceOptions {
    * channel and wait for a chain to confirm it.
    */
   writeDelayMs?: number;
+  /**
+   * Whether a prefix is one the hub operator's **own configuration file**
+   * owns.
+   *
+   * A runtime route may never shadow a config one, so a write naming one is
+   * refused `409` exactly as the real table refuses it — which is what makes
+   * "the app can never take an address I reserved" something a suite finds
+   * out rather than assumes. A predicate rather than a list because the
+   * addresses a hub grants are derived from a payer, so a suite knows the
+   * shape of the row it wants reserved before it knows its name.
+   */
+  configOwns?: (prefix: string) => boolean;
 }
 
 /** A running fake operator surface. */
@@ -140,15 +169,23 @@ export interface FakeOperatorSurface {
   /** Every peering it holds — the hub's routing table, as far as it goes. */
   peerings(): FakePeering[];
   /**
+   * Every forwarded route it holds, in the order it first learned each one —
+   * the rows that decide what a hub actually carries.
+   */
+  routes(): FakeForwardedRoute[];
+  /**
    * Make the next `count` **authenticated** writes fail transiently, as a
-   * chain that timed out would.
+   * chain that timed out would — every write, or only those on `path`.
    *
    * The failure lands after authentication on purpose: the signature is spent
    * before the failure, so a retry that replayed it would be refused. That is
    * the situation a retry has to survive, and making it survivable only by a
    * fresh signature is the point of the option.
+   *
+   * `path` narrows it to one endpoint, which is how a suite exercises a hub
+   * whose peering landed and whose routing table then would not take a row.
    */
-  failNextWrites(count: number): void;
+  failNextWrites(count: number, path?: string): void;
   /** Stop it. Idempotent. */
   stop(): Promise<void>;
 }
@@ -184,11 +221,26 @@ export async function startFakeOperatorSurface(
   const accepted: RecordedWrite[] = [];
   const refused: RefusedWrite[] = [];
   const peerings = new Map<string, FakePeering>();
+  const forwarded = new Map<string, FakeForwardedRoute>();
+  const configOwns = options.configOwns ?? (() => false);
   // Keyed on the signature itself, exactly as the connector's write auth is:
   // ed25519 is deterministic, so an identical parameter set is an identical
   // signature and is the same spent credential.
   const spent = new Set<string>();
   let failures = 0;
+  let failuresOn: string | undefined;
+
+  /**
+   * Whether this write is one the suite asked to fail, spending it if so.
+   * Counted only where the path matches, so narrowing the failures to one
+   * endpoint does not burn one on another.
+   */
+  function failing(path: string): boolean {
+    if (failures <= 0) return false;
+    if (failuresOn !== undefined && failuresOn !== path) return false;
+    failures -= 1;
+    return true;
+  }
 
   const surface = new Hono();
 
@@ -223,8 +275,7 @@ export async function startFakeOperatorSurface(
       await new Promise((wake) => setTimeout(wake, options.writeDelayMs));
     }
 
-    if (failures > 0) {
-      failures -= 1;
+    if (failing(path)) {
       return c.text('the chain did not answer in time', 503);
     }
 
@@ -284,6 +335,79 @@ export async function startFakeOperatorSurface(
     });
   });
 
+  surface.post('/routes/peers', async (c) => {
+    const body = await c.req.text();
+    const headers = headersOf(c.req.raw);
+    const path = new URL(c.req.url).pathname;
+
+    const authenticated = authenticate({
+      method: 'POST',
+      path,
+      headers,
+      body,
+      allowlist,
+      spent,
+    });
+    if ('reason' in authenticated) {
+      refused.push({ method: 'POST', path, reason: authenticated.reason });
+      return c.json({ error: authenticated.reason }, 401);
+    }
+
+    accepted.push({
+      method: 'POST',
+      path,
+      keyid: authenticated.keyid,
+      body,
+      headers,
+      created: authenticated.created,
+    });
+
+    if (failing(path)) {
+      return c.text('the route table did not answer in time', 503);
+    }
+
+    let request: { prefix?: unknown; peer_id?: unknown; price?: unknown };
+    try {
+      request = JSON.parse(body) as typeof request;
+    } catch {
+      return c.text('not JSON', 400);
+    }
+    if (typeof request.prefix !== 'string' || request.prefix.trim() === '') {
+      return c.text('a route needs a prefix', 400);
+    }
+    if (typeof request.peer_id !== 'string') {
+      return c.text('a route needs a peer_id', 400);
+    }
+    const price = readPrice(request.price);
+    if (price === undefined) {
+      return c.text('a price is an integer, or a { base, per_kib } table', 400);
+    }
+
+    // The config file's rows are the operator's own and a runtime write may
+    // never shadow one: the real table's `OwnedByConfig`, and its `409`.
+    if (configOwns(request.prefix)) {
+      return c.text(
+        `the route for ${request.prefix} is owned by the config file`,
+        409
+      );
+    }
+    // A route toward a peering this surface does not hold cannot resolve to a
+    // valid row whatever the table's state, which is the real table's own
+    // line between a `400` and a `409`.
+    if (!peerings.has(request.peer_id)) {
+      return c.text(`unknown peer id '${request.peer_id}'`, 400);
+    }
+
+    const route: FakeForwardedRoute = {
+      prefix: request.prefix,
+      peer_id: request.peer_id,
+      price,
+    };
+    forwarded.set(route.prefix, route);
+
+    return c.json({ ...route, source: 'runtime' });
+  });
+
   const { server, port } = await listen(surface.fetch);
 
   return {
@@ -291,8 +415,10 @@ export async function startFakeOperatorSurface(
     writes: () => [...accepted],
     refusals: () => [...refused],
     peerings: () => [...peerings.values()],
-    failNextWrites(count) {
+    routes: () => [...forwarded.values()],
+    failNextWrites(count, path) {
       failures = count;
+      failuresOn = path;
     },
     stop() {
       return new Promise<void>((stopped, failed) => {
@@ -300,6 +426,32 @@ export async function startFakeOperatorSurface(
       });
     },
   };
+}
+
+/**
+ * A price as the real surface reads one: a bare integer, or a
+ * `{ base, per_kib }` table (connector ADR 0065's two spellings, and no
+ * others — a string is refused here exactly as it would be there).
+ */
+function readPrice(
+  stated: unknown
+): number | { base: number; per_kib: number } | undefined {
+  if (typeof stated === 'number' && Number.isInteger(stated) && stated >= 0) {
+    return stated;
+  }
+  if (typeof stated !== 'object' || stated === null) return undefined;
+  const { base, per_kib: perKib } = stated as Record<string, unknown>;
+  if (
+    typeof base !== 'number' ||
+    !Number.isInteger(base) ||
+    base < 0 ||
+    typeof perKib !== 'number' ||
+    !Number.isInteger(perKib) ||
+    perKib < 0
+  ) {
+    return undefined;
+  }
+  return { base, per_kib: perKib };
 }
 
 /** What authentication produced: a verified write, or the reason it was not. */

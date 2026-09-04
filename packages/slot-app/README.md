@@ -14,10 +14,12 @@ proven the request paid. Pricing a route is connector configuration. See the rep
 ## What exists today
 
 Issues [#33](https://github.com/toon-protocol/slop_machine/issues/33),
-[#34](https://github.com/toon-protocol/slop_machine/issues/34) and
-[#35](https://github.com/toon-protocol/slop_machine/issues/35): the app comes up from its bundled
+[#34](https://github.com/toon-protocol/slop_machine/issues/34),
+[#35](https://github.com/toon-protocol/slop_machine/issues/35) and
+[#36](https://github.com/toon-protocol/slop_machine/issues/36): the app comes up from its bundled
 entrypoint on a configured port, holds the hub's two operator credentials, answers liveness from
-inside the node, **quotes a slot**, and **sells one — establishing the peering before it answers**.
+inside the node, **quotes a slot**, and **sells one — establishing the peering and writing one
+forwarded route per address the station sells, before it answers**.
 
 | Surface       | Port             | Paid                | What it is                                         |
 | ------------- | ---------------- | ------------------- | -------------------------------------------------- |
@@ -103,7 +105,12 @@ application/json`, `Cache-Control: no-store`:
   "peering": {
     "localLabel": "7a1c93f0be42",
     "channel": { "id": "0x…", "status": "created", "chain": "evm" }
-  }
+  },
+  "routes": [
+    { "prefix": "g.toon.slopmachine.7a1c93f0be42.now", "price": "60" },
+    { "prefix": "g.toon.slopmachine.7a1c93f0be42.audio", "price": "210" },
+    { "prefix": "g.toon.slopmachine.7a1c93f0be42.480p", "price": "1010" }
+  ]
 }
 ```
 
@@ -111,8 +118,44 @@ application/json`, `Cache-Control: no-store`:
 answer: read the three attribution headers; refuse an absent payer **before the operator surface is
 touched**; check the stated `X-TOON-Amount` covers the configured slot price — reading a fact the
 connector stated, not validating a payment, so a route misconfigured to under-charge cannot sell
-slots; derive the handle; establish the peering with one signed `POST /peers`; **record the slot
-durably**; answer.
+slots; derive the handle; **read the station connector's own self-description** at `stationUrl` and
+derive one route per address it publishes; establish the peering with one signed `POST /peers`;
+write those routes with one signed `POST /routes/peers` each; **record the slot durably**; answer.
+
+### The routes, and where their prices come from
+
+Being peered is not yet being reachable: a hub carries only what its routing table names. So the
+purchase writes **one forwarded route per prefix the station's own connector publishes** beneath the
+prefix the hub granted — every rung on its ladder, and the station's *now* at its own cheap price, so
+a viber can join at the live edge without paying a segment price to find it.
+
+**Nothing about those prices is declared by the buyer**, which is why nothing can drift from the
+station's real configuration. The hub `GET`s the station connector's self-description
+([connector ADR 0050](https://github.com/toon-protocol/connector/blob/main/docs/adr/0050-a-connectors-url-resolves-to-its-self-description.md)),
+which publishes that node's ILP addresses, its endpoints, its settlement facts and **its route
+prices**, and derives each route from it:
+
+```
+hub route price  =  the station's own published price for that prefix
+                 +  TOON_PEERING_FEE, the hub's carriage
+```
+
+That sum is not a policy choice, it is arithmetic. The hub's connector charges the route's price at
+its client edge and retains the peering's `fee` for carrying the packet, so `price - fee` is what
+reaches the station — and the station's own connector then checks, per packet, that a peer-wire
+arrival covers the price of the termination it resolves to
+([connector ADR 0029](https://github.com/toon-protocol/connector/blob/main/docs/adr/0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md)).
+A hub route priced any lower is a route that forwards into a refusal: reachable, paid for, and dead.
+A published slope (`pricePerKib`) crosses the hop untouched, because a *fee* is flat per packet and
+does not gain one.
+
+Prices are decimal strings on both wires, in the settlement asset's base units, because a price is a
+`u64` and is not representable in a JSON number a reader can be trusted with.
+
+**Only what sits beneath the granted prefix is routed.** A station publishing an address the hub
+granted somebody else is not routed to — that address is not theirs to be pointed at — and a station
+publishing *nothing* beneath its grant is refused before the operator surface is touched at all,
+because the broadcaster has not yet written their granted prefix into their own `connector.toml`.
 
 **The slot is on disk before the answer goes out.** Gas is spent inside a paid request here, so a
 purchase whose answer arrived too late has to be found *already done* on the retry rather than
@@ -137,16 +180,27 @@ Its refusals are the ones that cannot be moved to the quote, and each is a **pai
 | `403`  | `route_under_charges`     | the hub's route: it charged less than `TOON_SLOT_PRICE`                |
 | `400`  | `no_station_url`          | the caller's request: no station connector URL in the body             |
 | `502`  | `station_unreadable`      | **the caller's own node**: its self-description could not be read      |
+| `502`  | `station_not_at_prefix`   | **the caller's own node**: it publishes nothing beneath the granted prefix |
+| `409`  | `route_owned_by_config`   | the hub's own config file already owns one of those rows               |
 | `503`  | `peering_not_established` | the hub's own operator surface                                         |
+| `503`  | `routes_not_written`      | the hub's own operator surface, after the peering landed               |
 | `503`  | `slot_not_recorded`       | the hub's own data directory — you *are* peered; retrying is safe      |
+
+**A refusal never leaves a half-written slot.** The slot is recorded last and only once the peering
+and every route are in place, so a purchase that was refused is a purchase the hub does not count:
+the quote still says the caller holds nothing, and a restart finds nothing either. What can survive
+is the peering and any route written before the refusal — both keyed by the caller's own derived
+label, both rewritten to the same values by a retry rather than duplicated, and neither of them a
+slot. Undoing them would be worse than leaving them: a purchase by a broadcaster who already holds a
+slot writes the same rows, and a rollback could not tell a row it had just created from one it had
+merely rewritten.
 
 A hub **at its cap is not refused here** — that answer lives at the quote, where it costs a floor
 price, and charging the slot price for it a second time is exactly what
 [ADR 0003's amendment](../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md#amendment-2026-09-04-a-refusal-is-paid-for-so-the-design-moves-refusals-rather-than-pricing-them-at-nothing)
 forbids.
 
-The routes derived from the station's self-description
-([#36](https://github.com/toon-protocol/slop_machine/issues/36)), what a renewal means
+What a renewal means
 ([#37](https://github.com/toon-protocol/slop_machine/issues/37)), the lapse
 ([#38](https://github.com/toon-protocol/slop_machine/issues/38)) and the boot reconciliation
 ([#39](https://github.com/toon-protocol/slop_machine/issues/39)) are next, under the spec in

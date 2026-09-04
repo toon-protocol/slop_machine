@@ -21,15 +21,20 @@
  * change to what a broadcaster depends on fails this file instead of quietly
  * agreeing with itself.
  *
+ * The **fake station connector** is the same idea on the read side: a real
+ * self-description, served in-process, that the hub goes and reads. Its
+ * ladder is pointed at the prefix the quote granted exactly as a broadcaster
+ * points their own `connector.toml` at it, which is why every successful
+ * purchase below pulls a quote first.
+ *
  * What this covers (issue #35): the peering established before the answer,
  * the terms it carries, the refusals that cannot be quoted away, the
  * signature and its freshness on a retry, a repeat purchase finding the same
- * channel, and the slot surviving a restart. The routes derived from the
- * station's self-description are #36; what a renewal means is #37; the lapse
- * is #38.
+ * channel, and the slot surviving a restart. The routes a purchase writes are
+ * `routes.test.ts` (#36); what a renewal means is #37; the lapse is #38.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterAll, afterEach, beforeAll } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,6 +44,8 @@ import {
   startFakeOperatorSurface,
 } from '../operator/fake-operator-surface.js';
 import type { FakeOperatorSurface } from '../operator/fake-operator-surface.js';
+import { startFakeStationConnector } from '../peering/fake-station-connector.js';
+import type { FakeStationConnector } from '../peering/fake-station-connector.js';
 import { startSlotApp } from '../slot-app/slot-app.js';
 import type { SlotAppConfig, SlotAppInstance } from '../slot-app/slot-app.js';
 
@@ -56,6 +63,7 @@ interface BoughtBody {
     localLabel: string;
     channel: { id: string; status: string; chain: string };
   };
+  routes: { prefix: string; price: string }[];
 }
 
 /** A refusal, likewise. */
@@ -75,8 +83,44 @@ interface QuoteBody {
 /** The suite's hub. A real operator sets their own; that is the point of it. */
 const HUB_ADDRESS = 'g.toon.slopmachine.testhub';
 
-/** A station connector's self-description URL, as a broadcaster would send it. */
-const STATION_URL = 'https://station.example/ilp';
+/**
+ * The ladder the suite's station sells: four rungs and its own *now*, priced
+ * as the committed station bundle prices them. Written out here rather than
+ * imported, because these are the numbers the hub's own routes are derived
+ * from.
+ */
+const LADDER = [
+  { rung: 'now', price: '50' },
+  { rung: 'audio', price: '200' },
+  { rung: '480p', price: '1000' },
+  { rung: '720p', price: '2000' },
+  { rung: '1080p', price: '3500' },
+] as const;
+
+/**
+ * The apex the committed station bundle ships, where `demo` is a placeholder
+ * for the handle a hub grants. A station left this way has not been
+ * configured for the hub it is buying from.
+ */
+const PLACEHOLDER_APEX = 'g.toon.slopmachine.demo';
+
+/**
+ * One station connector for the file, re-pointed per purchase — which is what
+ * a broadcaster does to their own `connector.toml` once a quote has told them
+ * their prefix.
+ */
+let station: FakeStationConnector;
+
+beforeAll(async () => {
+  station = await startFakeStationConnector({
+    apex: PLACEHOLDER_APEX,
+    ladder: LADDER,
+  });
+});
+
+afterAll(async () => {
+  await station.stop();
+});
 
 const running: SlotAppInstance[] = [];
 const surfaces: FakeOperatorSurface[] = [];
@@ -191,7 +235,7 @@ interface Delivery {
 function buy(
   app: SlotAppInstance,
   delivery: Delivery,
-  body: unknown = { stationUrl: STATION_URL },
+  body: unknown = { stationUrl: station.url },
   path = '/buy'
 ): Promise<Response> {
   const headers: Record<string, string> = {
@@ -213,12 +257,32 @@ function paid(payer: string, amount = '1000000'): Delivery {
   return { payer, amount, chain: payer.split(':')[0] ?? 'evm' };
 }
 
+/**
+ * What a broadcaster does before they pay: pull the quote, take the prefix the
+ * hub granted, and point their own station's ladder at it.
+ *
+ * The dance is real rather than convenient — a hub only routes what a station
+ * publishes beneath the prefix it granted, so a purchase made before this is
+ * a purchase by somebody who has not configured their station.
+ */
+async function configureStation(
+  app: SlotAppInstance,
+  payer: string
+): Promise<string> {
+  const quoted = await quote(app, payer);
+  station.terminateAt(quoted.prefix);
+  return quoted.prefix;
+}
+
 /** The slot a broadcaster bought, or a failure saying what came back instead. */
 async function bought(
   app: SlotAppInstance,
   delivery: Delivery,
   body?: unknown
 ): Promise<BoughtBody> {
+  if (delivery.payer !== undefined) {
+    await configureStation(app, delivery.payer);
+  }
   const res = await buy(app, delivery, body);
   const answered: unknown = await res.json();
   if (res.status !== 200) {
@@ -257,6 +321,7 @@ describe('buying a slot', () => {
   it('establishes the peering and answers the prefix and the lapse', async () => {
     const { app, operator } = await boot({ slotPeriodSeconds: 900 });
     const payer = evmPayer();
+    await configureStation(app, payer);
 
     const before = Date.now();
     const res = await buy(app, paid(payer));
@@ -278,7 +343,7 @@ describe('buying a slot', () => {
     // surface — the outcome IS the response.
     expect(operator.peerings()).toHaveLength(1);
     expect(operator.peerings()[0]?.id).toBe(body.label);
-    expect(operator.peerings()[0]?.url).toBe(STATION_URL);
+    expect(operator.peerings()[0]?.url).toBe(station.url);
     expect(body.peering.localLabel).toBe(body.label);
     expect(body.peering.channel.status).toBe('created');
     expect(body.peering.channel.id).toBe(operator.peerings()[0]?.channel.id);
@@ -318,7 +383,7 @@ describe('buying a slot', () => {
     // peering never settles on a guess between two shared chains.
     expect(written).toEqual({
       id: purchased.label,
-      url: STATION_URL,
+      url: station.url,
       fee: 42,
       max_packet_amount: 777_000,
       chain: 'solana',
@@ -333,7 +398,7 @@ describe('buying a slot', () => {
     });
 
     await bought(app, paid(evmPayer()), {
-      stationUrl: STATION_URL,
+      stationUrl: station.url,
       // Everything a broadcaster might wish for and does not get to have.
       id: 'vanity',
       label: 'vanity',
@@ -459,7 +524,7 @@ describe('the write the hub signs', () => {
     const res = await fetch(`${operator.url}/peers`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'unsigned', url: STATION_URL }),
+      body: JSON.stringify({ id: 'unsigned', url: station.url }),
     });
     await res.arrayBuffer();
 
@@ -497,8 +562,11 @@ describe('the write the hub signs', () => {
 
     const purchased = await bought(app, paid(evmPayer()));
 
-    expect(operator.writes()).toHaveLength(2);
-    const [first, second] = operator.writes();
+    // The peering write, twice — the routes that follow it are their own
+    // writes and are #36's business, not this test's.
+    const attempts = operator.writes().filter((w) => w.path === '/peers');
+    expect(attempts).toHaveLength(2);
+    const [first, second] = attempts;
     expect(second?.body).toBe(first?.body);
     // Same write, same key, different signature: `created` advanced rather
     // than the bytes being repeated.
@@ -542,7 +610,10 @@ describe('a station the hub cannot read', () => {
       { stationIsReadable: () => false }
     );
 
-    const res = await buy(app, paid(evmPayer()));
+    const payer = evmPayer();
+    await configureStation(app, payer);
+
+    const res = await buy(app, paid(payer));
     const body = (await res.json()) as RefusalBody;
 
     expect(res.status).toBe(502);
@@ -561,7 +632,9 @@ describe('a station the hub cannot read', () => {
       { stationIsReadable: () => false }
     );
 
-    await (await buy(app, paid(evmPayer()))).arrayBuffer();
+    const payer = evmPayer();
+    await configureStation(app, payer);
+    await (await buy(app, paid(payer))).arrayBuffer();
 
     // Asking again cannot change the answer, and the packet's deadline is the
     // broadcaster's to spend.
@@ -572,10 +645,12 @@ describe('a station the hub cannot read', () => {
 describe('an operator surface that will not take the write', () => {
   it('names the hub, not the broadcaster', async () => {
     const { app, operator } = await boot();
+    const payer = evmPayer();
+    await configureStation(app, payer);
     // Every attempt fails: not a slow chain, a hub that cannot write.
     operator.failNextWrites(10);
 
-    const res = await buy(app, paid(evmPayer()));
+    const res = await buy(app, paid(payer));
     const body = (await res.json()) as RefusalBody;
 
     expect(res.status).toBe(503);
@@ -650,6 +725,7 @@ describe('where the buy lives', () => {
   it('is a POST at its own prefix and nowhere else', async () => {
     const { app } = await boot();
     const payer = evmPayer();
+    await configureStation(app, payer);
 
     expect((await buy(app, paid(payer))).status).toBe(200);
 
@@ -687,6 +763,7 @@ describe('the buy holds no payment code', () => {
   it('reads the three headers the connector stated and echoes none back', async () => {
     const { app } = await boot();
     const payer = evmPayer();
+    await configureStation(app, payer);
 
     const res = await buy(app, paid(payer));
     const body = await res.text();

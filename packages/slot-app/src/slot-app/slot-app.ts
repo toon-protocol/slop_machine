@@ -15,8 +15,8 @@
  * this app — the one that reaches back into a connector's operator surface —
  * does not become the exception to it.
  *
- * What exists today (issues #33, #34 and #35) is the boot, the quote and the
- * buy:
+ * What exists today (issues #33, #34, #35 and #36) is the boot, the quote and
+ * the buy:
  *
  *   - `GET /health` on the app port: process liveness, for a hub operator's
  *     supervisor inside the node. It requires no payment header, reads none,
@@ -32,10 +32,13 @@
  *     `../quote/quote.ts` for why every foreseeable refusal is moved here.
  *
  *   - `POST /buy` on the app port: **paid**, at the slot price, beneath its
- *     own connector prefix and never the quote's. It establishes the
- *     **peering** toward the broadcaster's station and records the **slot**
- *     durably, both before it answers — the fulfill means you are peered. See
- *     `../buy/buy.ts`.
+ *     own connector prefix and never the quote's. It reads the station
+ *     connector's own self-description, establishes the **peering** toward
+ *     that station, writes one forwarded route per address the station sells
+ *     — each priced from that station's own published price plus the hub's
+ *     carriage — and records the **slot** durably, all of it before it
+ *     answers. The fulfill means you are peered. See `../buy/buy.ts`,
+ *     `../peering/station-description.ts` and `../peering/routes.ts`.
  *
  *   - the two operator credentials, resolved from their mounted files before
  *     anything binds. Both are named by path only and the app refuses to start
@@ -57,9 +60,8 @@
  *   - the roster, opened in the data directory and **read back at boot**, so a
  *     restarted hub still knows who it admitted and when each slot lapses.
  *
- * The routes derived from a station's self-description (#36), what a renewal
- * means (#37), the lapse ticker (#38) and the boot reconciliation (#39) are
- * deliberately not here yet.
+ * What a renewal means (#37), the lapse ticker (#38) and the boot
+ * reconciliation (#39) are deliberately not here yet.
  *
  * The app port, the data directory and every number in the hub's admission
  * policy are configuration rather than constants: the suite boots real
