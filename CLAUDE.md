@@ -74,7 +74,7 @@ Cross-cutting agent skills, docs, and the canonical project context live in
 Canonical rules/decisions: `toon-meta` → [`context/context.md`](https://github.com/toon-protocol/toon-meta/blob/main/context/context.md),
 with `architecture.md`, `repos.md`, `decisions.md` and `glossary.md` beside it.
 
-> Sibling CLAUDE.md files still point at `toon-meta` →
-> `_bmad-output/project-context.md`. That path no longer exists — the raw BMAD
-> dump was removed in favour of the curated `context/` above. Follow
-> `context/` here.
+> The older `_bmad-output/project-context.md` pointer is gone — the raw BMAD
+> dump was removed in favour of the curated `context/` above. relay, store,
+> gas-station and toon-client were updated to match (relay#159, store#131,
+> gas-station#23, toon-client#644).
