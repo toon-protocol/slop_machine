@@ -26,7 +26,9 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > defaulting to the four-rung placeholder ladder, and a ladder that could break the 2 MiB segment
 > budget is refused at boot. Segments are kept on a sliding window evicted by count
 > (`TOON_RETAIN_SEGMENTS`), so a long broadcast does not fill the broadcaster's disk and a span past
-> the window is a clean not-found rather than a stale body. `GET /encode`, unpriced and reachable
+> the window is a clean not-found rather than a stale body. An uplink that dies quietly — half-open,
+> no FIN, never reconnecting — takes the station off the air after `TOON_INGEST_IDLE_SECONDS`
+> without vibes, so `live` cannot go on claiming a broadcaster who is gone. `GET /encode`, unpriced and reachable
 > only from inside the node, tells the broadcaster whether their box is actually keeping up with the
 > ladder they chose. A **`deploy/` bundle** now runs the whole station — Caddy, the connector that
 > prices one route per rung and one for `/now`, and the origin — on exactly three published ports,

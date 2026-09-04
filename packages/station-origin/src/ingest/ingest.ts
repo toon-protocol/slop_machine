@@ -34,6 +34,14 @@
  * looking like a second broadcaster, and what keeps the station's *now* honest
  * about whether anybody is actually supplying vibes.
  *
+ * Superseding only covers the broadcaster who comes back. The one who dies
+ * quietly and never returns is covered by the idle rule of
+ * {@link module:ingest/idle}: a publish that stops sending vibes for the
+ * configured interval is taken off the air on the listener's own initiative,
+ * so a half-open corpse cannot report a station live indefinitely. The clock
+ * counts **vibes, not socket activity** — a connection that is open, healthy
+ * and sending no media is a stalled edge, and the station says so.
+ *
  * @module
  */
 
@@ -52,6 +60,13 @@ import {
   type RtmpPublishRequest,
 } from './rtmp-session.js';
 import { streamKeyMatches } from './stream-key.js';
+import { assertIngestIdle, DEFAULT_INGEST_IDLE_SECONDS } from './idle.js';
+
+export {
+  DEFAULT_INGEST_IDLE_SECONDS,
+  IngestIdleError,
+  assertIngestIdle,
+} from './idle.js';
 
 /**
  * Default RTMP/RTMPS ingest port (env: `TOON_INGEST_PORT`).
@@ -100,6 +115,15 @@ export interface IngestConfig {
   /** Mounted certificate and key. Supplied ⇒ RTMPS; omitted ⇒ plain RTMP. */
   tls?: IngestTlsConfig | undefined;
   /**
+   * How long an accepted publish may go without sending vibes before it is
+   * taken off the air (default: 30 seconds).
+   *
+   * The rule, and why it counts media rather than sockets, is
+   * {@link module:ingest/idle}. A value that is not a whole number of seconds,
+   * or that would switch the rule off, is an `IngestIdleError` at start.
+   */
+  idleSeconds?: number;
+  /**
    * Called once per accepted publish, with the vibes attached. Omit it and
    * accepted media is counted and discarded rather than buffered.
    *
@@ -118,12 +142,15 @@ export interface IngestInstance {
   host: string;
   /** Whether the listener terminates TLS, i.e. whether it is RTMPS. */
   tls: boolean;
+  /** How long a publish may go without vibes before it is taken off the air. */
+  idleSeconds: number;
   /**
    * Whether a broadcaster is publishing right now.
    *
    * One publish is on the air at a time: a reconnect takes the air from the
-   * connection that held it, so this does not stay true because a dead socket
-   * has not noticed yet.
+   * connection that held it, and a publish that stops sending vibes for
+   * `idleSeconds` is taken off it. So this does not stay true because a dead
+   * socket has not noticed yet, whether or not the broadcaster ever returns.
    */
   isLive(): boolean;
   /** Stop listening and drop any publisher. Idempotent. */
@@ -141,6 +168,9 @@ export class IngestTlsError extends Error {
  * Resolves once the listener is accepting connections, so a caller that awaits
  * it can point a publisher at `instance.port` on the next line.
  *
+ * @throws IngestIdleError if the idle interval is not a whole number of
+ * seconds, or would switch the idle rule off.
+ *
  * @example
  * ```ts
  * const ingest = await startIngest({ streamKey: 'k', port: 0, host: '127.0.0.1' });
@@ -154,6 +184,12 @@ export async function startIngest(
   const host = config.host ?? DEFAULT_INGEST_HOST;
   const requestedPort = config.port ?? DEFAULT_INGEST_PORT;
   const { streamKey, onPublish } = config;
+
+  // Before the port binds, like every other refusal here: an idle rule that
+  // cannot be run is the bug it exists to prevent, wearing a config value.
+  const idleSeconds = config.idleSeconds ?? DEFAULT_INGEST_IDLE_SECONDS;
+  assertIngestIdle(idleSeconds);
+  const idleMs = idleSeconds * 1000;
 
   const sockets = new Set<Socket>();
 
@@ -169,6 +205,11 @@ export async function startIngest(
    * would then have the station reporting ingest live for as long as the
    * corpse of the old connection lasts, which is exactly the lie this address
    * exists to prevent.
+   *
+   * A slot is emptied three ways: the publish ends, a new publish supersedes
+   * it, or it stops sending vibes for `idleSeconds` and the idle rule takes
+   * the air from it. The third is the one that covers a broadcaster who never
+   * comes back at all, and it is why the slot carries a clock.
    */
   let onAir: OpenPublish | undefined;
 
@@ -189,7 +230,7 @@ export async function startIngest(
   const port = boundPort(server);
 
   console.log(
-    `[station-origin] ingest listening for ${config.tls ? 'RTMPS' : 'RTMP'} on ${host}:${String(port)}`
+    `[station-origin] ingest listening for ${config.tls ? 'RTMPS' : 'RTMP'} on ${host}:${String(port)}, taking a publish off the air after ${String(idleSeconds)}s without vibes`
   );
   if (!config.tls) {
     console.warn(
@@ -203,13 +244,14 @@ export async function startIngest(
     port,
     host,
     tls: config.tls !== undefined,
+    idleSeconds,
     isLive() {
       return onAir !== undefined;
     },
     async stop() {
       if (!running) return;
       running = false;
-      onAir = undefined;
+      clearAir();
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       await new Promise<void>((resolveStop, rejectStop) => {
@@ -254,14 +296,12 @@ export async function startIngest(
         );
 
         if (onPublish === undefined) {
-          mine = { socket };
-          onAir = mine;
+          mine = takeAir(socket, request.remoteAddress);
           return { accepted: true };
         }
 
         const { sink, vibes } = flvStream(socket);
-        mine = { socket };
-        onAir = mine;
+        mine = takeAir(socket, request.remoteAddress);
         onPublish({
           app: request.app,
           remoteAddress: request.remoteAddress,
@@ -270,11 +310,19 @@ export async function startIngest(
         });
         return { accepted: true, media: sink };
       },
+      onVibes() {
+        // The clock is reset by media and by nothing else, so a publisher that
+        // keeps the connection warm without sending anything is still a
+        // stalled edge. Only the publish holding the air has a clock worth
+        // resetting; a superseded one is already gone.
+        if (mine !== undefined && onAir === mine) mine.lastVibesAt = Date.now();
+      },
       onPublishEnd(request, bytes) {
         // Only if this connection is still the one on the air. A publish that
         // was superseded lost the air the moment the new one was accepted, and
         // its socket finally noticing is not the station going quiet.
-        if (mine !== undefined && onAir === mine) onAir = undefined;
+        if (mine !== undefined && onAir === mine) clearAir();
+        else if (mine !== undefined) disarm(mine);
         mine = undefined;
         console.log(
           `[station-origin] ingest ended for ${request.remoteAddress ?? 'an unknown address'} after ${String(bytes)} bytes of vibes`
@@ -299,11 +347,91 @@ export async function startIngest(
   function supersede(by: string | undefined): void {
     const previous = onAir;
     if (previous === undefined) return;
-    onAir = undefined;
+    clearAir();
     console.log(
       `[station-origin] ingest is taking the air from the publish already open for the reconnect from ${by ?? 'an unknown address'}`
     );
     previous.socket.destroy();
+  }
+
+  /**
+   * Put a freshly accepted publish on the air, with its idle clock running
+   * from now.
+   *
+   * The clock starts at acceptance rather than at the first media message, so
+   * a publisher that completes the handshake, is accepted, and then sends
+   * nothing at all is taken off the air on the same schedule as one that
+   * stopped mid-broadcast. Both are a station reporting vibes it is not
+   * receiving.
+   */
+  function takeAir(socket: Socket, from: string | undefined): OpenPublish {
+    const publish: OpenPublish = {
+      socket,
+      from,
+      lastVibesAt: Date.now(),
+      idleTimer: undefined,
+    };
+    onAir = publish;
+    arm(publish);
+    return publish;
+  }
+
+  /** Empty the slot and stop its clock. The socket is the caller's business. */
+  function clearAir(): void {
+    if (onAir === undefined) return;
+    disarm(onAir);
+    onAir = undefined;
+  }
+
+  /**
+   * Set the clock for the publish on the air.
+   *
+   * One timer, re-armed for whatever is left of the interval rather than reset
+   * on every media message: RTMP carries media many times a second and a timer
+   * rescheduled that often is churn for nothing. Media only writes a
+   * timestamp; this decides, when the timer finally fires, whether that
+   * timestamp is old enough to matter and otherwise waits out the remainder.
+   */
+  function arm(publish: OpenPublish): void {
+    disarm(publish);
+    const remaining = publish.lastVibesAt + idleMs - Date.now();
+    if (remaining <= 0) {
+      expire(publish);
+      return;
+    }
+    publish.idleTimer = setTimeout(() => arm(publish), remaining);
+    // The listener's own handle is what keeps the process alive; a station
+    // waiting on this clock and nothing else is a station that should exit.
+    publish.idleTimer.unref();
+  }
+
+  function disarm(publish: OpenPublish): void {
+    if (publish.idleTimer === undefined) return;
+    clearTimeout(publish.idleTimer);
+    publish.idleTimer = undefined;
+  }
+
+  /**
+   * The idle rule fires: no vibes for the whole interval, so the station goes
+   * off the air.
+   *
+   * The air is given up first and the socket dropped second, so that the
+   * publish is off the air before anything downstream can notice — exactly the
+   * order `supersede()` uses, and the reason a corpse's `close` arriving later
+   * cannot take a station off the air it no longer holds.
+   *
+   * Dropping the socket is what ends the vibes: the FLV stream closes, the
+   * encoder sees the end of its input and flushes, and the window already on
+   * disk stays exactly where it was. A broadcaster who reappears afterwards is
+   * accepted like any other publish and continues the sequence.
+   */
+  function expire(publish: OpenPublish): void {
+    if (onAir !== publish) return;
+    clearAir();
+    console.warn(
+      `[station-origin] ingest took the station off the air: no vibes for ${String(idleSeconds)}s from ${publish.from ?? 'an unknown address'} — the uplink is gone, however open its socket still looks`
+    );
+    publish.socket.destroy();
   }
 
   function isAuthorized(request: RtmpPublishRequest): boolean {
@@ -312,9 +440,15 @@ export async function startIngest(
   }
 }
 
-/** The publish that is on the air, and the socket carrying it. */
+/** The publish that is on the air, the socket carrying it, and its clock. */
 interface OpenPublish {
   socket: Socket;
+  /** The publisher's address, for the log line when the clock runs out. */
+  from: string | undefined;
+  /** When vibes last arrived on it, in epoch milliseconds. */
+  lastVibesAt: number;
+  /** The pending idle check, if one is armed. */
+  idleTimer: NodeJS.Timeout | undefined;
 }
 
 /**

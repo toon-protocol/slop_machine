@@ -194,6 +194,13 @@ services:
       # segment ≈ 175 MiB on the default ladder; the origin prints the number
       # at boot.
       TOON_RETAIN_SEGMENTS: ${STATION_RETAIN_SEGMENTS:-60}
+      # No vibes for this long and the station goes off the air. A broadcaster
+      # whose uplink dies quietly sends no FIN and no RST — the connection sits
+      # half-open — so without this the station would report itself live beside
+      # a sequence that never moves, for as long as that corpse lasted. The
+      # clock counts VIBES, not socket activity. The window already produced
+      # stays servable and a broadcaster who comes back continues the sequence.
+      TOON_INGEST_IDLE_SECONDS: ${STATION_INGEST_IDLE_SECONDS:-30}
       # The stream key is a LOCATION, never a value: there is deliberately no
       # TOON_STREAM_KEY here and no flag for the literal, because a command
       # line is world-readable on the box and an image with a default key is a
