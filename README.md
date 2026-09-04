@@ -30,7 +30,9 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > only from inside the node, tells the broadcaster whether their box is actually keeping up with the
 > ladder they chose. A **`deploy/` bundle** now runs the whole station — Caddy, the connector that
 > prices one route per rung and one for `/now`, and the origin — on exactly three published ports,
-> and the segment port is not one of them. There is still no published image and no devnet node.
+> and the segment port is not one of them. Every merge to `main` publishes
+> `ghcr.io/toon-protocol/station-origin`, so a fresh box brings a station up with `docker compose up
+> -d` and no local build. There is still no devnet node.
 > See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it, and
 > [`deploy/README.md`](./deploy/README.md) for how to bring a station up.
 
