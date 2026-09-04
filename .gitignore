@@ -1,11 +1,12 @@
 # ─── Key material and secrets ─────────────────────────────────────────────
 #
-# This repository is PUBLIC and a radio node deploys behind the connector, so
-# it generates the same key material every other TOON box does: an ILP signer,
-# the settlement keys that actually hold value, and peering secrets. These
-# rules exist before any of that is generated, on purpose — the failure mode
-# they prevent (connector#490) is an operator running `git add -A` in a
-# checkout on a live box and committing funded private keys to a public repo.
+# This repository is PUBLIC and a slop machine node deploys behind the
+# connector, so it generates the same key material every other TOON box does:
+# an ILP signer, the settlement keys that actually hold value, and peering
+# secrets. These rules exist before any of that is generated, on purpose — the
+# failure mode they prevent (connector#490) is an operator running `git add -A`
+# in a checkout on a live box and committing funded private keys to a public
+# repo.
 #
 # Wildcarded rather than listed by name so a re-derived, per-box, or
 # additional key cannot reintroduce the gap by being named slightly

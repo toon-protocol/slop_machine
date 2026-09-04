@@ -1,10 +1,10 @@
-# radio
+# slop_machine
 
 **Audio you get paid to broadcast.** A stream origin that sits behind the
 [TOON connector](https://github.com/toon-protocol/connector), so listeners pay
 per request and the origin never sees a payment.
 
-The radio server itself contains no payment code at all. It ingests audio and
+The slop machine itself contains no payment code at all. It ingests audio and
 serves segments; by the time a request reaches it, it is already paid for. That
 separation is the entire design, and it is the same one the
 [relay](https://github.com/toon-protocol/relay) uses — everything below the
@@ -17,7 +17,7 @@ dashed line changes per app, everything above it does not.
                           ║                 │                 ║
                           ║ ─ ─ ─ ─ ─ ─ ─ ─ │ ─ ─ ─ ─ ─ ─ ─ ─ ║
                           ║                 ▼                 ║
-  broadcaster ─ ingest ──▶║  Caddy  ──▶  radio  :3100         ║  ingests, serves
+  broadcaster ─ ingest ──▶║  Caddy  ──▶  slop_machine  :3100  ║  ingests, serves
    (authenticated)        ║   :443        │                   ║
                           ╚═══════════════════════════════════╝
                                           └── segments/

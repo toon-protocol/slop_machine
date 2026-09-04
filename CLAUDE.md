@@ -1,4 +1,4 @@
-# radio
+# slop_machine
 
 The TOON Protocol **stream origin**: a paid audio/stream broadcast service
 that sits behind the connector, so listeners pay per request and the origin
@@ -38,8 +38,8 @@ it here.** Pricing a route is connector config, not application code.
 
 ## This repo is public, and will hold key material on live boxes
 
-A radio node deploys the standard connector bundle and so generates an ILP
-signer key, settlement keys that hold real value, and peering secrets.
+A slop machine node deploys the standard connector bundle and so generates an
+ILP signer key, settlement keys that hold real value, and peering secrets.
 `.gitignore` already covers these by wildcard (`*.key`, `*.secret`, `*.pem`,
 operator credentials) before any of them exist — see its comments for the
 incidents that shaped those rules.
