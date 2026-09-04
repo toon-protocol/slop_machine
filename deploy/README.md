@@ -171,18 +171,30 @@ docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
 
 | Image                                     | Built by           | Contents                                                                             |
 | ----------------------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
-| `ghcr.io/toon-protocol/station-origin`    | this repo          | the station origin (`packages/station-origin`), ffmpeg included                       |
+| `ghcr.io/toon-protocol/station-origin`    | this repo, on merge to `main` | the station origin (`packages/station-origin`), ffmpeg included                    |
 | `ghcr.io/toon-protocol/connector`         | the connector repo | the stock TOON connector — **this repo publishes no connector image and only pins one** |
 
-There is no image-publishing workflow in this repository yet, so
-`ghcr.io/toon-protocol/station-origin:release` does not exist to pull. Until it
-does, run the local overlay, which builds the origin from this checkout, or
-build and tag it yourself:
+`ghcr.io/toon-protocol/station-origin` is published by
+[`.github/workflows/publish-station-origin-image.yml`](../.github/workflows/publish-station-origin-image.yml)
+on every merge to `main`, the same shape relay and store publish theirs. Each
+build moves `:latest` and `:release` and keeps an immutable `:sha-<short>` tag;
+a `vX.Y.Z` git tag additionally publishes semver tags. `:release` is the tag
+`docker-compose.yml` defaults `STATION_ORIGIN_IMAGE` to and the one Watchtower
+follows, so a plain `docker compose up -d` on a fresh box pulls it and needs no
+local build.
+
+Two reasons you would still build it yourself: you are running the local
+overlay (which builds from this checkout by design), or you want to test a
+change before it is merged.
 
 ```bash
 docker build -f ../packages/station-origin/Dockerfile \
   -t ghcr.io/toon-protocol/station-origin:release ..
 ```
+
+To roll back, point `STATION_ORIGIN_IMAGE` in `.env` at a `sha-` tag from a
+build you trust and run `docker compose up -d`. That is the whole reason the
+immutable tag is published alongside the moving ones.
 
 The connector pin lives in exactly one place: `docker-compose.yml`'s
 `connector.image`, an immutable tag. Bumping it is a reviewed commit that

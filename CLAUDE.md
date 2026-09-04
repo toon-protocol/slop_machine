@@ -239,10 +239,19 @@ place — `deploy/docker-compose.yml`'s `connector.image`. This repo publishes n
 reach a box in one `git pull`. The stream key and the RTMPS private key are mounted files, gitignored
 and never in an image.
 
-**What is still design:** the slot app has not been started, and there is no image-publishing
-workflow, no CI and no devnet node — so
-`ghcr.io/toon-protocol/station-origin:release` does not exist to pull yet, and the local overlay
-builds the origin from the checkout instead. Do not infer other commands from the sibling repos.
+**CI and the published image.** `.github/workflows/ci.yml` is the gate — `pnpm lint`, `build`,
+`typecheck`, `format:check` and `test` on every PR and every push to main, plus a build of the
+origin image and the fleet's shared no-op merge guard, aggregated into one required `CI OK` check.
+The suite encodes for real, so that workflow installs `ffmpeg` (which brings `ffprobe`) on the
+runner; `openssl`, which the ingest-TLS suites shell out to, is already on the GitHub image.
+`.github/workflows/publish-station-origin-image.yml` publishes
+`ghcr.io/toon-protocol/station-origin` on every merge to main, moving `:latest` and `:release` and
+keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compose.yml` defaults to
+and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
+image. This repo publishes that one image and no other — never a connector.
+
+**What is still design:** the slot app has not been started and there is no devnet node. Do not
+infer other commands from the sibling repos.
 
 What does exist, all run from the repo root:
 

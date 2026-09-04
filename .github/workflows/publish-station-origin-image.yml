@@ -1,0 +1,97 @@
+name: Publish station origin image
+
+# Builds the station origin image (packages/station-origin/Dockerfile) and
+# pushes it to GHCR as ghcr.io/toon-protocol/station-origin. Same shape as
+# relay's publish-relay-image.yml and store's publish-store-image.yml — one
+# publish workflow per app image, no fleet-specific machinery of its own.
+#
+# THIS IS THE ONLY IMAGE THIS REPOSITORY PUBLISHES. The connector is the stock
+# GHCR image on an immutable pin (deploy/docker-compose.yml's `connector.image`,
+# the pin of record); nothing here builds or pushes one, and
+# deploy/bundle.test.ts fails the build if that ever changes.
+#
+# `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
+# publish semver tags for pinning, plus an immutable sha tag.
+#
+# `release` is this image's instance of the fleet-wide moving-tag convention
+# (toon-meta#403, relay and store run the same one): a box runs a label-scoped
+# Watchtower that watches `:release` rather than `:latest`, so an auto-redeploy
+# only ever follows a commit that landed on main and built here. It is the tag
+# deploy/docker-compose.yml defaults STATION_ORIGIN_IMAGE to, and the one
+# deploy/docker-compose.watchtower.yml describes Watchtower following. The
+# immutable `:sha-*` tag stays as the pinning/rollback handle — pointing
+# STATION_ORIGIN_IMAGE at one and running `up -d` puts a specific build back.
+#
+# A recreate of the origin drops the broadcaster's publish and the encoder with
+# it, so this workflow moving `:release` is a few seconds of stall for every
+# station running the Watchtower overlay. That is stated in that overlay's
+# header; it is the reason a broadcaster mid-broadcast may choose not to run it.
+#
+# ci.yml builds this same image on every PR (`image-build`) but pushes nothing,
+# so a Dockerfile that cannot build is caught BEFORE merge rather than leaving
+# `:release` silently pointing at the previous build.
+#
+# Single-arch (amd64, the runner's own): the devnet boxes are x86, and no
+# consumer of this image asks for arm64. Adding platforms here without a real
+# consumer would multiply a build that already installs ffmpeg into the
+# runtime stage.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency: publish-station-origin-image-${{ github.ref }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The repository default for GITHUB_TOKEN is read-only, so this block is
+      # what makes the push possible at all — dropping it is a 403 on push.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/station-origin
+          # `latest` and `release` both track main (release is the Watchtower
+          # watch target, see the header above); semver tags publish on vX.Y.Z;
+          # sha tags give an immutable handle. `enable={{is_default_branch}}`
+          # keeps the two moving tags off tag and manual runs from anywhere but
+          # main.
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=release,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # The build context is the repository root, not the package
+          # directory: the Dockerfile's first COPY takes the workspace root's
+          # package.json, pnpm-workspace.yaml, pnpm-lock.yaml and
+          # tsconfig.json, which is how the frozen install resolves.
+          context: .
+          file: packages/station-origin/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

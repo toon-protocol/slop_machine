@@ -8,8 +8,9 @@
 # label is on `connector` and `origin` and nowhere else, so:
 #
 #   * a green merge to this repo's main publishes the STATION ORIGIN image and
-#     moves its `:release` tag, and this container recreates it within about
-#     a minute;
+#     moves its `:release` tag — that is
+#     `.github/workflows/publish-station-origin-image.yml`, which runs on push
+#     to main — and this container recreates it within about a minute;
 #   * the CONNECTOR is pinned to an immutable tag, which by definition never
 #     moves, so Watchtower has nothing to follow for it. Its label is kept for
 #     shape-parity with the relay, store and gas-station bundles and is inert.
@@ -29,7 +30,8 @@
 # without this overlay and apply on their own schedule.
 #
 # Rollback of the origin is by immutable tag: every build keeps its
-# `sha-<short>` tag in GHCR, so pinning STATION_ORIGIN_IMAGE to one and
+# `sha-<short>` tag in GHCR — the publish workflow tags each build with one
+# alongside the two moving tags — so pinning STATION_ORIGIN_IMAGE to one and
 # running `up -d` puts a specific build back. Rolling the connector back is
 # editing the pin in docker-compose.yml.
 #
