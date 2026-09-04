@@ -1,0 +1,62 @@
+# =============================================================================
+# Local overlay — run a station on your machine, without TLS.
+# =============================================================================
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# Three changes from the production file:
+#   * Caddy is dropped. There is no public hostname to get a certificate for
+#     and nothing for it to front. The connector's edge needs nothing here:
+#     the base file already publishes it on 127.0.0.1:3000, which is where a
+#     local viber points.
+#
+#     ONE GOTCHA. `.env` still has to exist and still has to set EDGE_HOST and
+#     ACME_EMAIL, even though Caddy never starts. Compose interpolates each
+#     file on its own BEFORE merging the set, so docker-compose.yml's
+#     `${EDGE_HOST:?...}` is resolved while Caddy is still an ordinary
+#     service; a profile only decides what runs, never what is read. Any
+#     values will do locally — `cp .env.example .env` and leave them.
+#   * The origin is BUILT FROM THIS CHECKOUT rather than pulled. This repo
+#     publishes no station-origin image yet (there is no CI), so the
+#     `ghcr.io/toon-protocol/station-origin:release` the base file names does
+#     not exist to pull. This is the only place in the bundle a local build
+#     appears, and it is the app image, never the connector's — the connector
+#     is the stock published image on an immutable pin in every file set.
+#   * Ingest is plain RTMP: the TLS certificate mounts are dropped and the two
+#     TOON_INGEST_TLS_* variables are cleared, so `rtmp://localhost:1935/live/
+#     <key>` works with no certificate to generate. The origin says loudly at
+#     boot that it is unencrypted. NEVER run this overlay on a box reachable
+#     from the internet — it puts the stream key on the wire in clear.
+#
+# The SEGMENT port stays unpublished even here. Publishing it would put a
+# free, unauthenticated door onto the vibes on your machine, and it is the one
+# habit that would then look normal in production. Reach the origin the way a
+# viber does — through the connector on 127.0.0.1:3000 — or `docker compose
+# exec origin wget -qO- http://127.0.0.1:3100/encode` for the in-node
+# diagnostics.
+# =============================================================================
+
+services:
+  caddy:
+    # `docker compose up` ignores a service whose profile is not active, and
+    # no profile is ever activated here. Cleaner than a second copy of the
+    # file with the service deleted.
+    profiles: ['never']
+
+  origin:
+    build:
+      context: ..
+      dockerfile: packages/station-origin/Dockerfile
+    environment:
+      # Empty, not absent: compose merges environment maps, so the base file's
+      # values survive unless they are overridden. An empty value is what the
+      # origin reads as "no ingest TLS", and it refuses to start on a cert
+      # without a key, so both must go together.
+      TOON_INGEST_TLS_CERT: ''
+      TOON_INGEST_TLS_KEY: ''
+    # `!override` REPLACES the base file's list rather than merging into it.
+    # Compose otherwise concatenates volume lists, so without this tag the two
+    # certificate mounts would survive the overlay and `up` would fail on
+    # files this overlay exists to not need.
+    volumes: !override
+      - ./stream.key:/run/secrets/stream.key:ro
+      - station_data:/data

@@ -1,0 +1,35 @@
+# TLS for a station node. Caddy obtains and renews Let's Encrypt certificates
+# on its own — there is no certbot sidecar and no renewal timer to forget.
+#
+# ONE name, one upstream:
+#   EDGE_HOST → the connector's client edge, where a viber's paid pulls, the
+#               x402 greeting, and the free GET /ilp self-description all land.
+#
+# There is no second hostname because NOTHING FREE IS SERVED FROM A STATION
+# NODE. The relay bundle fronts a free-read WebSocket beside its paid edge;
+# a station has no free surface to front — a viber browses the broadcaster
+# page from the store and the hub's relay, never from here.
+#
+# CADDY DOES NOT CARRY THE RTMP PATH. Stock Caddy does not speak RTMP, and
+# building a custom Caddy image would break the fleet's stock-TLS-front norm,
+# so the origin publishes its own ingest port and terminates that TLS itself
+# (TOON_INGEST_TLS_CERT / TOON_INGEST_TLS_KEY). Ingest appears nowhere in this
+# file and cannot.
+#
+# The origin's SEGMENT port (3100) is deliberately absent from this file and
+# from every route in it. It must never be publicly reachable: it is the
+# payment-oblivious surface — segments, /now, /health and /encode all answer
+# on it with no notion of a payment — and a public path to it is a free door
+# onto a broadcaster's vibes.
+#
+# The upstream is NAMED, not addressed. Caddy re-resolves a container name per
+# dial, so a recreate that moves `connector` to a new address on the compose
+# network heals itself with no reload.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$EDGE_HOST} {
+	reverse_proxy connector:3000
+}

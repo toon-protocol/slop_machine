@@ -1,0 +1,56 @@
+# =============================================================================
+# Auto-redeploy overlay — Watchtower, scoped to this node's two app images.
+# =============================================================================
+#   docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+#
+# `--label-enable` makes Watchtower ignore every container UNLESS it carries
+# `com.centurylinklabs.watchtower.enable=true`. In docker-compose.yml that
+# label is on `connector` and `origin` and nowhere else, so:
+#
+#   * a green merge to this repo's main publishes the STATION ORIGIN image and
+#     moves its `:release` tag, and this container recreates it within about
+#     a minute;
+#   * the CONNECTOR is pinned to an immutable tag, which by definition never
+#     moves, so Watchtower has nothing to follow for it. Its label is kept for
+#     shape-parity with the relay, store and gas-station bundles and is inert.
+#     Changing the connector pin or its config — which is where every price
+#     this station charges lives — is a `git pull && docker compose up -d` on
+#     the box, not something that arrives on its own;
+#   * Caddy is NEVER touched. It holds the certificates and the ACME account,
+#     and it is the one component whose job is surviving the others being
+#     replaced — recreating it on an upstream `caddy:2-alpine` push would be
+#     an unreviewed change to the TLS edge.
+#
+# A recreate of the origin drops the broadcaster's publish and the encoder
+# with it. Ingest reconnects and the sequence continues rather than resetting,
+# and the segment window is on a named volume that survives the recreate, so
+# what a viber sees is a stall of a few seconds rather than a station that
+# ended. It is still a stall: a broadcaster mid-broadcast may prefer to run
+# without this overlay and apply on their own schedule.
+#
+# Rollback of the origin is by immutable tag: every build keeps its
+# `sha-<short>` tag in GHCR, so pinning STATION_ORIGIN_IMAGE to one and
+# running `up -d` puts a specific build back. Rolling the connector back is
+# editing the pin in docker-compose.yml.
+#
+# `--interval 60` is one manifest check per minute against public
+# repositories, so no registry credentials are mounted. `--cleanup` removes
+# the image a recreate just superseded, so a box following a moving tag does
+# not accumulate one dangling image per merge.
+#
+# The docker socket is unavoidable for a container-recreating tool. Nothing is
+# published: there is nothing here for Caddy to front and nothing that should
+# ever be reachable off-box — this overlay adds no fourth published port.
+# =============================================================================
+
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    environment:
+      # Watchtower's bundled client defaults to Docker API 1.25 and refuses to
+      # talk to a newer daemon without this set explicitly.
+      DOCKER_API_VERSION: '1.44'
+    command: ['--label-enable', '--interval', '60', '--cleanup']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

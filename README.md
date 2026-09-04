@@ -28,23 +28,36 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > (`TOON_RETAIN_SEGMENTS`), so a long broadcast does not fill the broadcaster's disk and a span past
 > the window is a clean not-found rather than a stale body. `GET /encode`, unpriced and reachable
 > only from inside the node, tells the broadcaster whether their box is actually keeping up with the
-> ladder they chose. There is no deploy bundle, no published image and no devnet node. The diagrams below are the intended shape, not a description of a
-> running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
+> ladder they chose. A **`deploy/` bundle** now runs the whole station — Caddy, the connector that
+> prices one route per rung and one for `/now`, and the origin — on exactly three published ports,
+> and the segment port is not one of them. There is still no published image and no devnet node.
+> See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it, and
+> [`deploy/README.md`](./deploy/README.md) for how to bring a station up.
 
 ## A station
 
 ```
-                          ╔═══════════════════════════════════╗
-  viber ─ paid segment ──▶║  Caddy  ──▶  connector            ║  pays, verifies
-   (one per segment)      ║   :443        :3000               ║  ─────────────
-                          ║                 │                 ║
-                          ║ ─ ─ ─ ─ ─ ─ ─ ─ │ ─ ─ ─ ─ ─ ─ ─ ─ ║
-                          ║                 ▼                 ║
-  broadcaster ─ RTMPS ─────────────────▶ origin        :3100  ║  ingests, serves
-   (stream key)     :1935 ║               │                   ║
-                          ╚═══════════════════════════════════╝
-                                          └── segments/
+                        ╔═══════════════════════════════════════════════╗
+  viber ── paid pull ─────▶ Caddy ────▶ connector ────▶ origin           ║
+   (one per segment)    ║   :80 :443     :3000            :3100          ║
+                        ║                one route per    segments,      ║
+                        ║                rung, one /now   /now           ║
+                        ║                                   ▲            ║
+  broadcaster ── RTMPS ──────────────────────────────────────┘           ║
+   (stream key)         ║   :1935                        segments/<rung>/║
+                        ╚═══════════════════════════════════════════════╝
+
+     published   80, 443  (Caddy)   ·   1935  (origin, RTMPS ingest)
+     loopback    3000     (the connector's client edge, on-box operator calls)
+     neither     3100     (the origin's segment port — reachable from nowhere)
 ```
+
+**Exactly three published ports, and the segment port is not one of them:** Caddy's 80 and 443, and
+the origin's RTMPS ingest port. Caddy does **not** carry the RTMP path — stock Caddy does not speak
+RTMP and a custom Caddy image would break the fleet's stock-TLS-front norm, so the origin publishes
+1935 itself and terminates that TLS. The connector's client edge is published to loopback only, for
+on-box operator calls. The origin's **segment** port is exposed on the compose network and nowhere
+else.
 
 The broadcaster points OBS — or anything that speaks RTMP — at the origin over RTMPS with their
 stream key, and the origin cuts the vibes into HLS segments with `ffmpeg`. A viber pulls one at a
@@ -56,13 +69,13 @@ rung's current sequence number, the fixed segment duration, and whether ingest i
 playlist is served from a station** — nothing free is, and the client daemon already stands between
 the station and the player, so it synthesizes whatever playlist its player needs over loopback.
 
-**Two ports are reachable from the internet and no more: Caddy's, and the origin's RTMPS ingest
-port.** Caddy fronts only the paid HTTP path. Stock Caddy does not speak RTMP and a custom Caddy
-image would break the fleet's stock-TLS-front norm, so the origin publishes the ingest port itself
-and terminates that TLS. Ingest is gated on the stream key — checked on the publish, before a byte
-is transcoded — and it is never paid: supplying vibes costs a broadcaster nothing per second. The
-origin's **segment** port is published on no interface at all, so the only route to a broadcaster's
-vibes is a paid packet through the connector.
+Ingest is gated on the stream key — checked on the publish, before a byte is transcoded — and it is
+never paid: supplying vibes costs a broadcaster nothing per second. The only route to a
+broadcaster's vibes is a paid packet through the connector, because the segment port is reachable
+from nowhere else. `/health` and `/encode` answer on that same port, unpriced and with **no
+connector route at all**: they are the broadcaster-operator's own diagnostics, from inside the node.
+
+The files that run all of this are in [`deploy/`](./deploy/).
 
 The broadcaster **is** the operator. They own the origin and the connector in front of it, they hold
 the settlement key, and vibers' payments accrue to them directly. Nobody collects on a broadcaster's

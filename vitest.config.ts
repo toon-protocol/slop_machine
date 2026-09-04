@@ -15,7 +15,10 @@ export default defineConfig({
     poolOptions: {
       forks: { minForks: 1, maxForks: 4 },
     },
-    include: ['packages/*/src/**/*.test.ts'],
+    // The station origin's own suites, plus deploy/*.test.ts — the guard
+    // that reads the real deploy artifacts (it is not origin source, so it
+    // lives next to the files it guards, exactly as relay's does).
+    include: ['packages/*/src/**/*.test.ts', 'deploy/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
   },
 });
