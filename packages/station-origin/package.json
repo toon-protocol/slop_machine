@@ -1,0 +1,50 @@
+{
+  "name": "@toon-protocol/station-origin",
+  "version": "0.1.0",
+  "description": "The station origin: ingests a broadcaster's vibes and serves segments of them, behind the connector",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "station-origin": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "toon",
+    "hls",
+    "rtmp",
+    "broadcast",
+    "origin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/toon-protocol/slop_machine.git",
+    "directory": "packages/station-origin"
+  },
+  "author": "ALLiDoizCode",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.0.0",
+    "hono": "^4.11.10"
+  }
+}
