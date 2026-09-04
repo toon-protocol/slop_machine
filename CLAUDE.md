@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes and serves — at one rung
+## Status: the station origin ingests, encodes and serves — across a configurable ladder
 
 This repository is a pnpm workspace with one package — `packages/station-origin`
 (`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
@@ -31,9 +31,10 @@ tsup/esbuild, tested with vitest.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
-[#7](https://github.com/toon-protocol/slop_machine/issues/7)) is the whole paid path at **one
-rung** — boot, answer liveness, take a broadcaster's vibes in, encode and cut them, and serve the
-result by address:
+[#7](https://github.com/toon-protocol/slop_machine/issues/7),
+[#8](https://github.com/toon-protocol/slop_machine/issues/8)) is the whole paid path across a
+**configurable rung ladder** — boot, answer liveness, take a broadcaster's vibes in, encode and cut
+them at every rung, and serve the result by address:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
@@ -57,9 +58,9 @@ result by address:
   plus a short buffer, never average targeting), writes each span under a temporary name and renames
   it only once complete, and serves it whole with its length stated. A segment over the 2 MiB budget
   is logged loudly and never served. **No playlist is served** and nothing free is: the client
-  daemon synthesizes whatever its player needs over loopback. There is one rung, `720p` from the
-  placeholder numbers; the configurable ladder is
-  [#8](https://github.com/toon-protocol/slop_machine/issues/8).
+  daemon synthesizes whatever its player needs over loopback. **Which rungs exist is
+  configuration** — `TOON_RUNGS`/`--rungs`, defaulting to the four-rung placeholder ladder — and one
+  ingest is encoded at every rung on it, each into its own prefix.
 
 ### Ports, honestly, for what exists so far
 
@@ -74,16 +75,42 @@ The origin binds two listeners and they are not alike:
   ports — Caddy's 80 and 443 plus the RTMPS ingest port — and the segment port is never one of
   them**. The `deploy/` bundle that will hold that still is #14.
 
+### The rung ladder
+
+The ladder is one string, `--rungs`/`TOON_RUNGS`, because a station's rungs have to be readable
+beside the connector routes that price them in the same compose file:
+
+```
+TOON_RUNGS="audio:128k,480p:480:800k:128k,720p:720:1800k:128k,1080p:1080:3000k:128k"
+```
+
+Rungs are comma-separated, fields colon-separated: `<name>:<height>:<video bitrate>:<audio bitrate>`
+for a rung with a picture, `<name>:<audio bitrate>` for one carrying only sound. Bitrates are
+**caps, never targets**, in bits per second with the broadcast-conventional `k` and `M` suffixes.
+That default is exactly the four-rung, four-second ladder of
+[`docs/placeholder-numbers.md`](docs/placeholder-numbers.md), and the rung names are the address
+prefixes the connector prices, one route each.
+
+**The ladder is validated fail-closed at every start.** Worst-case bytes are computed as capped
+bitrate × fixed segment duration, and the origin **refuses to start — non-zero exit, naming the
+offending rung** — if any rung exceeds ADR 0001's 2 MiB budget. It refuses just as flatly on a
+ladder it cannot read, a name that could not be addressed, or two rungs of one name. Same posture as
+`connector.toml`: a bad config is a refuse-to-start, never a degraded run. Because it is arithmetic
+over configuration, raising a bitrate re-runs the check at the next start rather than quietly
+breaking the bound. At four-second segments the ceiling is 4.19 Mbit/s, which is why the top rung
+sits at 3 Mbit/s.
+
 ### Configuration
 
 Flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
 `--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`,
-`--segment-seconds`/`TOON_SEGMENT_SECONDS`, `--ingest-port`/`TOON_INGEST_PORT`,
-`--ingest-host`/`TOON_INGEST_HOST`, `--ingest-tls-cert`/`TOON_INGEST_TLS_CERT`,
-`--ingest-tls-key`/`TOON_INGEST_TLS_KEY`. Port `0` binds an ephemeral port, which is how the suite
-runs stations side by side. Segments land in `<data dir>/segments/<rung>/`. The rung itself is
-`OriginConfig.rung` programmatically and has deliberately **no flag yet** — the ladder is #8, and a
-flag now would change shape then.
+`--segment-seconds`/`TOON_SEGMENT_SECONDS`, `--rungs`/`TOON_RUNGS`,
+`--ingest-port`/`TOON_INGEST_PORT`, `--ingest-host`/`TOON_INGEST_HOST`,
+`--ingest-tls-cert`/`TOON_INGEST_TLS_CERT`, `--ingest-tls-key`/`TOON_INGEST_TLS_KEY`. Port `0` binds
+an ephemeral port, which is how the suite runs stations side by side. Segments land in
+`<data dir>/segments/<rung>/`. Programmatically the ladder is `OriginConfig.rungs`, which takes
+either that same spec string or the rungs already parsed — which is how the suite runs a
+deliberately small two-rung ladder.
 
 The **stream key** is the exception with no default: `--stream-key-file`/`TOON_STREAM_KEY_FILE`
 names a mounted file, or `TOON_STREAM_KEY` carries the value. There is deliberately no flag for the
@@ -92,10 +119,10 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** The configurable rung ladder and its startup
-byte-budget refusal, the station's *now*, retention, reconnect, encode-lag reporting and the
-`deploy/` bundle are [#8–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot
-app has not been started. There is no `deploy/` bundle, no published image, no CI and no devnet
+**Everything else in the design is still design.** The station's *now*, retention, reconnect,
+encode-lag reporting and the `deploy/` bundle are
+[#9–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+started. There is no `deploy/` bundle, no published image, no CI and no devnet
 node — do not infer those commands from the sibling repos.
 
 What does exist, all run from the repo root:
@@ -119,7 +146,9 @@ origin owns its encoder, so the runtime stage installs it.
 Tests assert at the app's boundary only — they boot the real app and speak HTTP and real RTMP at it.
 Nothing reaches into the data directory's layout, the RTMP chunk parser, the stream-key comparison,
 the segmenter or the `ffmpeg` argument construction; all of them must stay rewritable without
-touching a test. Replace this section in the same commit that invalidates it.
+touching a test. The suite's ladder is ordinary configuration — two small rungs, one of them sound
+only — so a broadcaster's four real rungs never have to be encoded to prove the ladder works.
+Replace this section in the same commit that invalidates it.
 
 The design is settled and written down; the open questions the README used to list — which
 direction pays, the unit of payment, and how discovery works — are all answered. Vibers pay, per

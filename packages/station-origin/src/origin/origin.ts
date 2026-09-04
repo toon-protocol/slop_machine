@@ -10,8 +10,8 @@
  * `relay` uses — and it is what makes an ordinary HTTP app monetizable
  * without knowing ILP exists.
  *
- * What exists today (issues #5, #6 and #7) is the whole paid path, end to end,
- * at one rung:
+ * What exists today (issues #5, #6, #7 and #8) is the whole paid path, end to
+ * end, across a configurable ladder of rungs:
  *
  *   - `GET /health` on the segment port: liveness, for a supervisor inside the
  *     node. It requires no payment header, reads none, and echoes none. It is
@@ -29,20 +29,22 @@
  *     broadcaster's vibes, encoded at a rung and served whole. Every path a
  *     viber can reach sits strictly beneath that rung's own prefix, so the
  *     connector in front can terminate one route per rung at that rung's price
- *     and no address can be reached at another address's price.
+ *     and no address can be reached at another address's price. Which rungs
+ *     exist is configuration — one ingest, encoded at every rung on the
+ *     ladder — and a ladder that could break ADR 0001's byte budget is refused
+ *     at boot, naming the rung.
  *
  * The origin supervises the `ffmpeg` that produces those segments: owning the
  * encoder rather than depending on a separately-scheduled one is what keeps
  * ingest, encoding and serving inside a single testable surface.
  *
- * The configurable ladder and its startup byte-budget refusal (#8), the
- * station's *now* (#9), retention (#10), reconnect (#11) and encode-lag
+ * The station's *now* (#9), retention (#10), reconnect (#11) and encode-lag
  * reporting (#12) are not here yet.
  *
- * The two ports and the data directory are configuration rather than
- * constants: the integration suite boots real instances on fresh ports against
- * temporary directories, and a broadcaster-operator moves any of them without a
- * code change. The stream key is configuration too, but of a different kind —
+ * The two ports, the data directory and the rung ladder are configuration
+ * rather than constants: the integration suite boots real instances on fresh
+ * ports against temporary directories with a deliberately small two-rung
+ * ladder, and a broadcaster-operator moves any of them without a code change. The stream key is configuration too, but of a different kind —
  * it is provisioned as a mounted value and the origin refuses to start without
  * one.
  *
@@ -67,11 +69,13 @@ import {
   type SegmenterInstance,
 } from '../segmenter/segmenter.js';
 import { segmentRoutes, SEGMENTS_ROUTE_PREFIX } from '../segmenter/routes.js';
+import { DEFAULT_SEGMENT_SECONDS, type Rung } from '../segmenter/rung.js';
 import {
-  DEFAULT_RUNG,
-  DEFAULT_SEGMENT_SECONDS,
-  type Rung,
-} from '../segmenter/rung.js';
+  DEFAULT_LADDER,
+  DEFAULT_LADDER_SPEC,
+  describeLadder,
+  parseLadder,
+} from '../segmenter/ladder.js';
 import { VERSION } from '../version.js';
 
 // ---------- Defaults ----------
@@ -92,7 +96,8 @@ export const DEFAULT_HOST = '0.0.0.0';
 export const DEFAULT_DATA_DIR = './data';
 
 export { DEFAULT_INGEST_PORT, DEFAULT_INGEST_HOST };
-export { DEFAULT_RUNG, DEFAULT_SEGMENT_SECONDS };
+export { DEFAULT_SEGMENT_SECONDS };
+export { DEFAULT_LADDER, DEFAULT_LADDER_SPEC };
 
 // ---------- Configuration ----------
 
@@ -144,14 +149,20 @@ export interface OriginConfig {
   ingestTls?: IngestTlsConfig | undefined;
 
   /**
-   * The rung this station offers its vibes at (default: the `720p` placeholder).
+   * The rung ladder this station offers (default: the four-rung placeholder
+   * ladder, {@link DEFAULT_LADDER_SPEC}).
    *
-   * One rung, deliberately: the configurable ladder, and the startup refusal
-   * that re-runs ADR 0001's byte arithmetic over it, are issue #8. The suite
-   * runs a deliberately small rung, which costs nothing to arrange because
-   * this is ordinary configuration.
+   * Either the spec string an operator writes —
+   * `audio:128k,480p:480:800k:128k` — or the same ladder already parsed. One
+   * ingest is encoded at every rung on it and each rung is served beneath its
+   * own prefix, so the ladder is also the list of addresses the connector in
+   * front prices, one route each.
+   *
+   * A ladder whose worst case breaks the byte budget of ADR 0001 is a refusal
+   * to start, naming the rung — never a station that runs and serves segments
+   * a viber's connector may not carry.
    */
-  rung?: Rung;
+  rungs?: string | readonly Rung[];
   /**
    * Fixed segment duration, in seconds (default: 4).
    *
@@ -188,9 +199,9 @@ export interface ResolvedOriginConfig {
    */
   ingestTls: boolean;
   /**
-   * The rungs this station offers, by name — one, until issue #8. Each is
-   * served beneath `/segments/<rung>/`, which is the prefix its price attaches
-   * to.
+   * The rungs this station offers, by name, in ladder order. Each is served
+   * beneath `/segments/<rung>/`, which is the prefix its price attaches to —
+   * so this list is also the list of routes the connector in front needs.
    */
   rungs: readonly string[];
   /** The fixed duration every segment covers, in seconds. */
@@ -261,8 +272,10 @@ function livenessResponse(): LivenessResponse {
  * @returns A running `OriginInstance`.
  * @throws StreamKeyError if no stream key is configured, or both are.
  * @throws IngestTlsError if a configured certificate or key cannot be read.
- * @throws RungError if the rung cannot be addressed, or the segment duration
- * is not a whole number of seconds.
+ * @throws RungError if a rung cannot be addressed, if two rungs share a name,
+ * if the segment duration is not a whole number of seconds, or if any rung's
+ * capped bitrate times that duration exceeds the 2 MiB budget of ADR 0001 —
+ * the refusal names the rung.
  *
  * @example
  * ```ts
@@ -271,6 +284,7 @@ function livenessResponse(): LivenessResponse {
  *   ingestPort: 0,
  *   dataDir: '/tmp/station',
  *   streamKeyFile: '/run/secrets/station.key',
+ *   rungs: 'audio:128k,480p:480:800k:128k',
  * });
  * await fetch(`http://127.0.0.1:${origin.config.segmentPort}/health`);
  * await origin.stop();
@@ -291,13 +305,17 @@ export async function startOrigin(
   // cannot create is a refuse-to-start, never a degraded run.
   mkdirSync(dataDir, { recursive: true });
 
-  // Likewise before anything binds: a rung the origin cannot address is a
-  // station whose vibes could be reached at another rung's price.
-  const rung = config.rung ?? DEFAULT_RUNG;
+  // Likewise before anything binds. Two refusals live in here and both are
+  // fail-closed: a rung the origin cannot address is a station whose vibes
+  // could be reached at another rung's price, and a rung over the byte budget
+  // is a station that would go dark if the connector ever capped responses
+  // (ADR 0001). The arithmetic runs on every start, so a bitrate raised
+  // between runs is refused at the next one.
+  const rungs = resolveLadder(config.rungs);
   const segmentSeconds = config.segmentSeconds ?? DEFAULT_SEGMENT_SECONDS;
   const segmenter = createSegmenter({
     dataDir,
-    rungs: [rung],
+    rungs,
     segmentSeconds,
   });
 
@@ -352,7 +370,7 @@ export async function startOrigin(
     `[station-origin] v${VERSION} serving on http://${host}:${port} (data dir: ${dataDir})`
   );
   console.log(
-    `[station-origin] rung "${rung.name}" at ${String(rung.videoBitrate)} bit/s, served from ${SEGMENTS_ROUTE_PREFIX}/${rung.name}/<sequence>.ts in ${String(segmentSeconds)}s segments`
+    `[station-origin] ladder: ${describeLadder(rungs, segmentSeconds)} — each served from ${SEGMENTS_ROUTE_PREFIX}/<rung>/<sequence>.ts in ${String(segmentSeconds)}s segments`
   );
 
   let running = true;
@@ -393,6 +411,21 @@ async function stopAll(
   for (const result of results) {
     if (result.status === 'rejected') throw result.reason;
   }
+}
+
+/**
+ * The ladder a station will run, from whichever form it was configured in.
+ *
+ * A spec string is what an operator writes; parsed rungs are what a caller
+ * holding them already passes. Both end up in the same place, and both are
+ * refused the same way.
+ */
+function resolveLadder(
+  configured: string | readonly Rung[] | undefined
+): Rung[] {
+  if (configured === undefined) return [...DEFAULT_LADDER];
+  if (typeof configured === 'string') return parseLadder(configured);
+  return [...configured];
 }
 
 /**

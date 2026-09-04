@@ -32,10 +32,9 @@ export type {
 export { resolveStreamKey, StreamKeyError } from './ingest/stream-key.js';
 export type { StreamKeySource } from './ingest/stream-key.js';
 
-// Segments: what a viber pays for. One rung, cut into fixed-duration spans and
-// addressed by rung and sequence number.
+// Segments: what a viber pays for. Fixed-duration spans, cut at every rung on
+// the ladder and addressed by rung and sequence number.
 export {
-  DEFAULT_RUNG,
   DEFAULT_SEGMENT_SECONDS,
   SEGMENT_BYTE_BUDGET,
   VBV_BUFFER_SECONDS,
@@ -43,9 +42,23 @@ export {
   RungError,
   rungPrefix,
   segmentPath,
+  hasVideo,
+  segmentBytes,
+  bitrateCeiling,
   assertRung,
 } from './segmenter/rung.js';
 export type { Rung } from './segmenter/rung.js';
+
+// The ladder: every rung a station offers, as ordinary configuration. A rung
+// whose capped bitrate times the fixed duration exceeds the byte budget of
+// ADR 0001 is a refusal to start, naming the rung.
+export {
+  DEFAULT_LADDER,
+  DEFAULT_LADDER_SPEC,
+  parseLadder,
+  assertLadder,
+  describeLadder,
+} from './segmenter/ladder.js';
 export { createSegmenter } from './segmenter/segmenter.js';
 export type {
   Segment,
