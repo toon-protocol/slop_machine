@@ -28,12 +28,29 @@
  *      this payer already holds a slot. The same derivation the quote makes,
  *      asked of the same roster, so the prefix a broadcaster configured their
  *      station for is the prefix they are peered at.
- *   4. **The peering**, one `POST /peers` — see `../peering/peering.ts`.
- *   5. **The slot, recorded durably, before the answer.** Gas is spent inside
+ *   4. **The station's own self-description**, read at the URL the purchase
+ *      carried. It publishes that node's ILP addresses and **its route
+ *      prices**, which is the whole price list the hub needs — taken from the
+ *      station's own configuration rather than declared by the buyer, so
+ *      nothing is declared and nothing can drift. Read **before** the peering
+ *      write, because a station this hub cannot read is a refusal that should
+ *      cost neither party a channel.
+ *   5. **The routes, derived**, one per published prefix beneath the granted
+ *      one, each priced at the station's own price plus the hub's carriage —
+ *      see `../peering/routes.ts` for why that number is derived rather than
+ *      guessed. Derived before the peering too, so a station that publishes
+ *      nothing at its granted prefix is refused before the operator surface
+ *      is touched at all.
+ *   6. **The peering**, one `POST /peers` — see `../peering/peering.ts`.
+ *   7. **The routes, written**, one `POST /routes/peers` each. Being peered
+ *      is not yet being reachable: a hub carries only what its routing table
+ *      names.
+ *   8. **The slot, recorded durably, before the answer.** Gas is spent inside
  *      a paid request here, so a purchase whose answer arrived too late must
  *      be found already done when the broadcaster retries rather than paying
  *      for the same peering twice.
- *   6. **The answer**: the granted prefix, and when the slot lapses.
+ *   9. **The answer**: the granted prefix, the routes written, and when the
+ *      slot lapses.
  *
  * **The request body carries only the station connector's URL.** The handle
  * comes from the payer, the fee and the packet cap from the hub's own
@@ -44,14 +61,16 @@
  * foreseeable refusal to the cheap quote address, and this module holds only
  * the ones that cannot be foreseen there:
  *
- *   - a body with no station URL, and a station URL the hub cannot read.
- *     Both are facts about the **caller's own node or request** that are only
- *     discoverable once the purchase is made, and both say so plainly so a
- *     broadcaster fixes their connector rather than retrying into the same
- *     charge;
+ *   - a body with no station URL, a station URL the hub cannot read, and a
+ *     station that publishes nothing beneath the prefix this hub granted.
+ *     All three are facts about the **caller's own node or request** that are
+ *     only discoverable once the purchase is made, and all three say so
+ *     plainly so a broadcaster fixes their connector rather than retrying
+ *     into the same charge;
  *   - a delivery the hub's own wiring did not pay for or under-charged for,
- *     and an operator surface that would not take the write. All three are
- *     about the **hub**, and the message names the hub operator.
+ *     an operator surface that would not take a write, and a route the hub's
+ *     own config file already owns. All of them are about the **hub**, and
+ *     the message names the hub operator.
  *
  * **What is deliberately *not* refused here is the cap.** A hub at its cap
  * answers that at the quote, where it costs a floor price to hear; refusing
@@ -71,6 +90,13 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { establishPeering, PeeringError } from '../peering/peering.js';
 import type { PeeringDependencies } from '../peering/peering.js';
+import {
+  deriveForwardedRoutes,
+  ForwardedRouteError,
+  writeForwardedRoutes,
+} from '../peering/routes.js';
+import type { ForwardedRoute } from '../peering/routes.js';
+import { readStationDescription } from '../peering/station-description.js';
 import {
   PAYER_HEADER,
   deriveHandleLabel,
@@ -120,6 +146,32 @@ export const NO_STATION_URL = 'no_station_url';
 /** The station's own connector could not be read, or cannot be peered with. */
 export const STATION_UNREADABLE = 'station_unreadable';
 
+/**
+ * The station's connector was read and publishes nothing beneath the prefix
+ * this hub granted.
+ *
+ * Distinct from {@link STATION_UNREADABLE} because the remedy is: the
+ * document arrived and was fine, and what is wrong is which addresses it
+ * names. A broadcaster fixes it by writing the prefix their quote already
+ * gave them into their own `connector.toml` and rebooting — not by making
+ * their connector reachable, which it demonstrably is.
+ */
+export const STATION_NOT_AT_PREFIX = 'station_not_at_prefix';
+
+/**
+ * A route this purchase needed collides with a row the hub's **config file**
+ * owns.
+ *
+ * A runtime row never shadows a config one (connector ADR 0034), so the hub
+ * operator has reserved that address and this app may not take it. Nothing
+ * about the caller's node is the thing to fix, and no retry can change it
+ * until the hub operator changes their own configuration.
+ */
+export const ROUTE_OWNED_BY_CONFIG = 'route_owned_by_config';
+
+/** The hub's operator surface would not take a route write. */
+export const ROUTES_NOT_WRITTEN = 'routes_not_written';
+
 /** The hub's operator surface would not take the write. */
 export const PEERING_NOT_ESTABLISHED = 'peering_not_established';
 
@@ -168,6 +220,28 @@ export interface BoughtPeering {
   channel: BoughtChannel;
 }
 
+/** One route the hub wrote, as the broadcaster reads it back. */
+export interface BoughtRoute {
+  /** The ILP prefix the hub now carries toward the station. */
+  prefix: string;
+  /**
+   * What the hub's own connector charges a viber for a packet to it: the
+   * price the station's connector publishes for that address, plus the hub's
+   * carriage fee.
+   *
+   * A **decimal string**, the same spelling the station's own document uses,
+   * because a price is a `u64` of the settlement asset's base units and is
+   * not representable in a JSON number a reader can be trusted with.
+   */
+  price: string;
+  /**
+   * What each started kibibyte of payload adds, where the station published a
+   * slope. Absent — not `"0"` — on a flat price, which is every station route
+   * the fleet runs.
+   */
+  pricePerKib?: string;
+}
+
 /** What a broadcaster reads once they are peered. */
 export interface BoughtSlot {
   /**
@@ -193,6 +267,16 @@ export interface BoughtSlot {
    * never for the slot that was bought (ADR 0003).
    */
   peering: BoughtPeering;
+  /**
+   * Every route the hub wrote, in the order it wrote them: one per address
+   * the station's own connector publishes beneath the granted prefix, at that
+   * address's own price plus the hub's carriage.
+   *
+   * This is what makes the purchase legible without a second call: a
+   * broadcaster can see that every rung they sell — and their station's *now*
+   * — is carried, and at what it will cost a viber to cross the hop.
+   */
+  routes: BoughtRoute[];
 }
 
 /** What the buy route needs to answer. */
@@ -267,7 +351,45 @@ export function buyRoutes(deps: BuyDependencies): Hono {
         (candidate) => roster.holderOf(candidate) !== undefined
       );
 
-    // 4. The peering — the hub's operator key's own act, synchronously,
+    const prefix = grantedPrefix(slotPolicy.hubAddress, label);
+
+    // 4. The station's own self-description, read BEFORE any operator write.
+    //    It publishes the addresses that node sells and what each costs, and
+    //    that is the whole price list the hub uses — nothing is declared by
+    //    the buyer, so nothing can drift from their real configuration. A
+    //    station the hub cannot read is refused here, having cost the hub no
+    //    channel and the broadcaster no orphaned peering.
+    let published;
+    try {
+      published = await readStationDescription(body);
+    } catch (error) {
+      return refusePeering(c, error);
+    }
+
+    // 5. The routes, derived from that document and the hub's own carriage
+    //    fee — still before any operator write, so a broadcaster who has not
+    //    yet written their granted prefix into their own connector.toml is
+    //    told so rather than left peered and unreachable.
+    let derived;
+    try {
+      derived = deriveForwardedRoutes(published.routes, {
+        grantedPrefix: prefix,
+        fee: deps.policy.fee,
+      });
+    } catch (error) {
+      return refuseRoutes(c, error);
+    }
+    if (derived.ignored.length > 0) {
+      // Not a refusal: an address outside this caller's grant is not theirs
+      // to be pointed at, and a hub that wrote it would be handing out
+      // somebody else's address. Said out loud so a broadcaster whose rung is
+      // missing from the answer can find out why from the hub's own log.
+      console.warn(
+        `[slot-app] ${prefix} publishes ${derived.ignored.join(', ')} outside its own prefix; not routed`
+      );
+    }
+
+    // 6. The peering — the hub's operator key's own act, synchronously,
     //    before any answer goes back.
     let peering;
     try {
@@ -280,7 +402,21 @@ export function buyRoutes(deps: BuyDependencies): Hono {
       return refusePeering(c, error);
     }
 
-    // 5. The slot, on disk, BEFORE the answer. This is what bounds the damage
+    // 7. The routes, written. Being peered is not yet being reachable: a hub
+    //    carries only what its routing table names, so this is the step that
+    //    makes a viber's packet cross the hop — at every rung and at the
+    //    station's own *now*.
+    let written: ForwardedRoute[];
+    try {
+      written = await writeForwardedRoutes(deps, {
+        localLabel: label,
+        routes: derived.routes,
+      });
+    } catch (error) {
+      return refuseRoutes(c, error);
+    }
+
+    // 8. The slot, on disk, BEFORE the answer. This is what bounds the damage
     //    when a chain is slow enough that the broadcaster's own deadline
     //    passes before the answer arrives: their retry derives the same
     //    handle, finds the same channel, and rewrites the same row, rather
@@ -307,12 +443,12 @@ export function buyRoutes(deps: BuyDependencies): Hono {
     }
 
     console.log(
-      `[slot-app] slot at ${grantedPrefix(slotPolicy.hubAddress, label)} lapses at ${new Date(lapsesAt).toISOString()}; peering ${label} ${peering.channel.status} a ${peering.channel.chain} channel`
+      `[slot-app] slot at ${prefix} lapses at ${new Date(lapsesAt).toISOString()}; peering ${label} ${peering.channel.status} a ${peering.channel.chain} channel; ${String(written.length)} route(s): ${written.map((route) => `${route.prefix} at ${route.stationPrice.toString()}+${String(deps.policy.fee)}`).join(', ')}`
     );
 
-    // 6. The answer.
+    // 9. The answer.
     const bought: BoughtSlot = {
-      prefix: grantedPrefix(slotPolicy.hubAddress, label),
+      prefix,
       label,
       hubAddress: slotPolicy.hubAddress,
       lapsesAt,
@@ -321,6 +457,7 @@ export function buyRoutes(deps: BuyDependencies): Hono {
         localLabel: peering.localLabel,
         channel: peering.channel,
       },
+      routes: written.map(answered),
     };
     return c.json(bought, 200, noStore());
   });
@@ -406,7 +543,7 @@ function refusePeering(c: Context, error: unknown): Response {
     return c.json(
       refusal(
         STATION_UNREADABLE,
-        `${error.message}. This is about YOUR node, not this hub's: the URL in the purchase has to be your connector's self-description — its own base URL with /ilp on the end — reachable from the internet, published over a settlement chain this hub shares, and answering without a redirect. The hub's connector said: ${error.detail || '(nothing)'}. No peering was established, and retrying before your connector is fixed will cost the slot price again.`
+        `${error.message}. This is about YOUR node, not this hub's: the URL in the purchase has to be your connector's self-description — its own base URL with /ilp on the end — reachable from the internet, published over a settlement chain this hub shares, and answering without a redirect. What the hub found when it looked: ${error.detail || '(nothing)'}. No peering was established, and retrying before your connector is fixed will cost the slot price again.`
       ),
       502,
       noStore()
@@ -425,6 +562,86 @@ function refusePeering(c: Context, error: unknown): Response {
     503,
     noStore()
   );
+}
+
+/**
+ * What a route that could not be written is answered with.
+ *
+ * Three answers for three different people. A station that publishes nothing
+ * beneath its granted prefix is the **broadcaster's** to fix and says so, and
+ * it costs no peering because the derivation happens first. A row the hub's
+ * **config file** owns is the hub operator's, and it is a `409` rather than a
+ * `503` because no amount of retrying changes a reserved address — only the
+ * hub operator's own configuration does. Anything else is the hub's surface,
+ * and is worth trying again later.
+ *
+ * **What a refusal here leaves behind is deliberate.** No slot is recorded,
+ * so the hub never counts this caller as admitted, never lapses a slot that
+ * was never sold, and answers the next quote exactly as it answered the last.
+ * What may survive is the peering and any route written before the one that
+ * was refused — both keyed by the caller's own derived label, both rewritten
+ * to the same values by a retry rather than duplicated, and neither of them a
+ * slot. Undoing them here would be worse than leaving them: a purchase by a
+ * broadcaster who already holds a slot writes the same rows, and a rollback
+ * could not tell a row it had just created from one it had merely rewritten,
+ * so it would tear down a slot that is working to tidy up after one that
+ * never happened.
+ */
+function refuseRoutes(c: Context, error: unknown): Response {
+  if (error instanceof ForwardedRouteError && error.failure === 'station') {
+    console.warn(
+      `[slot-app] a purchase found nothing to route: ${error.message}`
+    );
+    return c.json(
+      refusal(
+        STATION_NOT_AT_PREFIX,
+        `${error.message}. This is about YOUR node, not this hub's: pull a quote, take the prefix it grants you, write it into your own connector.toml as the apex of every route your station terminates — its rungs and its now — and boot before you buy. The hub read your connector fine; what it publishes is simply not addressed beneath what this hub granted you, so every packet forwarded across the hop would arrive somewhere you do not terminate. ${error.detail}. Retrying before your connector is fixed will cost the slot price again.`
+      ),
+      502,
+      noStore()
+    );
+  }
+
+  if (error instanceof ForwardedRouteError && error.failure === 'config') {
+    console.error(
+      `[slot-app] a purchase collided with a config-owned route: ${error.message} — ${error.detail}`
+    );
+    return c.json(
+      refusal(
+        ROUTE_OWNED_BY_CONFIG,
+        `${error.message}, and a route written at runtime may never shadow one the operator's own configuration file owns. Nothing about your node is the thing to fix, and retrying will not help: the hub operator has reserved that address, and only their own configuration can release it. No slot was recorded.`
+      ),
+      409,
+      noStore()
+    );
+  }
+
+  const detail = error instanceof ForwardedRouteError ? error.detail : '';
+  console.error(
+    `[slot-app] a purchase could not be routed: ${error instanceof Error ? error.message : String(error)}${detail === '' ? '' : ` — ${detail}`}`
+  );
+  return c.json(
+    refusal(
+      ROUTES_NOT_WRITTEN,
+      "this hub established the peering and could not write the routes that make you reachable through it, so nothing about your node is the thing to fix. The hub operator's own operator surface or its write-key allowlist is. No slot was recorded, and retrying is safe — a repeat finds the same channel rather than opening a second one."
+    ),
+    503,
+    noStore()
+  );
+}
+
+/** One written route, as the broadcaster reads it back. */
+function answered(route: ForwardedRoute): BoughtRoute {
+  return {
+    prefix: route.prefix,
+    price: route.price.toString(),
+    // Absent rather than "0" on a flat price, exactly as the station's own
+    // document spells it: a reader written against a flat ladder sees the
+    // document it always saw.
+    ...(route.pricePerKib === 0n
+      ? {}
+      : { pricePerKib: route.pricePerKib.toString() }),
+  };
 }
 
 function refusal(error: string, message: string): SlotAppRefusal {

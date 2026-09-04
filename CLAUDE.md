@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes and sells
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells and routes
 
 This repository is a pnpm workspace with two packages, one per toon app it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -31,7 +31,7 @@ use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoi
 tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
 to `main`. The slot app is the newer and by far the smaller of the two — see
 [the slot app](#the-slot-app) below for exactly what it does today, which is boot, quote a slot,
-and sell one.
+and sell one — peering with the broadcaster's station and routing every address it sells.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
@@ -238,9 +238,10 @@ app and the hub's admission desk: a broadcaster buys a **slot** with a paid requ
 operator key creates the **peering** and writes the routes that make their station reachable.
 [#32](https://github.com/toon-protocol/slop_machine/issues/32) is the whole spec;
 [#33](https://github.com/toon-protocol/slop_machine/issues/33),
-[#34](https://github.com/toon-protocol/slop_machine/issues/34) and
-[#35](https://github.com/toon-protocol/slop_machine/issues/35) are what exists, and they are **the
-boot, the quote and the buy**.
+[#34](https://github.com/toon-protocol/slop_machine/issues/34),
+[#35](https://github.com/toon-protocol/slop_machine/issues/35) and
+[#36](https://github.com/toon-protocol/slop_machine/issues/36) are what exists, and they are **the
+boot, the quote, the buy and the routes**.
 
 It takes the origin's shape rather than inventing one: it exports
 `startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
@@ -274,13 +275,16 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   connector's own self-description URL — and everything else is derived. `200 application/json`,
   `Cache-Control: no-store`, carrying `{"prefix": string, "label": string, "hubAddress": string,
   "lapsesAt": number, "slotPeriodSeconds": number, "peering": {"localLabel": string, "channel":
-  {"id": string, "status": string, "chain": string}}}`. **The fulfill means you are peered**: in
+  {"id": string, "status": string, "chain": string}}, "routes": [{"prefix": string, "price":
+  string, "pricePerKib"?: string}]}`. **The fulfill means you are peered**: in
   order, inside the request and all of it before the answer — read the three attribution headers;
   refuse an absent payer **before the operator surface is touched at all**; check the stated
   `X-TOON-Amount` covers `TOON_SLOT_PRICE` (reading a fact the connector stated, never validating a
   payment, so a route misconfigured to under-charge cannot sell slots); derive the handle from the
-  payer, or read it off the roster where they already hold a slot; establish the peering with one
-  signed `POST /peers`; **record the slot durably**; answer. The peering write carries the derived
+  payer, or read it off the roster where they already hold a slot; **read the station connector's
+  own self-description** and derive one route per address it publishes; establish the peering with
+  one signed `POST /peers`; write those routes with one signed `POST /routes/peers` each; **record
+  the slot durably**; answer. The peering write carries the derived
   handle as the hub's **local label**, the station URL from the body, the hub's own `fee` and
   `max_packet_amount`, and `chain` from `X-TOON-Chain` — a broadcaster chooses none of them. It is
   **retry-safe**: a repeat against an established peering answers `"status": "found"` rather than
@@ -288,13 +292,35 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   a purchase whose answer arrived too late findable by the retry instead of paid for twice. Its
   refusals are only the ones the quote cannot foresee, and every one is a **paid** answer: `403
   no_paid_termination` and `403 route_under_charges` (the hub's route), `400 no_station_url` (the
-  caller's request), `502 station_unreadable` (**the caller's own node**, named as such), `503
-  peering_not_established` (the hub's own operator surface) and `503 slot_not_recorded` (the hub's
+  caller's request), `502 station_unreadable` and `502 station_not_at_prefix` (**the caller's own
+  node**, named as such), `409 route_owned_by_config` (a row the hub's own config file owns), `503
+  peering_not_established` and `503 routes_not_written` (the hub's own operator surface) and `503
+  slot_not_recorded` (the hub's
   own data directory, after the peering already landed — said out loud rather than left as a bare
   `500`, because what the broadcaster needs to know is that they are peered and that a retry costs
   no second channel). **A hub at its cap is deliberately not
   refused here** — that answer is the quote's, and charging the slot price for it again is what the
-  ADR 0003 amendment forbids.
+  ADR 0003 amendment forbids. **No refusal leaves a half-written slot**: the roster is written last
+  and only once the peering and every route are in place, so a refused purchase is one the hub does
+  not count. What can survive it is the peering and any route written before the refusal — both
+  keyed by the caller's own derived label, both rewritten to the same values by a retry rather than
+  duplicated, and neither of them a slot. Rolling them back would be worse: a purchase by a
+  broadcaster who already holds a slot writes the same rows, and a rollback could not tell a row it
+  had just created from one it had merely rewritten.
+- **Every route price is derived from the station's own connector, never declared by the buyer.**
+  The hub `GET`s the station connector's self-description (connector ADR 0050) at the URL in the
+  body — `ilpAddresses`, `httpEndpoint`, `settlements`, and **`routes`, each `{prefix, price,
+  pricePerKib?}` with prices as decimal strings of base units** — and writes one forwarded route per
+  published prefix at **that price plus `TOON_PEERING_FEE`**. That sum is arithmetic, not policy:
+  the hub's connector charges the route price at its client edge and retains the peering's flat fee,
+  so `price - fee` reaches the station, and the station's connector checks per packet that a
+  peer-wire arrival covers its own termination price (connector ADR 0029). A hub route priced any
+  lower forwards into an `F03`. A published `pricePerKib` crosses the hop untouched, because a fee
+  is flat per packet and does not gain a slope. Prices are held as `bigint` end to end — a `u64` of
+  base units rounded through a double is a route priced under the station's own termination.
+  **Only prefixes at or beneath the granted one are routed**, so the app can never point somebody
+  else's address at a station; a station publishing nothing beneath its grant has not written its
+  quoted prefix into its own `connector.toml` and is refused before any operator write.
 - **Operator writes are RFC 9421-signed, and this app holds the fleet's only TypeScript
   implementation of that.** `packages/slot-app/src/operator/write-signature.ts`, held to the
   verifier it targets (`crates/connector-operator/src/rfc9421.rs` in the connector, and
@@ -345,7 +371,11 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   and the `Content-Digest` for real against an allowlisted public key, refuses an unsigned write,
   refuses a replayed signature and records what was written — so the buy's assertions are about
   what the hub's routing table holds, never about which function was called. **Do not add an
-  injected port to `startSlotApp`'s own API for it.**
+  injected port to `startSlotApp`'s own API for it.** The read side has the same shape and the same
+  rule: the `stationUrl` a purchase carries is pointed at a **fake station connector**
+  (`packages/slot-app/src/peering/fake-station-connector.ts`) serving a real self-description with a
+  real ladder at real prices, so route prices are *derived from a document* in the suite exactly as
+  they are on a hub — never stubbed.
 - **The hub's two operator credentials are the exception with no default, and both are named by path
   only**: `--operator-write-key-file`/`TOON_OPERATOR_WRITE_KEY_FILE` for the ed25519 write key whose
   public half sits on the connector's `write_keys` allowlist, and
@@ -435,10 +465,10 @@ keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compo
 and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
 image. This repo publishes those two app images and no others — never a connector.
 
-**What is still design:** the slot app boots, answers liveness and quotes a slot, but the purchase
-itself — the buy, the peering, the routes, the roster's writer and the lapse
+**What is still design:** the slot app boots, quotes, sells a slot, peers and routes, but what a
+renewal means, the lapse ticker, the boot reconciliation and the unpriced `/roster`
 ([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s remaining slices,
-[#35](https://github.com/toon-protocol/slop_machine/issues/35) onward) — is not written yet, there
+[#37](https://github.com/toon-protocol/slop_machine/issues/37) onward) are not written yet, there
 is no hub deploy bundle, and there is no devnet node. Do not infer other commands from the sibling
 repos.
 
