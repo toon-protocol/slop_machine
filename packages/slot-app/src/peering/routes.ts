@@ -48,6 +48,7 @@
  */
 
 import type { PeeringDependencies } from './peering.js';
+import type { PublishedRoute } from './station-description.js';
 
 /** Where on the operator surface a forwarded route is written. */
 const ROUTES_WRITE_PATH = '/routes/peers';
@@ -155,7 +156,7 @@ export interface ForwardedRouteRequest {
  * station published sits beneath the granted prefix.
  */
 export function deriveForwardedRoutes(
-  published: readonly { prefix: string; price: bigint; pricePerKib: bigint }[],
+  published: readonly PublishedRoute[],
   terms: ForwardedRouteTerms
 ): DerivedRoutes {
   const carriage = BigInt(terms.fee);
