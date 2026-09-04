@@ -72,6 +72,17 @@ export interface RtmpSessionHandler {
    * read, so a refusal transcodes nothing.
    */
   onPublish(request: RtmpPublishRequest): RtmpPublishDecision;
+  /**
+   * Vibes arrived on the publish that `onPublish` accepted: one audio, video
+   * or metadata message, whether or not there is a sink to put it in.
+   *
+   * This is the only signal that distinguishes a broadcaster who is supplying
+   * vibes from a connection that merely still exists, which is why it is
+   * separate from the byte count reported at the end. Whoever owns the
+   * listener decides what to do about a publish that stops sending; this
+   * module only says when one did.
+   */
+  onVibes?(bytes: number): void;
   /** The publish that `onPublish` accepted has ended. */
   onPublishEnd(request: RtmpPublishRequest, bytes: number): void;
   /** Something went wrong on the connection. Informational; the socket is already closing. */
@@ -491,6 +502,9 @@ export function handleRtmpConnection(
   function handleMedia(message: RtmpMessage): void {
     if (!publishing) return;
     mediaBytes += message.payload.length;
+    // Before the sink check: an accepted publish whose vibes are being counted
+    // and discarded is still a broadcaster supplying them.
+    handler.onVibes?.(message.payload.length);
     if (sink === undefined) return;
     const payload =
       message.typeId === TYPE_DATA_AMF0

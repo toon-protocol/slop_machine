@@ -55,6 +55,17 @@
  * resetting it — a broadcaster on a flaky connection resumes instead of
  * starting over.
  *
+ * Nor does an uplink that dies *quietly* leave the station lying about itself
+ * (#25). A half-open connection sends no FIN and no RST, so a broadcaster who
+ * vanishes and never reconnects would otherwise hold the air for ever and
+ * `GET /now` would report `live: true` beside a sequence that never moves —
+ * indistinguishable, to a viber, from a station whose edge has merely stalled.
+ * `--ingest-idle-seconds` bounds that: a publish that stops sending vibes for
+ * the configured interval is taken off the air on the origin's own initiative,
+ * the window it produced stays servable at the sequences a viber already
+ * knows, and a broadcaster who returns later is accepted and continues the
+ * sequence.
+ *
  * Nor does that window accumulate for ever (#10): segments are kept on a
  * sliding window evicted by count (`--retain-segments`), so a broadcast that
  * runs for days does not fill the broadcaster's disk, and a span past the
@@ -90,6 +101,11 @@ import {
   type IngestSession,
   type IngestTlsConfig,
 } from '../ingest/ingest.js';
+import {
+  DEFAULT_INGEST_IDLE_SECONDS,
+  assertIngestIdle,
+  describeIngestIdle,
+} from '../ingest/idle.js';
 import { resolveStreamKey } from '../ingest/stream-key.js';
 import {
   createSegmenter,
@@ -129,6 +145,7 @@ export const DEFAULT_HOST = '0.0.0.0';
 export const DEFAULT_DATA_DIR = './data';
 
 export { DEFAULT_INGEST_PORT, DEFAULT_INGEST_HOST };
+export { DEFAULT_INGEST_IDLE_SECONDS };
 export { DEFAULT_SEGMENT_SECONDS };
 export { DEFAULT_RETAIN_SEGMENTS };
 export { DEFAULT_LADDER, DEFAULT_LADDER_SPEC };
@@ -181,6 +198,22 @@ export interface OriginConfig {
    * RTMPS; omitted, it is plain RTMP and says so loudly at boot.
    */
   ingestTls?: IngestTlsConfig | undefined;
+  /**
+   * How long a publish may go without sending vibes before the station goes
+   * off the air, in seconds (default: 30).
+   *
+   * An uplink that dies quietly does not close its socket, so without a bound
+   * the station would report itself live for as long as the half-open
+   * connection lasted — which is the one thing the *now* address exists to
+   * prevent. The clock counts **vibes, not socket activity**: a publisher that
+   * is connected and sending nothing is a stalled edge and the station says
+   * so.
+   *
+   * The window already produced is unaffected: it stays on disk and stays
+   * servable at its sequences, and a broadcaster who returns is accepted and
+   * continues the sequence. There is no value that switches the rule off.
+   */
+  ingestIdleSeconds?: number;
 
   /**
    * The rung ladder this station offers (default: the four-rung placeholder
@@ -247,6 +280,11 @@ export interface ResolvedOriginConfig {
    * secret the origin holds; it is never reported back, logged, or echoed.
    */
   ingestTls: boolean;
+  /**
+   * How long a publish may go without vibes before this station takes it off
+   * the air, in seconds.
+   */
+  ingestIdleSeconds: number;
   /**
    * The rungs this station offers, by name, in ladder order. Each is served
    * beneath `/segments/<rung>/`, which is the prefix its price attaches to —
@@ -332,6 +370,8 @@ function livenessResponse(): LivenessResponse {
  * the refusal names the rung.
  * @throws RetentionError if the retention window is not a whole number of
  * segments to keep, or would keep none.
+ * @throws IngestIdleError if the ingest idle interval is not a whole number of
+ * seconds, or would switch the idle rule off.
  *
  * @example
  * ```ts
@@ -370,6 +410,14 @@ export async function startOrigin(
   const rungs = resolveLadder(config.rungs);
   const segmentSeconds = config.segmentSeconds ?? DEFAULT_SEGMENT_SECONDS;
   const retainSegments = config.retainSegments ?? DEFAULT_RETAIN_SEGMENTS;
+
+  // And the idle rule, on the same footing and for the same reason: an
+  // interval that would switch it off is the "live for ever" bug wearing a
+  // config value, and it must not be reachable by a station that started.
+  const ingestIdleSeconds =
+    config.ingestIdleSeconds ?? DEFAULT_INGEST_IDLE_SECONDS;
+  assertIngestIdle(ingestIdleSeconds);
+
   const segmenter = createSegmenter({
     dataDir,
     rungs,
@@ -382,6 +430,7 @@ export async function startOrigin(
     port: config.ingestPort ?? DEFAULT_INGEST_PORT,
     host: config.ingestHost ?? DEFAULT_INGEST_HOST,
     tls: config.ingestTls,
+    idleSeconds: ingestIdleSeconds,
     onPublish: (session) => {
       // The origin's own encoder attaches first: cutting the vibes into
       // segments is what the station is for, and any other observer is extra.
@@ -437,6 +486,7 @@ export async function startOrigin(
     ingestPort: ingest.port,
     ingestHost: ingest.host,
     ingestTls: ingest.tls,
+    ingestIdleSeconds: ingest.idleSeconds,
     rungs: segmenter.rungs.map((offered) => offered.name),
     segmentSeconds: segmenter.segmentSeconds,
     retainSegments: segmenter.retainSegments,
@@ -450,6 +500,9 @@ export async function startOrigin(
   );
   console.log(
     `[station-origin] retaining ${describeRetention(rungs, retainSegments, segmentSeconds)} — older segments are evicted and answered as unknown_segment`
+  );
+  console.log(
+    `[station-origin] ${describeIngestIdle(ingest.idleSeconds, segmentSeconds)} — the window already produced stays servable, and a broadcaster who comes back continues the sequence`
   );
 
   let running = true;

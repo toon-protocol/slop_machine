@@ -31,6 +31,14 @@ export type {
 } from './ingest/ingest.js';
 export { resolveStreamKey, StreamKeyError } from './ingest/stream-key.js';
 export type { StreamKeySource } from './ingest/stream-key.js';
+// The idle rule: no vibes for N seconds and the station is off the air, so an
+// uplink that dies quietly cannot report itself live for ever.
+export {
+  DEFAULT_INGEST_IDLE_SECONDS,
+  IngestIdleError,
+  assertIngestIdle,
+  describeIngestIdle,
+} from './ingest/idle.js';
 
 // Segments: what a viber pays for. Fixed-duration spans, cut at every rung on
 // the ladder and addressed by rung and sequence number.

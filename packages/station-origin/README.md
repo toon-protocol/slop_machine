@@ -281,10 +281,20 @@ Flags override environment variables, which override defaults.
 | `--rungs`            | `TOON_RUNGS`            | the four-rung placeholder ladder | The rung ladder; a rung over the byte budget is a refusal to start |
 | `--ingest-port`      | `TOON_INGEST_PORT`      | `1935`    | Port a broadcaster publishes to. `0` binds an ephemeral port |
 | `--ingest-host`      | `TOON_INGEST_HOST`      | `0.0.0.0` | Bind host for the ingest port                           |
+| `--ingest-idle-seconds` | `TOON_INGEST_IDLE_SECONDS` | `30` | How long a publish may go without sending vibes before the station goes off the air |
 | `--stream-key-file`  | `TOON_STREAM_KEY_FILE`  | —         | Mounted file holding the stream key                     |
 | —                    | `TOON_STREAM_KEY`       | —         | The stream key itself, for a compose file that keeps secrets in the environment |
 | `--ingest-tls-cert`  | `TOON_INGEST_TLS_CERT`  | —         | Certificate chain for the ingest port, in PEM           |
 | `--ingest-tls-key`   | `TOON_INGEST_TLS_KEY`   | —         | Private key for that certificate, in PEM                |
+
+The idle interval is what takes a **silently dead** uplink off the air. A broadcaster whose
+connection vanishes sends no FIN and no RST — it sits half-open — so without a bound `/now` would
+report `live: true` beside a sequence that never moves, and a viber could not tell that from a
+station whose edge has merely stalled. The clock counts **vibes, not socket activity**: a publisher
+that is connected and sending nothing is a stalled edge. The window already produced stays servable
+at its sequences and a broadcaster who reconnects continues the sequence, so the only thing the rule
+changes is that `live` tells the truth. Whole seconds, at least one; there is no value that switches
+it off, and one that would is a refusal to start.
 
 Exactly one of `TOON_STREAM_KEY_FILE` and `TOON_STREAM_KEY` must be set; both, neither, or an empty
 key is a refusal to start. So is half a TLS configuration — the alternative would be a silent
@@ -381,6 +391,17 @@ budget is asserted against actual encoded bytes: a rung configured **exactly on 
 encoder saturates its cap and MPEG-TS framing carries a span past 2 MiB. Those spans must be
 counted, refused, and answered as a clean `unknown_segment`, while every span that *is* served is
 weighed on the wire and found inside the budget.
+
+`src/ingest/idle.test.ts` is the uplink that dies without saying so. Killing the publisher is not
+that death — the kernel sends a FIN on the way out — so the publisher points at a plain TCP relay
+the suite owns, which forwards every byte to the real ingest port and then simply **stops**, never
+touching the origin-side socket again: not ended, not destroyed, not half-closed, just ESTABLISHED
+and silent, which is what the origin's kernel sees when a broadcaster's router forgets the flow. A
+second station, identical but for a long idle interval, is killed the same way and goes on reporting
+itself live long after the first has gone quiet — so the assertions are about the rule rather than
+about the setup. Everything else is plain HTTP: the station goes off the air after the interval, the
+window it held is still servable at the same sequences with the same bytes, and a broadcaster who
+comes back is accepted and continues the sequence.
 
 `src/now/now.test.ts` is the station's *now*, exercised the way a viber meets it: it pushes a
 broadcast **in real time** (`-re`, the way a broadcaster's software actually sends) so that "does

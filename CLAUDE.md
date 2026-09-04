@@ -77,7 +77,8 @@ up with the ladder:
   no address a viber already paid for is quietly re-let with different vibes. Because a dropped
   connection is usually a half-open one rather than a closed one, an accepted publish **supersedes**
   whatever publish was open and drops it — a station has one broadcaster, and a reconnect is not a
-  second one.
+  second one. Superseding covers the broadcaster who comes back; the **idle rule** covers the one
+  who does not (see below).
 - `GET /segments/<rung>/<sequence>.ts` on the segment port — one MPEG-TS span of the broadcast at
   that rung, `200` with `Content-Type: video/mp2t`. A rung the station does not offer and a
   sequence it does not hold are both `404`, told apart by an `error` of `unknown_rung` or
@@ -180,6 +181,31 @@ the byte budget. A restarted origin reads the window off its data directory rath
 sequence 0, so eviction cannot make it renumber and serve different vibes at an address already
 paid for.
 
+### The idle rule
+
+**No vibes for `N` seconds and the station is off the air.** `--ingest-idle-seconds`/
+`TOON_INGEST_IDLE_SECONDS` (default `30`) bounds how long an accepted publish may go without
+sending media before the origin takes it off the air on its own initiative.
+
+This is the half-open death that `supersede()` cannot reach. An uplink that dies quietly sends no
+FIN and no RST: the connection sits ESTABLISHED with nothing coming down it until TCP gives up,
+which behind a NAT that has forgotten the flow is never, and nothing arrives to supersede anything
+because the broadcaster never reconnects. Without the rule `/now` would report `live: true` beside
+a sequence that never moves, for ever — which destroys both distinctions the *now* address exists
+to draw, "nobody is vibing" from "I am not actually live" and a stalled edge from a station that
+ended.
+
+The clock counts **vibes, not socket activity**. A connection that is open, healthy, acknowledging
+our window and sending no media is a stalled edge and the station says so. TCP keepalive would
+answer a weaker question ("is the peer's kernel there") on a timescale of hours and would be
+satisfied by exactly that publisher, so ingest sets none.
+
+Going off the air changes nothing a viber can buy: the window already produced stays on disk and
+stays servable at the sequences a viber already knows, and a broadcaster who returns is accepted
+like any other publish and **continues the sequence**. There is deliberately **no value that
+switches the rule off** — zero, a negative or a fractional interval is an `IngestIdleError` and a
+non-zero exit, because a station reporting itself live for ever must not be reachable by a typo.
+
 ### Configuration
 
 Flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
@@ -187,6 +213,7 @@ Flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
 `--segment-seconds`/`TOON_SEGMENT_SECONDS`, `--rungs`/`TOON_RUNGS`,
 `--retain-segments`/`TOON_RETAIN_SEGMENTS`,
 `--ingest-port`/`TOON_INGEST_PORT`, `--ingest-host`/`TOON_INGEST_HOST`,
+`--ingest-idle-seconds`/`TOON_INGEST_IDLE_SECONDS`,
 `--ingest-tls-cert`/`TOON_INGEST_TLS_CERT`, `--ingest-tls-key`/`TOON_INGEST_TLS_KEY`. Port `0` binds
 an ephemeral port, which is how the suite runs stations side by side. Segments land in
 `<data dir>/segments/<rung>/`. Programmatically the ladder is `OriginConfig.rungs`, which takes

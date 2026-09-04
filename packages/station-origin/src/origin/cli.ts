@@ -32,6 +32,7 @@ import {
   DEFAULT_LADDER_SPEC,
   DEFAULT_SEGMENT_SECONDS,
   DEFAULT_RETAIN_SEGMENTS,
+  DEFAULT_INGEST_IDLE_SECONDS,
 } from './origin.js';
 import type { OriginConfig } from './origin.js';
 import { VERSION } from '../version.js';
@@ -82,6 +83,21 @@ Options:
                          speak RTMP. 0 binds an ephemeral port
   --ingest-host <host>   Bind host for the ingest port (default:
                          ${DEFAULT_INGEST_HOST}; env: TOON_INGEST_HOST)
+  --ingest-idle-seconds <n>
+                         How long a publish may go without sending vibes
+                         before the station goes off the air (default:
+                         ${DEFAULT_INGEST_IDLE_SECONDS}; env:
+                         TOON_INGEST_IDLE_SECONDS). An uplink that dies
+                         quietly sends no FIN and no RST, so without this the
+                         station would report itself live beside a sequence
+                         that never moves, for as long as the half-open
+                         connection lasted. The clock counts VIBES, not socket
+                         activity: a publisher that is connected and sending
+                         nothing is a stalled edge and the station says so.
+                         The window already produced stays servable at its
+                         sequences, and a broadcaster who comes back is
+                         accepted and continues the sequence. There is no
+                         value that switches the rule off
   --stream-key-file <p>  File holding the station's stream key (env:
                          TOON_STREAM_KEY_FILE). Required unless TOON_STREAM_KEY
                          is set; there is no default and the origin refuses to
@@ -179,6 +195,7 @@ function configFromEnvironment(
       rungs: { type: 'string' },
       'ingest-port': { type: 'string' },
       'ingest-host': { type: 'string' },
+      'ingest-idle-seconds': { type: 'string' },
       'stream-key-file': { type: 'string' },
       'ingest-tls-cert': { type: 'string' },
       'ingest-tls-key': { type: 'string' },
@@ -253,6 +270,17 @@ function configFromEnvironment(
   const ingestHost = values['ingest-host'] ?? env['TOON_INGEST_HOST'];
   if (ingestHost) config.ingestHost = ingestHost;
 
+  const idleFlag = values['ingest-idle-seconds'];
+  const idleEnv = env['TOON_INGEST_IDLE_SECONDS'];
+  if (idleFlag !== undefined) {
+    config.ingestIdleSeconds = parseSeconds(idleFlag, '--ingest-idle-seconds');
+  } else if (idleEnv !== undefined && idleEnv !== '') {
+    config.ingestIdleSeconds = parseSeconds(
+      idleEnv,
+      'TOON_INGEST_IDLE_SECONDS'
+    );
+  }
+
   // The key literal has no flag on purpose: a command line is world-readable
   // on the box. A path is not a secret; the file it names is.
   const streamKeyFile =
@@ -304,7 +332,8 @@ main().catch((err: unknown) => {
     (err.name === 'StreamKeyError' ||
       err.name === 'IngestTlsError' ||
       err.name === 'RungError' ||
-      err.name === 'RetentionError')
+      err.name === 'RetentionError' ||
+      err.name === 'IngestIdleError')
   ) {
     console.error(`[station-origin] ${err.name}: ${err.message}`);
     process.exit(1);
