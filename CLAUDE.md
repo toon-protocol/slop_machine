@@ -33,9 +33,12 @@ What the station origin does today ([#5](https://github.com/toon-protocol/slop_m
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
 [#7](https://github.com/toon-protocol/slop_machine/issues/7),
 [#8](https://github.com/toon-protocol/slop_machine/issues/8),
-[#9](https://github.com/toon-protocol/slop_machine/issues/9)) is the whole paid path across a
+[#9](https://github.com/toon-protocol/slop_machine/issues/9),
+[#10](https://github.com/toon-protocol/slop_machine/issues/10),
+[#11](https://github.com/toon-protocol/slop_machine/issues/11)) is the whole paid path across a
 **configurable rung ladder** — boot, answer liveness, take a broadcaster's vibes in, encode and cut
-them at every rung, serve the result by address, and say where the live edge is:
+them at every rung, serve the result by address, say where the live edge is, survive a dropped
+uplink, and drop what has fallen out of the window:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
@@ -120,11 +123,30 @@ over configuration, raising a bitrate re-runs the check at the next start rather
 breaking the bound. At four-second segments the ceiling is 4.19 Mbit/s, which is why the top rung
 sits at 3 Mbit/s.
 
+### Retention
+
+**A sliding window, evicted by count.** `--retain-segments`/`TOON_RETAIN_SEGMENTS` (default `60`) is
+how many segments each rung keeps; older ones are unlinked as the broadcast runs, on the origin's
+own initiative, so a broadcast that runs for days does not fill the broadcaster's disk. A request
+for an evicted sequence is the same `404 {"error": "unknown_segment"}` as one that never existed —
+the viber re-syncs from `/now` rather than paying for nothing, and it stays distinguishable from
+`unknown_rung`, which calls for falling back to another rung instead.
+
+Count, not age and not bytes: a segment covers a fixed duration, so a window of *n* is *n × duration*
+seconds at every rung at once, and the disk bound is arithmetic an operator can do from the two
+lines they wrote — the window times the ladder's worst-case segment, which the origin prints at
+boot. **The newest segment is never evicted**, so the sequence `/now` names is always still there.
+A window that would keep nothing refuses the start, naming the number, exactly like a ladder over
+the byte budget. A restarted origin reads the window off its data directory rather than walking from
+sequence 0, so eviction cannot make it renumber and serve different vibes at an address already
+paid for.
+
 ### Configuration
 
 Flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
 `--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`,
 `--segment-seconds`/`TOON_SEGMENT_SECONDS`, `--rungs`/`TOON_RUNGS`,
+`--retain-segments`/`TOON_RETAIN_SEGMENTS`,
 `--ingest-port`/`TOON_INGEST_PORT`, `--ingest-host`/`TOON_INGEST_HOST`,
 `--ingest-tls-cert`/`TOON_INGEST_TLS_CERT`, `--ingest-tls-key`/`TOON_INGEST_TLS_KEY`. Port `0` binds
 an ephemeral port, which is how the suite runs stations side by side. Segments land in
@@ -139,9 +161,9 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** Retention, encode-lag reporting and
+**Everything else in the design is still design.** Encode-lag reporting and
 the `deploy/` bundle are
-[#10–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+[#12–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
 started. There is no `deploy/` bundle, no published image, no CI and no devnet
 node — do not infer those commands from the sibling repos.
 

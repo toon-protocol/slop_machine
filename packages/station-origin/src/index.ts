@@ -59,6 +59,18 @@ export {
   assertLadder,
   describeLadder,
 } from './segmenter/ladder.js';
+// Retention: the sliding window a station keeps, evicted by count. A segment
+// past it is gone from disk, and a request for it is a clean `unknown_segment`
+// a viber re-syncs from rather than a stale body.
+export {
+  DEFAULT_RETAIN_SEGMENTS,
+  RetentionError,
+  assertRetention,
+  staleSequences,
+  windowSeconds,
+  windowBytes,
+  describeRetention,
+} from './segmenter/retention.js';
 export { createSegmenter } from './segmenter/segmenter.js';
 export type {
   Segment,

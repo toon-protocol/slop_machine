@@ -31,6 +31,7 @@ import {
   DEFAULT_INGEST_HOST,
   DEFAULT_LADDER_SPEC,
   DEFAULT_SEGMENT_SECONDS,
+  DEFAULT_RETAIN_SEGMENTS,
 } from './origin.js';
 import type { OriginConfig } from './origin.js';
 import { VERSION } from '../version.js';
@@ -56,6 +57,16 @@ Options:
                          purpose: a flat per-segment price is only honestly a
                          per-second rate when every segment covers the same
                          span
+  --retain-segments <n>  How many segments to keep at each rung (default:
+                         ${DEFAULT_RETAIN_SEGMENTS}; env: TOON_RETAIN_SEGMENTS).
+                         Retention is a sliding window evicted by COUNT: the
+                         newest n sequences at each rung are on disk and
+                         everything older is gone, so a broadcast that runs for
+                         days does not fill the disk. A request for an evicted
+                         sequence is the same clean unknown_segment as one that
+                         never existed, and the viber re-syncs from /now. Worst
+                         case on disk is n x the ladder's worst-case segment,
+                         which the origin prints at boot
   --rungs <ladder>       The rung ladder this station offers (default: the
                          placeholder ladder below; env: TOON_RUNGS). Rungs are
                          comma-separated, fields colon-separated:
@@ -123,6 +134,18 @@ function parsePort(raw: string, source: string): number {
   return port;
 }
 
+/** Parse a count of segments or fail closed — a bad number must not keep none. */
+function parseCount(raw: string, source: string): number {
+  const count = Number(raw);
+  if (!Number.isInteger(count) || count < 1) {
+    console.error(
+      `[station-origin] ${source} must be a whole number of segments, at least 1: ${raw}`
+    );
+    process.exit(1);
+  }
+  return count;
+}
+
 /** Parse a segment duration or fail closed — a bad number must not become 0. */
 function parseSeconds(raw: string, source: string): number {
   const seconds = Number(raw);
@@ -152,6 +175,7 @@ function configFromEnvironment(
       host: { type: 'string' },
       'data-dir': { type: 'string' },
       'segment-seconds': { type: 'string' },
+      'retain-segments': { type: 'string' },
       rungs: { type: 'string' },
       'ingest-port': { type: 'string' },
       'ingest-host': { type: 'string' },
@@ -195,6 +219,14 @@ function configFromEnvironment(
     config.segmentSeconds = parseSeconds(secondsFlag, '--segment-seconds');
   } else if (secondsEnv !== undefined && secondsEnv !== '') {
     config.segmentSeconds = parseSeconds(secondsEnv, 'TOON_SEGMENT_SECONDS');
+  }
+
+  const retainFlag = values['retain-segments'];
+  const retainEnv = env['TOON_RETAIN_SEGMENTS'];
+  if (retainFlag !== undefined) {
+    config.retainSegments = parseCount(retainFlag, '--retain-segments');
+  } else if (retainEnv !== undefined && retainEnv !== '') {
+    config.retainSegments = parseCount(retainEnv, 'TOON_RETAIN_SEGMENTS');
   }
 
   // Passed through as the operator wrote it: parsing it here and again in the
@@ -271,7 +303,8 @@ main().catch((err: unknown) => {
     err instanceof Error &&
     (err.name === 'StreamKeyError' ||
       err.name === 'IngestTlsError' ||
-      err.name === 'RungError')
+      err.name === 'RungError' ||
+      err.name === 'RetentionError')
   ) {
     console.error(`[station-origin] ${err.name}: ${err.message}`);
     process.exit(1);
