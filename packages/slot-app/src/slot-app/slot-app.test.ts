@@ -28,7 +28,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -72,12 +72,17 @@ function freshDir(): string {
  * One throwaway credential, mounted at a file the way a hub's compose file
  * mounts the real thing. Fresh per call and random: no credential literal
  * belongs in this repository, not even a test's.
+ *
+ * Both are what a hub operator's own `openssl rand -hex 32` writes — 64 hex
+ * characters — because that is what the write key has to be: a 32-byte
+ * ed25519 seed the app signs its operator writes with, whose public half goes
+ * on the connector's allowlist.
  */
 function mountCredential(
   dir: string,
   name: string
 ): { path: string; value: string } {
-  const value = `test-operator-${name}-${randomUUID()}`;
+  const value = randomBytes(32).toString('hex');
   const path = join(dir, name);
   // A trailing newline, because that is what an operator's `openssl ... >` or
   // an editor leaves behind, and the app must read past it.
@@ -110,6 +115,10 @@ async function boot(
     slotPort: 0,
     host: '127.0.0.1',
     dataDir: mounted.dir,
+    // Configuration, never an injected port. Nothing in this file makes an
+    // operator write, so this one is never dialled; the buy's own suite
+    // points it at a fake operator surface that verifies for real.
+    operatorUrl: 'http://127.0.0.1:1',
     operatorWriteKeyFile: mounted.writeKey.path,
     operatorBearerTokenFile: mounted.bearerToken.path,
     ...config,
@@ -237,6 +246,45 @@ describe('the slot app', () => {
       await res.arrayBuffer();
       expect(res.status).toBe(404);
     }
+  });
+});
+
+describe('the hub operator surface', () => {
+  it('refuses to start with none configured', async () => {
+    const error = await refusal({ operatorUrl: undefined });
+
+    // An app that cannot reach an operator surface can admit nobody, and a
+    // hub that can admit nobody must look broken rather than look fine.
+    expect(error.name).toBe('PeeringPolicyError');
+    expect(error.message).toContain('TOON_OPERATOR_URL');
+  });
+
+  it('refuses to start on one that is not an http URL', async () => {
+    for (const operatorUrl of [
+      'connector:3000',
+      'ftp://connector',
+      'nonsense',
+    ]) {
+      const error = await refusal({ operatorUrl });
+      expect(error.name).toBe('PeeringPolicyError');
+      expect(error.message).toContain('TOON_OPERATOR_URL');
+    }
+  });
+
+  it('reports where it is and the terms the hub peers on', async () => {
+    const app = await boot({
+      operatorUrl: 'http://connector:3000/',
+      peeringFee: 25,
+      peeringMaxPacketAmount: 12_345,
+    });
+
+    // Ordinary configuration, all of it readable back and none of it secret —
+    // and a broadcaster never chooses any of it.
+    expect(app.config.peering).toEqual({
+      operatorUrl: 'http://connector:3000',
+      fee: 25,
+      maxPacketAmount: 12_345,
+    });
   });
 });
 
@@ -399,6 +447,21 @@ describe('the two operator credentials', () => {
     expect(refused).toContain('OperatorCredentialError');
     expect(refused).not.toContain(mounted.writeKey.value);
     expect(refused).not.toContain(mounted.bearerToken.value);
+  });
+
+  it('refuses to start on a write key it could never sign with', async () => {
+    const dir = freshDir();
+    const notASeed = join(dir, 'operator-write.key');
+    // What an operator gets by generating the wrong thing, or by mounting the
+    // PUBLIC half. Refused at boot rather than at the first purchase: the
+    // symptom otherwise is a 401 on a broadcaster who already paid.
+    writeFileSync(notASeed, 'not-an-ed25519-seed\n', { mode: 0o600 });
+
+    const error = await refusal({ operatorWriteKeyFile: notASeed });
+
+    expect(error.name).toBe('OperatorCredentialError');
+    expect(error.message).toContain('64 hex characters');
+    expect(error.message).not.toContain('not-an-ed25519-seed');
   });
 
   it('answers liveness while holding them, without mentioning them', async () => {

@@ -51,6 +51,11 @@ import {
   readPayerKey,
 } from '../slot/handle.js';
 import type { SlotPolicy } from '../slot/policy.js';
+import {
+  NO_PAID_TERMINATION,
+  NO_PAID_TERMINATION_MESSAGE,
+} from '../slot/refusal.js';
+import type { SlotAppRefusal } from '../slot/refusal.js';
 import type { SlotRoster } from '../slot/roster.js';
 
 /**
@@ -64,16 +69,6 @@ export const QUOTE_ROUTE_PREFIX = '/quote';
 
 /** What the quote is, on the wire. */
 export const QUOTE_CONTENT_TYPE = 'application/json';
-
-/**
- * The refusal a request that did not arrive through a paid termination gets.
- *
- * Named for the thing that is missing rather than for the caller: what is
- * absent is a paid termination this connector verified, not a field the caller
- * failed to send. A caller cannot fix it by sending anything, because their own
- * spelling of the header is stripped before the app ever sees the delivery.
- */
-export const NO_PAID_TERMINATION = 'no_paid_termination';
 
 /** The caller's own slot, if they hold one. */
 export interface HeldSlot {
@@ -141,13 +136,14 @@ export interface SlotQuote {
   slot: HeldSlot | null;
 }
 
-/** A refusal, as the caller reads it. */
-export interface QuoteRefusal {
-  /** A stable code a client can branch on. */
-  error: string;
-  /** What is actually wrong, in the terms of whoever can fix it. */
-  message: string;
-}
+/**
+ * A refusal, as the caller reads it.
+ *
+ * The same shape and the same vocabulary the buy refuses with — see
+ * `../slot/refusal.ts` — so a client that learned to branch on a code at the
+ * cheap address does not have to learn it twice at the expensive one.
+ */
+export type QuoteRefusal = SlotAppRefusal;
 
 /** What the quote route needs to answer. */
 export interface QuoteDependencies {
@@ -180,8 +176,7 @@ export function quoteRoutes(deps: QuoteDependencies): Hono {
       // that is not broken.
       const refusal: QuoteRefusal = {
         error: NO_PAID_TERMINATION,
-        message:
-          "this request did not arrive through a paid termination the hub's connector verified, so it states no payer. A terminating connector states X-TOON-Payer only where it admitted a covering client claim itself and the route it arrived on carries a non-zero price; a caller's own spelling of that header never survives its strip. Nothing here is about the request body. The hub operator's route for this address is what to look at.",
+        message: NO_PAID_TERMINATION_MESSAGE,
       };
       return c.json(refusal, 403, noStore());
     }

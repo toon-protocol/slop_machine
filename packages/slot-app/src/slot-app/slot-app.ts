@@ -15,7 +15,8 @@
  * this app — the one that reaches back into a connector's operator surface —
  * does not become the exception to it.
  *
- * What exists today (issues #33 and #34) is the boot and the quote:
+ * What exists today (issues #33, #34 and #35) is the boot, the quote and the
+ * buy:
  *
  *   - `GET /health` on the app port: process liveness, for a hub operator's
  *     supervisor inside the node. It requires no payment header, reads none,
@@ -30,19 +31,35 @@
  *     whether there is capacity under the operator's cap — see
  *     `../quote/quote.ts` for why every foreseeable refusal is moved here.
  *
+ *   - `POST /buy` on the app port: **paid**, at the slot price, beneath its
+ *     own connector prefix and never the quote's. It establishes the
+ *     **peering** toward the broadcaster's station and records the **slot**
+ *     durably, both before it answers — the fulfill means you are peered. See
+ *     `../buy/buy.ts`.
+ *
  *   - the two operator credentials, resolved from their mounted files before
  *     anything binds. Both are named by path only and the app refuses to start
  *     without either, saying which one — see `../operator/credentials.ts`.
+ *     The write key is **decoded** at boot too, by the code that signs with
+ *     it, so a key a hub cannot sign with is a refusal to start rather than a
+ *     `401` on the first broadcaster's purchase.
  *
  *   - the hub's admission policy — price, period, cap and the hub's own
  *     address — resolved and checked before anything binds, and reported back
  *     on the resolved configuration. See `../slot/policy.ts`.
  *
- * The buy that establishes the peering, the roster's writer, the lapse and the
- * boot reconciliation are #35 onward and are deliberately not here yet.
- * Nothing in this file anticipates them beyond leaving the shape they hang
- * off: the roster this app reads has no write path, because nothing here
- * needs one.
+ *   - the hub's **peering** policy — where its operator surface is, what it
+ *     charges to carry a packet to a broadcaster, and how large a packet it
+ *     will carry. The operator surface is **configuration**, never an
+ *     injected port: the suite points it at a fake and the app's own API is
+ *     the same either way. See `../peering/policy.ts`.
+ *
+ *   - the roster, opened in the data directory and **read back at boot**, so a
+ *     restarted hub still knows who it admitted and when each slot lapses.
+ *
+ * The routes derived from a station's self-description (#36), what a renewal
+ * means (#37), the lapse ticker (#38) and the boot reconciliation (#39) are
+ * deliberately not here yet.
  *
  * The app port, the data directory and every number in the hub's admission
  * policy are configuration rather than constants: the suite boots real
@@ -56,11 +73,18 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
+import { BUY_ROUTE_PREFIX, buyRoutes } from '../buy/buy.js';
 import { resolveOperatorCredentials } from '../operator/credentials.js';
+import { createWriteSigner } from '../operator/write-signature.js';
+import {
+  describePeeringPolicy,
+  resolvePeeringPolicy,
+} from '../peering/policy.js';
+import type { PeeringPolicy } from '../peering/policy.js';
 import { QUOTE_ROUTE_PREFIX, quoteRoutes } from '../quote/quote.js';
 import { describeSlotPolicy, resolveSlotPolicy } from '../slot/policy.js';
 import type { SlotPolicy } from '../slot/policy.js';
-import { createSlotRoster } from '../slot/roster.js';
+import { openSlotRoster } from '../slot/roster.js';
 import { VERSION } from '../version.js';
 
 // ---------- Defaults ----------
@@ -94,6 +118,12 @@ export const HEALTH_ROUTE_PATH = '/health';
  * whole surface off one module.
  */
 export { QUOTE_ROUTE_PREFIX } from '../quote/quote.js';
+
+/**
+ * Where the buy answers. **Paid**, at the slot price, beneath its own
+ * connector prefix and never the quote's — one handler, one price.
+ */
+export { BUY_ROUTE_PREFIX } from '../buy/buy.js';
 
 // ---------- Configuration ----------
 
@@ -139,6 +169,28 @@ export interface SlotAppConfig {
   slotCap?: number | string | undefined;
 
   /**
+   * Base URL of the hub connector's **operator surface** — where the peering
+   * is written.
+   *
+   * Required; there is no default. In a hub bundle this is the connector on
+   * the compose network, e.g. `http://connector:3000`. **Configuration, not
+   * an injected port**: the suite points it at a fake operator surface and
+   * the app's own API is the same either way.
+   */
+  operatorUrl?: string | undefined;
+  /**
+   * What the hub retains for carrying one packet to a broadcaster it peered
+   * with (default: `10`). The hub's own policy — a broadcaster never chooses
+   * how far the hub trusts them.
+   */
+  peeringFee?: number | string | undefined;
+  /**
+   * The largest amount the hub will forward to a broadcaster in one packet
+   * (default: `10000000`). The hub's own policy, on the same terms.
+   */
+  peeringMaxPacketAmount?: number | string | undefined;
+
+  /**
    * Path to the mounted file holding the hub's operator **write key**.
    *
    * Required — there is no default, and there is deliberately no form of this
@@ -173,6 +225,12 @@ export interface ResolvedSlotAppConfig {
    * configuration, all of it readable back, none of it secret.
    */
   policy: SlotPolicy;
+  /**
+   * The hub's peering policy — where its operator surface is, what it charges
+   * to carry a packet to a broadcaster, and how large a packet it will carry.
+   * A URL and two numbers, none of it secret.
+   */
+  peering: PeeringPolicy;
   /** The path the operator write key was read from. Never its contents. */
   operatorWriteKeyFile: string;
   /** The path the operator bearer token was read from. Never its contents. */
@@ -236,6 +294,11 @@ function livenessResponse(): LivenessResponse {
  * file it names is unreadable or empty. The refusal names which credential.
  * @throws SlotPolicyError if the hub's admission policy cannot be read. A hub
  * must not admit broadcasters on a number nobody chose.
+ * @throws PeeringPolicyError if no operator surface is configured, or the
+ * terms the hub peers on cannot be read.
+ * @throws SlotRosterError if the data directory holds something this app
+ * cannot read as a roster. A hub that started from an empty roster would
+ * re-admit everybody it already holds.
  *
  * @example
  * ```ts
@@ -243,6 +306,7 @@ function livenessResponse(): LivenessResponse {
  *   slotPort: 0,
  *   dataDir: '/tmp/hub',
  *   hubAddress: 'g.toon.slopmachine',
+ *   operatorUrl: 'http://connector:3000',
  *   operatorWriteKeyFile: '/run/secrets/operator-write.key',
  *   operatorBearerTokenFile: '/run/secrets/operator-bearer.token',
  * });
@@ -262,27 +326,39 @@ export async function startSlotApp(
   // open: it would answer liveness, satisfy every supervisor on the box, and
   // then fail the first broadcaster who paid.
   //
-  // Only the two PATHS are kept. Nothing signs a write or makes a read yet
-  // (#34 onward), and a secret held by a process that cannot use it is a
-  // secret for nothing — so the values are read, checked, and dropped on the
-  // next line. What this call is here for is the refusal, and the refusal is
-  // the same one it will be when the writes exist.
-  const { writeKeyFile, bearerTokenFile } = resolveOperatorCredentials(config);
+  // The bearer token's VALUE is read, checked and dropped on the next line —
+  // nothing makes an operator read yet (#39), and a secret held by a process
+  // that cannot use it is a secret for nothing. The write key's value goes
+  // straight into the signer below and is held there as a key object rather
+  // than as bytes; neither value ever reaches the resolved configuration.
+  const { writeKey, writeKeyFile, bearerTokenFile } =
+    resolveOperatorCredentials(config);
+
+  // Decoding the seed is the signer's job, not the mounter's, so this is
+  // where a key that is not a key is refused — at boot, because a hub that
+  // cannot sign a write can admit nobody and must look broken rather than
+  // look fine.
+  const signer = createWriteSigner(writeKey);
 
   // The hub's admission policy, on the same terms: checked before anything
   // binds, because a hub quoting a price nobody set is worse than a hub that
   // did not come up.
   const policy = resolveSlotPolicy(config);
 
+  // And its peering policy — where the operator surface is, and the terms the
+  // hub peers on. The operator URL is required and has no default: an app
+  // that cannot reach an operator surface can admit nobody.
+  const peering = resolvePeeringPolicy(config);
+
   // Fail at boot rather than at the first write: a directory the app cannot
   // create is a refuse-to-start, never a degraded run.
   mkdirSync(dataDir, { recursive: true });
 
-  // The roster the quote reads. Nothing writes a slot yet — the buy is #35 —
-  // so a hub booted from here holds none, and every caller's quote says so.
-  // What replaces this line is a read-back off the data directory, not a
-  // different shape of reader.
-  const roster = createSlotRoster();
+  // The roster, read back off the data directory. A hub that restarts still
+  // knows who it admitted and when each slot lapses — a reboot must not
+  // re-admit broadcasters it is already funding a channel toward, and must
+  // not extend anybody's slot by the length of its own downtime.
+  const roster = openSlotRoster(dataDir);
 
   const app = new Hono();
 
@@ -298,6 +374,14 @@ export async function startSlotApp(
   // same prefix.
   app.route(QUOTE_ROUTE_PREFIX, quoteRoutes({ policy, roster }));
 
+  // The buy, at its own prefix and beneath nothing. The connector in front
+  // terminates one route on exactly this path at the slot price — never the
+  // quote's prefix, so a slot is never sold for the cost of a quote.
+  app.route(
+    BUY_ROUTE_PREFIX,
+    buyRoutes({ slotPolicy: policy, roster, policy: peering, signer })
+  );
+
   const { server, port } = await listen(app.fetch, host, requestedPort);
 
   const resolvedConfig: ResolvedSlotAppConfig = {
@@ -305,6 +389,7 @@ export async function startSlotApp(
     host,
     dataDir,
     policy,
+    peering,
     // The paths, never the contents. This record is what a caller reads back
     // and what a log line may safely repeat.
     operatorWriteKeyFile: writeKeyFile,
@@ -318,6 +403,12 @@ export async function startSlotApp(
     `[slot-app] operator credentials mounted at ${resolvedConfig.operatorWriteKeyFile} (write key) and ${resolvedConfig.operatorBearerTokenFile} (bearer token) — neither value is ever logged`
   );
   console.log(`[slot-app] admission policy: ${describeSlotPolicy(policy)}`);
+  // The keyid is the PUBLIC half of the write key: the value a hub operator
+  // has to have on their connector's write_keys allowlist, and the one thing
+  // about that credential it is useful to print. The seed never is.
+  console.log(
+    `[slot-app] peering policy: ${describePeeringPolicy(peering)}, signing as ${signer.keyid}`
+  );
 
   let running = true;
 
