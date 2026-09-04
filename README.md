@@ -17,10 +17,12 @@ either one it is already paid for. That separation is the whole design, and it i
 The vocabulary is not decoration — it is written down in [`CONTEXT.md`](./CONTEXT.md), and the
 decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 
-> **Status: the station origin boots, and that is all it does.** It answers `GET /health` on its
-> segment port and nothing else — no ingest, no encoding, no segments, no deploy bundle, no image
-> published, no devnet node. The diagrams below are the intended shape, not a description of a
-> running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
+> **Status: the station origin boots and takes a broadcaster's vibes in.** It answers
+> `GET /health` on its segment port, and it accepts an RTMP or RTMPS publish on its ingest port if
+> the publish carries the station's stream key. Nothing is encoded, segmented or served yet, and
+> there is no deploy bundle, no published image and no devnet node. The diagrams below are the
+> intended shape, not a description of a running system. See [`CLAUDE.md`](./CLAUDE.md) for what
+> exists and how to build and test it.
 
 ## A station
 
@@ -31,16 +33,22 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
                           ║                 │                 ║
                           ║ ─ ─ ─ ─ ─ ─ ─ ─ │ ─ ─ ─ ─ ─ ─ ─ ─ ║
                           ║                 ▼                 ║
-  broadcaster ─ RTMP ────▶║  Caddy  ──▶  origin        :3100  ║  ingests, serves
-   (authenticated)        ║   :443        │                   ║
+  broadcaster ─ RTMPS ─────────────────▶ origin        :3100  ║  ingests, serves
+   (stream key)     :1935 ║               │                   ║
                           ╚═══════════════════════════════════╝
                                           └── segments/
 ```
 
-The broadcaster points OBS — or anything that speaks RTMP — at the origin, which cuts the stream
-into HLS segments with `ffmpeg`. Only Caddy is reachable from the internet; the origin's segment
-port is not published on any interface, so the only route to it is a paid packet through the
-connector.
+The broadcaster points OBS — or anything that speaks RTMP — at the origin over RTMPS with their
+stream key, and the origin cuts the vibes into HLS segments with `ffmpeg`.
+
+**Two ports are reachable from the internet and no more: Caddy's, and the origin's RTMPS ingest
+port.** Caddy fronts only the paid HTTP path. Stock Caddy does not speak RTMP and a custom Caddy
+image would break the fleet's stock-TLS-front norm, so the origin publishes the ingest port itself
+and terminates that TLS. Ingest is gated on the stream key — checked on the publish, before a byte
+is transcoded — and it is never paid: supplying vibes costs a broadcaster nothing per second. The
+origin's **segment** port is published on no interface at all, so the only route to a broadcaster's
+vibes is a paid packet through the connector.
 
 The broadcaster **is** the operator. They own the origin and the connector in front of it, they hold
 the settlement key, and vibers' payments accrue to them directly. Nobody collects on a broadcaster's

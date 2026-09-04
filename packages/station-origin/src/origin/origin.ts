@@ -10,7 +10,8 @@
  * `relay` uses — and it is what makes an ordinary HTTP app monetizable
  * without knowing ILP exists.
  *
- * What exists today (issue #5) is the boot path and one address:
+ * What exists today (issues #5 and #6) is the boot path, one address, and the
+ * door a broadcaster's vibes come in through:
  *
  *   - `GET /health` on the segment port: liveness, for a supervisor inside the
  *     node. It requires no payment header, reads none, and echoes none. It is
@@ -18,13 +19,21 @@
  *     reachable from inside the node and from nowhere else — the segment port
  *     is never published to a host interface.
  *
- * Ingest, the rung ladder, segments and the station's *now* are issues #6-#14
- * and are not here yet.
+ *   - RTMP/RTMPS ingest on the ingest port: a broadcaster publishes with their
+ *     stream key and goes live. Unlike the segment port, this one *is*
+ *     published by the station node — stock Caddy does not speak RTMP — so it
+ *     is the origin's own listener that terminates TLS and checks the key.
+ *     Ingest is authenticated and never paid.
  *
- * The segment port and the data directory are configuration rather than
+ * The rung ladder, segments, retention and the station's *now* are issues
+ * #7-#14 and are not here yet.
+ *
+ * The two ports and the data directory are configuration rather than
  * constants: the integration suite boots real instances on fresh ports against
- * temporary directories, and a broadcaster-operator moves either without a
- * code change.
+ * temporary directories, and a broadcaster-operator moves any of them without a
+ * code change. The stream key is configuration too, but of a different kind —
+ * it is provisioned as a mounted value and the origin refuses to start without
+ * one.
  *
  * @module
  */
@@ -33,6 +42,15 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
+import {
+  startIngest,
+  DEFAULT_INGEST_PORT,
+  DEFAULT_INGEST_HOST,
+  type IngestInstance,
+  type IngestSession,
+  type IngestTlsConfig,
+} from '../ingest/ingest.js';
+import { resolveStreamKey } from '../ingest/stream-key.js';
 import { VERSION } from '../version.js';
 
 // ---------- Defaults ----------
@@ -51,6 +69,8 @@ export const DEFAULT_HOST = '0.0.0.0';
 
 /** Default data directory — where segments will be written (env: `TOON_DATA_DIR`). */
 export const DEFAULT_DATA_DIR = './data';
+
+export { DEFAULT_INGEST_PORT, DEFAULT_INGEST_HOST };
 
 // ---------- Configuration ----------
 
@@ -71,6 +91,42 @@ export interface OriginConfig {
    * beneath it. Created at boot if it does not exist.
    */
   dataDir?: string;
+
+  /**
+   * The station's stream key. Exactly one of this and `streamKeyFile` is
+   * required — an origin with no stream key refuses to start, because a
+   * station anyone can broadcast on looks exactly like a working one.
+   */
+  streamKey?: string | undefined;
+  /**
+   * Path to a mounted file holding the stream key. This is how a deployed
+   * station is provisioned: the key is never baked into an image and never
+   * committed.
+   */
+  streamKeyFile?: string | undefined;
+
+  /**
+   * Port the origin accepts a broadcaster's publish on (default: 1935).
+   *
+   * Unlike the segment port, this one is published by the station node itself:
+   * stock Caddy does not speak RTMP, so the origin fronts its own ingest. `0`
+   * binds an ephemeral port.
+   */
+  ingestPort?: number;
+  /** Bind host for the ingest port (default: 0.0.0.0). */
+  ingestHost?: string;
+  /**
+   * Mounted certificate and key for the ingest listener. Supplied, ingest is
+   * RTMPS; omitted, it is plain RTMP and says so loudly at boot.
+   */
+  ingestTls?: IngestTlsConfig | undefined;
+
+  /**
+   * Called once per accepted publish, with the broadcaster's vibes attached as
+   * an FLV stream. This is the seam the segmenter (issue #7) attaches to.
+   * Omitted, accepted vibes are counted and discarded.
+   */
+  onIngest?: ((session: IngestSession) => void) | undefined;
 }
 
 /** An `OriginConfig` with every default applied and the bound port resolved. */
@@ -80,15 +136,34 @@ export interface ResolvedOriginConfig {
   host: string;
   /** Absolute path to the data directory. */
   dataDir: string;
+  /** The ingest port actually bound — never `0`, even when `0` was configured. */
+  ingestPort: number;
+  /** The host the ingest port is bound to. */
+  ingestHost: string;
+  /**
+   * Whether ingest terminates TLS, i.e. whether it is RTMPS.
+   *
+   * The stream key is deliberately absent from this record. It is the one
+   * secret the origin holds; it is never reported back, logged, or echoed.
+   */
+  ingestTls: boolean;
 }
 
 /** A running station origin returned by `startOrigin()`. */
 export interface OriginInstance {
   /** Whether the origin is currently running. */
   isRunning(): boolean;
-  /** Stop the origin and release its listener. Idempotent. */
+  /**
+   * Whether a broadcaster is publishing right now.
+   *
+   * This is not liveness and it is not the station's *now* — it is the plain
+   * fact of an accepted publish being open, which is what a supervisor and
+   * (from issue #12) the *now* address are both built on.
+   */
+  isIngesting(): boolean;
+  /** Stop the origin and release both listeners. Idempotent. */
   stop(): Promise<void>;
-  /** The resolved configuration, including the port actually bound. */
+  /** The resolved configuration, including the ports actually bound. */
   config: ResolvedOriginConfig;
 }
 
@@ -123,16 +198,30 @@ function livenessResponse(): LivenessResponse {
 /**
  * Start a station origin.
  *
- * Resolves configuration, creates the data directory, and binds the segment
- * port. Resolves once the listener is accepting connections, so a caller that
- * awaits it can dial the origin on the next line.
+ * Resolves configuration, creates the data directory, and binds both the
+ * ingest port and the segment port. Resolves once both listeners are
+ * accepting connections, so a caller that awaits it can dial the origin — or
+ * publish to it — on the next line.
  *
- * @param config - Origin configuration; every field has a default.
+ * Fails closed. A missing stream key, an unreadable certificate or a port that
+ * will not bind is a refusal to start, never a degraded run: a station that
+ * came up without its key would accept anybody's vibes while looking healthy.
+ *
+ * @param config - Origin configuration. Every field has a default except the
+ * stream key, of which exactly one of `streamKey` and `streamKeyFile` is
+ * required.
  * @returns A running `OriginInstance`.
+ * @throws StreamKeyError if no stream key is configured, or both are.
+ * @throws IngestTlsError if a configured certificate or key cannot be read.
  *
  * @example
  * ```ts
- * const origin = await startOrigin({ segmentPort: 0, dataDir: '/tmp/station' });
+ * const origin = await startOrigin({
+ *   segmentPort: 0,
+ *   ingestPort: 0,
+ *   dataDir: '/tmp/station',
+ *   streamKeyFile: '/run/secrets/station.key',
+ * });
  * await fetch(`http://127.0.0.1:${origin.config.segmentPort}/health`);
  * await origin.stop();
  * ```
@@ -144,9 +233,21 @@ export async function startOrigin(
   const dataDir = resolve(config.dataDir ?? DEFAULT_DATA_DIR);
   const requestedPort = config.segmentPort ?? DEFAULT_SEGMENT_PORT;
 
+  // The key first, before anything binds. A station that cannot be
+  // authenticated should never have reached the point of holding a port open.
+  const streamKey = resolveStreamKey(config);
+
   // Fail at boot rather than at the first segment: a directory the origin
   // cannot create is a refuse-to-start, never a degraded run.
   mkdirSync(dataDir, { recursive: true });
+
+  const ingest = await startIngest({
+    streamKey,
+    port: config.ingestPort ?? DEFAULT_INGEST_PORT,
+    host: config.ingestHost ?? DEFAULT_INGEST_HOST,
+    tls: config.ingestTls,
+    onPublish: config.onIngest,
+  });
 
   const app = new Hono();
 
@@ -154,12 +255,24 @@ export async function startOrigin(
   // and the response carries only what a supervisor needs.
   app.get('/health', (c) => c.json(livenessResponse()));
 
-  const { server, port } = await listen(app.fetch, host, requestedPort);
+  let server: ServerType;
+  let port: number;
+  try {
+    ({ server, port } = await listen(app.fetch, host, requestedPort));
+  } catch (error) {
+    // Half a station is not a station: an origin that ingests but cannot serve
+    // would take a broadcaster live to nobody.
+    await ingest.stop();
+    throw error;
+  }
 
   const resolvedConfig: ResolvedOriginConfig = {
     segmentPort: port,
     host,
     dataDir,
+    ingestPort: ingest.port,
+    ingestHost: ingest.host,
+    ingestTls: ingest.tls,
   };
 
   console.log(
@@ -172,15 +285,36 @@ export async function startOrigin(
     isRunning() {
       return running;
     },
+    isIngesting() {
+      return running && ingest.isLive();
+    },
     async stop() {
       if (!running) return;
       running = false;
-      await new Promise<void>((resolveStop, rejectStop) => {
-        server.close((err) => (err ? rejectStop(err) : resolveStop()));
-      });
+      await stopBoth(server, ingest);
     },
     config: resolvedConfig,
   };
+}
+
+/**
+ * Stop both listeners, and report the first failure only after both have been
+ * asked to stop — a segment port that will not close must not leave the ingest
+ * port open behind it.
+ */
+async function stopBoth(
+  server: ServerType,
+  ingest: IngestInstance
+): Promise<void> {
+  const results = await Promise.allSettled([
+    new Promise<void>((resolveStop, rejectStop) => {
+      server.close((err) => (err ? rejectStop(err) : resolveStop()));
+    }),
+    ingest.stop(),
+  ]);
+  for (const result of results) {
+    if (result.status === 'rejected') throw result.reason;
+  }
 }
 
 /**

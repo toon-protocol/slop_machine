@@ -7,21 +7,25 @@
  * the origin lays out its data directory, and (from issue #7) how it segments
  * and encodes, must all be rewritable without touching this file.
  *
- * What is covered at this point in the chain (issue #5):
+ * What is covered at this point in the chain (issues #5 and #6):
  *   - the origin boots on a *configured* port against a *configured*
  *     directory, and answers liveness there;
  *   - the port is configuration, not a constant — two origins run side by
  *     side on different ports against different directories;
  *   - liveness requires no payment header, reads none, and echoes none;
  *   - an address the origin does not serve fails cleanly;
- *   - stop() tears the listener down.
+ *   - stop() tears both listeners down.
+ *
+ * Ingest itself — the stream-key gate, and what a publishing client sees — is
+ * `../ingest/ingest.test.ts`, which speaks real RTMP at the real ingest port.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
+import { createServer, createConnection } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { startOrigin } from './origin.js';
 import type { OriginConfig, OriginInstance } from './origin.js';
 import { VERSION } from '../version.js';
@@ -51,7 +55,12 @@ async function boot(
 ): Promise<OriginInstance> {
   const origin = await startOrigin({
     segmentPort: 0,
+    // The origin refuses to start without a stream key, so every boot supplies
+    // one. What the key gates is ../ingest/ingest.test.ts's subject.
+    streamKey: `test-station-key-${randomUUID()}`,
+    ingestPort: 0,
     host: '127.0.0.1',
+    ingestHost: '127.0.0.1',
     dataDir: freshDataDir(),
     ...config,
   });
@@ -107,6 +116,7 @@ describe('the station origin', () => {
     const second = await boot();
 
     expect(first.config.segmentPort).not.toBe(second.config.segmentPort);
+    expect(first.config.ingestPort).not.toBe(second.config.ingestPort);
     expect(first.config.dataDir).not.toBe(second.config.dataDir);
 
     for (const origin of [first, second]) {
@@ -157,9 +167,29 @@ describe('the station origin', () => {
     expect(res.status).toBe(404);
   });
 
+  it('binds an ingest port alongside the segment port, and reports it', async () => {
+    const origin = await boot();
+
+    expect(origin.config.ingestPort).toBeGreaterThan(0);
+    expect(origin.config.ingestPort).not.toBe(origin.config.segmentPort);
+    // Plain RTMP until a certificate is mounted; the ingest suite covers RTMPS.
+    expect(origin.config.ingestTls).toBe(false);
+    // Nobody is publishing, so the station is not ingesting.
+    expect(origin.isIngesting()).toBe(false);
+  });
+
+  it('never reports the stream key back out', async () => {
+    const origin = await boot({ streamKey: 'a-very-distinctive-key' });
+
+    expect(JSON.stringify(origin.config)).not.toContain(
+      'a-very-distinctive-key'
+    );
+  });
+
   it('stops, and stops being reachable', async () => {
     const origin = await boot();
     const url = originUrl(origin, '/health');
+    const ingestPort = origin.config.ingestPort;
 
     expect((await fetch(url)).status).toBe(200);
 
@@ -168,7 +198,23 @@ describe('the station origin', () => {
     expect(origin.isRunning()).toBe(false);
     await expect(fetch(url)).rejects.toThrow();
 
+    // Both listeners go, not just the served one: an origin that stopped
+    // serving but kept ingesting would take a broadcaster live to nobody.
+    await expect(connect(ingestPort)).rejects.toThrow();
+
     // stop() is idempotent — a supervisor may race a signal with a shutdown.
     await expect(origin.stop()).resolves.toBeUndefined();
   });
 });
+
+/** Open a bare TCP connection, to prove a port is or is not accepting. */
+function connect(port: number): Promise<void> {
+  return new Promise((resolveConnect, rejectConnect) => {
+    const socket = createConnection({ port, host: '127.0.0.1' });
+    socket.once('connect', () => {
+      socket.destroy();
+      resolveConnect();
+    });
+    socket.once('error', rejectConnect);
+  });
+}

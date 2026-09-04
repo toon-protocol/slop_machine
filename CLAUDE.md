@@ -22,27 +22,60 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin boots, and that is all it does
+## Status: the station origin boots and ingests; nothing is encoded or served yet
 
 This repository is a pnpm workspace with one package — `packages/station-origin`
 (`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
 use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoint with
 tsup/esbuild, tested with vitest.
 
-What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5))
-is boot and answer liveness:
+What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
+[#6](https://github.com/toon-protocol/slop_machine/issues/6)) is boot, answer liveness, and take a
+broadcaster's vibes in:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
   none. It is not a claim about ingest; the station's *now* will be a separate, paid address.
+- **RTMP/RTMPS ingest** on the ingest port (`TOON_INGEST_PORT`, default `1935`) — a broadcaster
+  publishes with their stream key as the stream name (`rtmps://<station>:1935/live/<stream key>`,
+  which is exactly the Server/Stream Key pair OBS asks for). The key is checked on the RTMP
+  `publish` command, before a byte is read or transcoded, and a wrong or absent key is answered with
+  an RTMP error status and the socket closed, so it shows up in OBS at once. Ingest is
+  authenticated and **never paid**. Accepted vibes are handed to an `onIngest` callback as an FLV
+  stream — the seam the segmenter ([#7](https://github.com/toon-protocol/slop_machine/issues/7))
+  will attach to. Nothing consumes it yet.
 
-Configuration is flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
-`--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`. Port `0` binds an ephemeral port, which
-is how the suite runs stations side by side.
+### Ports, honestly, for what exists so far
 
-**Everything else in the design is still design.** RTMP ingest, `ffmpeg`, the rung ladder, segments,
-retention, the station's *now* and the `deploy/` bundle are
-[#6–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+The origin binds two listeners and they are not alike:
+
+- the **segment** port is published on no interface — the only route to a station's vibes is a paid
+  packet through its connector;
+- the **ingest** port *is* published by the station node, straight to the internet. Stock Caddy does
+  not speak RTMP and a custom Caddy image would break the fleet's stock-TLS-front norm, so the
+  origin fronts its own ingest and terminates its own TLS. "Only Caddy is reachable from the
+  internet" was true before #6 and is not true now; the invariant is **exactly three published
+  ports — Caddy's 80 and 443 plus the RTMPS ingest port — and the segment port is never one of
+  them**. The `deploy/` bundle that will hold that still is #14.
+
+### Configuration
+
+Flags over environment over defaults: `--segment-port`/`TOON_SEGMENT_PORT`,
+`--host`/`TOON_SEGMENT_HOST`, `--data-dir`/`TOON_DATA_DIR`, `--ingest-port`/`TOON_INGEST_PORT`,
+`--ingest-host`/`TOON_INGEST_HOST`, `--ingest-tls-cert`/`TOON_INGEST_TLS_CERT`,
+`--ingest-tls-key`/`TOON_INGEST_TLS_KEY`. Port `0` binds an ephemeral port, which is how the suite
+runs stations side by side.
+
+The **stream key** is the exception with no default: `--stream-key-file`/`TOON_STREAM_KEY_FILE`
+names a mounted file, or `TOON_STREAM_KEY` carries the value. There is deliberately no flag for the
+literal — a command line is world-readable on the box. **An origin with no stream key refuses to
+start**, because a station anyone can broadcast on looks exactly like a working one. The key is
+never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
+certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
+
+**Everything else in the design is still design.** `ffmpeg`, the rung ladder, segments, retention,
+the station's *now* and the `deploy/` bundle are
+[#7–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
 started. There is no `deploy/` bundle, no published image, no CI and no devnet node — do not infer
 those commands from the sibling repos.
 
@@ -51,16 +84,20 @@ What does exist, all run from the repo root:
 ```
 pnpm install
 pnpm build       # bundles the origin to packages/station-origin/dist (dist/cli.js is the entrypoint)
-pnpm test        # vitest: boots the real origin on fresh ports against temp directories
+pnpm test        # vitest: boots the real origin on fresh ports and pushes real RTMP at it
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
 pnpm format      # prettier
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 ```
 
-Tests assert at the app's boundary only — they boot the real app and speak HTTP at it. Nothing
-reaches into the data directory's layout, and nothing may reach into the segmenter or the `ffmpeg`
-invocation once those exist. Replace this section in the same commit that invalidates it.
+`pnpm test` needs `ffmpeg`, `ffprobe` and `openssl` on PATH: ingest is a wire protocol, and a suite
+that spoke it through a mock would be testing the mock.
+
+Tests assert at the app's boundary only — they boot the real app and speak HTTP and real RTMP at it.
+Nothing reaches into the data directory's layout, the RTMP chunk parser or the stream-key
+comparison, and nothing may reach into the segmenter or the `ffmpeg` invocation once those exist.
+Replace this section in the same commit that invalidates it.
 
 The design is settled and written down; the open questions the README used to list — which
 direction pays, the unit of payment, and how discovery works — are all answered. Vibers pay, per
@@ -101,9 +138,12 @@ Quality is priced per rung, by address ([ADR 0002](docs/adr/0002-bitrate-follows
 ## This repo is public, and will hold key material on live boxes
 
 A slopmachine node deploys the standard connector bundle and so generates an ILP signer key,
-settlement keys that hold real value, and peering secrets. A hub additionally holds an operator
-write key. `.gitignore` already covers these by wildcard (`*.key`, `*.secret`, `*.pem`, operator
-credentials) before any of them exist — see its comments for the incidents that shaped those rules.
+settlement keys that hold real value, and peering secrets. A station additionally holds its
+broadcaster's **stream key** and the private key of its RTMPS certificate; a hub additionally holds
+an operator write key. `.gitignore` already covers these by wildcard (`*.key`, `*.secret`, `*.pem`,
+operator credentials) before any of them exist — see its comments for the incidents that shaped
+those rules. The stream key is provisioned as a mounted value: never baked into an image, never a
+default in code, never a literal in a test.
 
 - Never commit key material, and never weaken those rules to make a file visible. An ignore rule
   does not protect an already-tracked file: if one lands, `git rm --cached` it **and rotate the

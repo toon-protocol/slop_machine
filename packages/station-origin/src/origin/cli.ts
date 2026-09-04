@@ -10,10 +10,13 @@
  * — the origin holds no payment code, and pricing a route is connector config.
  *
  * Usage:
- *   station-origin --segment-port 3100 --data-dir /data
- *   TOON_SEGMENT_PORT=3100 TOON_DATA_DIR=/data station-origin
+ *   station-origin --segment-port 3100 --data-dir /data --stream-key-file /run/secrets/station.key
+ *   TOON_STREAM_KEY_FILE=/run/secrets/station.key station-origin
  *
- * Flags override environment variables, which override defaults.
+ * Flags override environment variables, which override defaults. The stream
+ * key is the exception with no default and no flag carrying the literal: it is
+ * a mounted value, and a key passed on a command line is a key in every
+ * process listing on the box.
  *
  * @module
  */
@@ -24,6 +27,8 @@ import {
   DEFAULT_SEGMENT_PORT,
   DEFAULT_HOST,
   DEFAULT_DATA_DIR,
+  DEFAULT_INGEST_PORT,
+  DEFAULT_INGEST_HOST,
 } from './origin.js';
 import type { OriginConfig } from './origin.js';
 import { VERSION } from '../version.js';
@@ -43,8 +48,30 @@ Options:
                          env: TOON_SEGMENT_HOST)
   --data-dir <path>      Directory the origin owns on disk (default:
                          ${DEFAULT_DATA_DIR}; env: TOON_DATA_DIR)
+  --ingest-port <port>   Port a broadcaster publishes to (default:
+                         ${DEFAULT_INGEST_PORT}; env: TOON_INGEST_PORT). This port IS
+                         published by the station node — stock Caddy does not
+                         speak RTMP. 0 binds an ephemeral port
+  --ingest-host <host>   Bind host for the ingest port (default:
+                         ${DEFAULT_INGEST_HOST}; env: TOON_INGEST_HOST)
+  --stream-key-file <p>  File holding the station's stream key (env:
+                         TOON_STREAM_KEY_FILE). Required unless TOON_STREAM_KEY
+                         is set; there is no default and the origin refuses to
+                         start without one
+  --ingest-tls-cert <p>  Certificate chain for the ingest port, in PEM (env:
+                         TOON_INGEST_TLS_CERT). With --ingest-tls-key, ingest
+                         is RTMPS; without both, it is plain RTMP
+  --ingest-tls-key <p>   Private key for that certificate, in PEM (env:
+                         TOON_INGEST_TLS_KEY)
   --version              Print the version and exit
   --help                 Print this help and exit
+
+The stream key is read from the mounted file at startup and is never logged,
+echoed, or reported back. A broadcaster publishes with it as their stream name:
+
+  rtmps://<station>:${DEFAULT_INGEST_PORT}/live/<stream key>
+
+which is exactly the Server/Stream Key pair OBS asks for.
 `.trim()
   );
 }
@@ -59,6 +86,12 @@ function parsePort(raw: string, source: string): number {
   return port;
 }
 
+/** A config error the operator can act on, rather than a stack trace. */
+function refuse(message: string): never {
+  console.error(`[station-origin] ${message}`);
+  process.exit(1);
+}
+
 function configFromEnvironment(
   argv: string[],
   env: NodeJS.ProcessEnv
@@ -69,6 +102,11 @@ function configFromEnvironment(
       'segment-port': { type: 'string' },
       host: { type: 'string' },
       'data-dir': { type: 'string' },
+      'ingest-port': { type: 'string' },
+      'ingest-host': { type: 'string' },
+      'stream-key-file': { type: 'string' },
+      'ingest-tls-cert': { type: 'string' },
+      'ingest-tls-key': { type: 'string' },
       version: { type: 'boolean' },
       help: { type: 'boolean' },
     },
@@ -100,6 +138,37 @@ function configFromEnvironment(
   const dataDir = values['data-dir'] ?? env['TOON_DATA_DIR'];
   if (dataDir) config.dataDir = dataDir;
 
+  const ingestPortFlag = values['ingest-port'];
+  const ingestPortEnv = env['TOON_INGEST_PORT'];
+  if (ingestPortFlag !== undefined) {
+    config.ingestPort = parsePort(ingestPortFlag, '--ingest-port');
+  } else if (ingestPortEnv !== undefined && ingestPortEnv !== '') {
+    config.ingestPort = parsePort(ingestPortEnv, 'TOON_INGEST_PORT');
+  }
+
+  const ingestHost = values['ingest-host'] ?? env['TOON_INGEST_HOST'];
+  if (ingestHost) config.ingestHost = ingestHost;
+
+  // The key literal has no flag on purpose: a command line is world-readable
+  // on the box. A path is not a secret; the file it names is.
+  const streamKeyFile =
+    values['stream-key-file'] ?? env['TOON_STREAM_KEY_FILE'];
+  if (streamKeyFile) config.streamKeyFile = streamKeyFile;
+  const streamKey = env['TOON_STREAM_KEY'];
+  if (streamKey) config.streamKey = streamKey;
+
+  const tlsCert = values['ingest-tls-cert'] ?? env['TOON_INGEST_TLS_CERT'];
+  const tlsKey = values['ingest-tls-key'] ?? env['TOON_INGEST_TLS_KEY'];
+  if (tlsCert && tlsKey) {
+    config.ingestTls = { certFile: tlsCert, keyFile: tlsKey };
+  } else if (tlsCert || tlsKey) {
+    // Half a TLS configuration would quietly downgrade ingest to plain RTMP,
+    // which is the one outcome an operator setting either flag did not want.
+    refuse(
+      'ingest TLS needs both a certificate and a key; set --ingest-tls-cert/TOON_INGEST_TLS_CERT and --ingest-tls-key/TOON_INGEST_TLS_KEY, or neither'
+    );
+  }
+
   return config;
 }
 
@@ -124,6 +193,15 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
+  // A named configuration error is the operator's mistake, not a crash — say
+  // what is wrong and stop, rather than printing a stack over it.
+  if (
+    err instanceof Error &&
+    (err.name === 'StreamKeyError' || err.name === 'IngestTlsError')
+  ) {
+    console.error(`[station-origin] ${err.name}: ${err.message}`);
+    process.exit(1);
+  }
   console.error('[station-origin] failed to start:', err);
   process.exit(1);
 });
