@@ -13,7 +13,8 @@ Issues #5 through #12 built the whole paid path across a **configurable rung lad
 broadcaster publishes, the origin encodes and cuts at every rung they configured, it reports where
 the live edge is and whether the box is keeping up with the ladder, it survives a dropped uplink and
 evicts what has fallen out of the window, and a viber pulls segments by address at the rung — and so
-the price — they chose. The deploy bundle (#13/#14) is still to come.
+the price — they chose. [`deploy/`](../../deploy/) (#13) is the bundle that runs all of it behind a
+connector and a TLS front; #14 is the guard that holds its ports and prices still.
 
 | Surface                         | Port                | Paid | What it is                                        |
 | ------------------------------- | ------------------- | ---- | ------------------------------------------------- |
@@ -291,7 +292,10 @@ downgrade to plain RTMP, which is the one outcome an operator setting either fla
 Both ports are configuration, not constants: the integration suite boots real instances on fresh
 ports against temporary directories, and a broadcaster-operator moves either without a code change.
 **Never host-publish the segment port.** The only route to a station's vibes is a paid packet
-through its connector. The ingest port is the one that *is* published.
+through its connector. The ingest port is the one that *is* published. In
+[`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) that is the difference between
+`expose: 3100` and `ports: 1935:1935`, and it is the one edit that would turn this image into a free
+door.
 
 ## Running it
 
@@ -307,6 +311,10 @@ Or as an image, built from the repo root:
 ```bash
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 ```
+
+Or as a whole station — Caddy, the connector that prices it, and this origin — from
+[`deploy/`](../../deploy/). Its README is the broadcaster-facing path: DNS, keys, `.env`,
+`docker compose up -d`, then point OBS at it.
 
 ## Programmatic use
 

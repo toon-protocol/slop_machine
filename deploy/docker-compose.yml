@@ -1,0 +1,247 @@
+# =============================================================================
+# A slop machine STATION node: Caddy (TLS) → connector (payments) → origin.
+# =============================================================================
+#
+#   viber       ──POST /ilp──▶ caddy ─▶ connector ──▶ origin  :3100  (paid)
+#                                        one route per rung, one for /now
+#
+#   broadcaster ──RTMPS───────────────────────────────▶ origin  :1935  (free,
+#                                        stream-key gated, never priced)
+#
+# The connector monetizes every VIBER-facing address. INGEST is authenticated
+# and never paid: supplying vibes costs a broadcaster nothing per second.
+#
+# ── The ports invariant, enforced by construction ────────────────────────────
+# EXACTLY THREE PUBLISHED PORTS, and the segment port is not one of them:
+#
+#   caddy   80, 443     the paid HTTP path — this is the only HTTP door
+#   origin  1935        RTMPS ingest. Stock Caddy does not speak RTMP and a
+#                       custom Caddy image would break the fleet's
+#                       stock-TLS-front norm, so the origin fronts its own
+#                       ingest and terminates that TLS itself.
+#
+# Everything else is either `expose`d on the compose network (the origin's
+# SEGMENT port, 3100) or published to LOOPBACK only (the connector's edge,
+# 3000, for on-box operator calls). "Only Caddy is reachable from the
+# internet" was the relay bundle's rule and it is NOT this bundle's — but the
+# segment port half of it is absolute:
+#
+#   THE SEGMENT PORT IS NEVER HOST-PUBLISHED, IN ANY FORM, NOT EVEN ON
+#   LOOPBACK.
+#
+# It is the payment-oblivious surface: /segments/<rung>/<seq>.ts, /now,
+# /health and /encode all answer on it with no notion of a payment at all. The
+# only route to a broadcaster's vibes is a paid packet through their
+# connector, and a `ports:` entry here is the one edit that turns that into a
+# free door. Remember a docker `ports:` publish WITHOUT a host-IP prefix is
+# internet-reachable even with ufw locked to 22/80/443/1935 — Docker's
+# iptables chain runs ahead of ufw. Never convert the origin's `expose: 3100`
+# into a `ports:`, and never drop the `127.0.0.1:` from the connector's.
+# deploy/bundle.test.ts (slop_machine#14) holds all of that still.
+#
+#   Production:  docker compose up -d
+#   Local, no TLS, built from source:
+#     docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#   With auto-redeploy:
+#     docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+# =============================================================================
+
+name: station
+
+services:
+  # ── TLS ────────────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      # The one public name this station answers paid HTTP on, and the address
+      # Let's Encrypt sends expiry notices to. Both required — see
+      # .env.example. There is no second hostname: NOTHING FREE IS SERVED FROM
+      # A STATION NODE, so unlike the relay bundle there is no free-read
+      # surface for Caddy to front.
+      EDGE_HOST: ${EDGE_HOST:?set EDGE_HOST in .env (the connector edge hostname)}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Named, so a `docker compose up`
+      # that recreates this container does not re-issue every certificate and
+      # walk into Let's Encrypt's rate limit.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      connector:
+        condition: service_healthy
+      origin:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The payment proxy ──────────────────────────────────────────────────────
+  #
+  # The STOCK connector image on an immutable pin, with this directory's
+  # connector.toml mounted in. Same image and same shape as the relay, store
+  # and gas-station bundles — one connector deployment model across the fleet.
+  # THIS REPO PUBLISHES NO CONNECTOR IMAGE; it only pins one.
+  #
+  # ── Bumping the pin ────────────────────────────────────────────────────────
+  # This `image:` line is the pin of record and the ONLY place in this
+  # repository a connector build may be named; deploy/bundle.test.ts fails the
+  # build if a second copy appears anywhere else, because two copies drift and
+  # an operator then deploys one connector while reading about another.
+  #
+  # Pin an exact immutable build, never a floating tag. The config parser is
+  # `deny_unknown_fields` and startup is fail-closed, so a schema drift under
+  # you is a refuse-to-start rather than a degraded run — which is the
+  # behaviour you want, but it means an accidental bump is an outage. The pin
+  # and the connector.toml it was validated against live at the same commit
+  # here, and the box takes both with one `git pull`, so a build can never
+  # reach a box ahead of the config it needs.
+  #
+  # Because the pin is IMMUTABLE, this container does not auto-deploy: there
+  # is no moving tag for Watchtower to follow, so a connector or config change
+  # needs `git pull && docker compose up -d` on the box. The label below stays
+  # for shape-parity with the other bundles, and is inert here.
+  connector:
+    image: ghcr.io/toon-protocol/connector:rust-2026.08.28.1
+    # No `environment:` block, deliberately: the connector has no
+    # environment-variable layer at all. Every value comes from the mounted
+    # ./connector.toml, so there is exactly one place any value comes from —
+    # including every price this station charges.
+    labels:
+      # Watchtower only ever touches a container carrying this label, and only
+      # when docker-compose.watchtower.yml is in the file set. Inert for this
+      # service while the image above is pinned to an immutable tag.
+      com.centurylinklabs.watchtower.enable: 'true'
+    volumes:
+      # The whole connector configuration — the rung routes and their prices,
+      # the *now* route and its price, settlement, and what this station says
+      # about itself. Mounted, not baked: the pin above and this file are the
+      # same reviewed commit, and the box takes both with one `git pull`. It
+      # names key PATHS only and holds nothing secret.
+      - ./connector.toml:/app/config/connector.toml:ro
+      # Two identities, provisioned two different ways — see connector.toml.
+      # In short: the signer holds no money and is fresh random material per
+      # box; the settlement key is what vibers open channels against, so it
+      # comes from a seed you can reproduce. Both must exist and be readable
+      # by uid 10001 before the first `up -d`.
+      - ./signer.key:/app/data/signer.key:ro
+      - ./settlement.key:/app/data/settlement.key:ro
+      # Drop this line (and connector.toml's [settlement.solana]) for EVM-only.
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      # The operator surface's two credentials — see connector.toml's
+      # [operator]. The bearer token gates reads; the allowlist holds the
+      # PUBLIC halves of the keys allowed to sign a write. The private half
+      # never lives on this box. A broadcaster needs this surface to peer with
+      # a hub (`POST /peers`) once they have bought a slot.
+      - ./operator-bearer.token:/app/data/operator-bearer.token:ro
+      - ./operator-write.keys:/app/data/operator-write.keys:ro
+      # The claim journal. NAMED, not a host bind: the image ships /app/state
+      # owned by uid 10001, which is what a fresh named volume inherits on
+      # first mount and what a bind mount does not. Replaying it is what stops
+      # a restart from re-accepting a claim a viber already spent.
+      - connector_state:/app/state
+    ports:
+      # LOOPBACK ONLY. Viber traffic reaches the edge through Caddy; this
+      # publish is for on-box operator calls (`/peers`, `/channels`) and
+      # nothing else. Dropping the `127.0.0.1:` would put the edge on the
+      # internet — see the ports invariant above.
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      # The connector has no /health route. GET /ilp/identity answers 200 only
+      # once the process is serving AND has read its signer key file.
+      # 127.0.0.1, never localhost: the listener is IPv4-only, but "localhost"
+      # in a container can resolve to ::1, where nothing is listening.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      origin:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The station origin ─────────────────────────────────────────────────────
+  #
+  # One broadcaster's node: it takes the vibes in over RTMPS and serves
+  # segments of them out. It holds NO payment code — no payment-header
+  # parsing, no settlement key, no operator write key — so compromising it
+  # cannot move money. By the time a request reaches it, the connector in
+  # front has already proven it paid.
+  origin:
+    image: ${STATION_ORIGIN_IMAGE:-ghcr.io/toon-protocol/station-origin:release}
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    environment:
+      TOON_SEGMENT_PORT: '3100' # vibes out — PRIVATE, never host-published
+      TOON_INGEST_PORT: '1935' # vibes in  — published, stream-key gated
+      TOON_DATA_DIR: /data
+      # The rung ladder, and therefore the set of addresses a viber can buy.
+      # KEEP THIS IN STEP WITH connector.toml: a rung with no route is
+      # unreachable and unsellable, and a route naming a rung the origin does
+      # not offer is a paid 404. That is the pair deploy/bundle.test.ts checks
+      # (slop_machine#14) — the ladder here against the routes there.
+      #
+      # Bitrates are CAPS, not targets. The origin recomputes cap × duration
+      # at every start and refuses to start, naming the rung, if one could
+      # produce a segment over ADR 0001's 2 MiB budget.
+      TOON_RUNGS: ${STATION_RUNGS:-audio:128k,480p:480:800k:128k,720p:720:1800k:128k,1080p:1080:3000k:128k}
+      # Fixed, so a flat per-segment price is honestly a per-second rate.
+      # Changing it changes what every price in connector.toml buys.
+      TOON_SEGMENT_SECONDS: ${STATION_SEGMENT_SECONDS:-4}
+      # The sliding window, evicted by count. 60 × the ladder's worst-case
+      # segment ≈ 175 MiB on the default ladder; the origin prints the number
+      # at boot.
+      TOON_RETAIN_SEGMENTS: ${STATION_RETAIN_SEGMENTS:-60}
+      # The stream key is a LOCATION, never a value: there is deliberately no
+      # TOON_STREAM_KEY here and no flag for the literal, because a command
+      # line is world-readable on the box and an image with a default key is a
+      # station anybody can broadcast on. The origin refuses to start without
+      # one. Generate it with the README's step 2.
+      TOON_STREAM_KEY_FILE: /run/secrets/stream.key
+      # RTMPS. Without both of these the origin speaks PLAIN RTMP and says so
+      # loudly at boot — which puts a stream key on the wire in clear. A
+      # station on the internet mounts a certificate.
+      TOON_INGEST_TLS_CERT: /run/secrets/ingest-tls.crt
+      TOON_INGEST_TLS_KEY: /run/secrets/ingest-tls.key
+    volumes:
+      # The mounted values. All three are gitignored and none is ever baked
+      # into an image. They keep their HOST ownership inside the container, so
+      # they must be readable by the image's runtime user (uid 1000, `node`) —
+      # see the README's step 2.
+      - ./stream.key:/run/secrets/stream.key:ro
+      - ./ingest-tls.crt:/run/secrets/ingest-tls.crt:ro
+      - ./ingest-tls.key:/run/secrets/ingest-tls.key:ro
+      # The segment window. Named so it has a name an operator can find and a
+      # stray `docker volume prune` — which reaps unused ANONYMOUS volumes —
+      # cannot take it. Segments land in /data/segments/<rung>/.
+      - station_data:/data
+    ports:
+      # The one unqualified publish besides Caddy's, and the third of the
+      # three published ports. It carries no vibes OUTWARD — only the
+      # broadcaster's own publish inward — and it is gated on the stream key,
+      # checked on the RTMP `publish` command before a byte is transcoded.
+      - '1935:1935' # RTMPS ingest
+    expose:
+      # The segment port. `expose:`, never `ports:` — this is the whole of the
+      # segment-port invariant, and the connector is the only thing on this
+      # network that dials it.
+      - '3100'
+    healthcheck:
+      # /health is in-node liveness: unpriced, outside every routed prefix,
+      # and reachable only from inside the node because 3100 is published
+      # nowhere. It is what lets a supervisor restart the origin without a
+      # payment. 127.0.0.1, never localhost — see the connector's healthcheck.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  connector_state:
+  station_data:

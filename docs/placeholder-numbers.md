@@ -42,6 +42,23 @@ start, naming the rung**, if one exceeds the byte budget.
 Do not add a rung above 3 Mbit/s without re-reading ADR 0001 — the ceiling is what keeps a station
 working if the connector ever caps responses the way it caps requests.
 
+Every one of these prices is **flat per segment**, and `per_kib` is never set on a station route —
+a price is a schedule over the *inbound* payload, so a slope would bill the viber's few-hundred-byte
+request and do nothing at all for the megabyte in the fulfill ([ADR 0002](adr/0002-bitrate-follows-the-vibers-budget.md)).
+Bitrate is priced by address, which is what the four routes are for.
+
+## The station's *now*
+
+**`50` per pull.** The cheapest thing a station sells, and its own connector route — `/now` sits
+outside `/segments` and beneath no rung, so it is priced on its own and no segment is ever reachable
+at it.
+
+Not proportional to bytes the way the ladder is: `/now` is a couple of hundred bytes of JSON, and
+strictly proportional would round to nothing. It is a **floor** price — a quarter of the cheapest
+rung — chosen so that re-syncing is never a meaningful fraction of watching, while still being
+non-zero, because nothing free is served from a station node. A viber pulls it to join and to
+recover from a gap, not once per segment.
+
 ## Retention
 
 **60 segments per rung.** At the 4-second default that is a four-minute sliding window, evicted by

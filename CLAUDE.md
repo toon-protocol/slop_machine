@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves, and reports its *now* and its pace
+## Status: the station origin ingests, encodes, serves, and deploys
 
 This repository is a pnpm workspace with one package — `packages/station-origin`
 (`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
@@ -36,7 +36,8 @@ What the station origin does today ([#5](https://github.com/toon-protocol/slop_m
 [#9](https://github.com/toon-protocol/slop_machine/issues/9),
 [#10](https://github.com/toon-protocol/slop_machine/issues/10),
 [#11](https://github.com/toon-protocol/slop_machine/issues/11),
-[#12](https://github.com/toon-protocol/slop_machine/issues/12)) is the whole paid path across a
+[#12](https://github.com/toon-protocol/slop_machine/issues/12),
+[#13](https://github.com/toon-protocol/slop_machine/issues/13)) is the whole paid path across a
 **configurable rung ladder** — boot, answer liveness, take a broadcaster's vibes in, encode and cut
 them at every rung, serve the result by address, say where the live edge is, survive a dropped
 uplink, drop what has fallen out of the window, and tell the broadcaster whether the box is keeping
@@ -106,7 +107,7 @@ up with the ladder:
   broadcasting. **This report is the whole of the origin's discovery surface** — sequence numbers and
   a duration, no URIs, no prices, and no playlist of any kind, per-rung or master.
 
-### Ports, honestly, for what exists so far
+### Ports, honestly
 
 The origin binds two listeners and they are not alike:
 
@@ -117,7 +118,22 @@ The origin binds two listeners and they are not alike:
   origin fronts its own ingest and terminates its own TLS. "Only Caddy is reachable from the
   internet" was true before #6 and is not true now; the invariant is **exactly three published
   ports — Caddy's 80 and 443 plus the RTMPS ingest port — and the segment port is never one of
-  them**. The `deploy/` bundle that will hold that still is #14.
+  them**.
+
+`deploy/docker-compose.yml` is where that invariant is now written down, and it holds:
+
+| Port     | Service     | Published as          | Why                                                       |
+| -------- | ----------- | --------------------- | --------------------------------------------------------- |
+| 80, 443  | `caddy`     | `80:80`, `443:443`    | the paid HTTP path — being reachable is Caddy's whole job |
+| 1935     | `origin`    | `1935:1935`           | RTMPS ingest, terminated by the origin itself             |
+| 3000     | `connector` | `127.0.0.1:3000:3000` | the client edge, **loopback only**, for on-box operator calls |
+| **3100** | `origin`    | **never**             | the segment port: `expose:` on the compose network and nothing else |
+
+A docker `ports:` publish **without** a host-IP prefix is internet-reachable even with `ufw` locked
+to 22/80/443/1935 — Docker's iptables chain runs ahead of ufw. Never convert the origin's
+`expose: 3100` into a `ports:`, not even on loopback, and never drop the `127.0.0.1:` from the
+connector's. [#14](https://github.com/toon-protocol/slop_machine/issues/14) is the guard that fails
+the build if either happens.
 
 ### The rung ladder
 
@@ -182,10 +198,47 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** The `deploy/` bundle is
-[#13 and #14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
-started. There is no `deploy/` bundle, no published image, no CI and no devnet
-node — do not infer those commands from the sibling repos.
+### The deploy bundle
+
+[`deploy/`](deploy/) is the fleet's house bundle shape, the same one `relay` and `store` ship:
+`docker-compose.yml` (Caddy → connector → origin), a bind-mounted `connector.toml`, a `Caddyfile`, a
+local overlay, a Watchtower overlay, and the `auto-apply.sh` + systemd pair that follows `main` on a
+box. `deploy/README.md` walks a broadcaster from DNS to `docker compose up -d` to OBS.
+
+**Connector configuration is bundle work, not application code.** `deploy/connector.toml` terminates
+**five routes** — one per rung at that rung's price, plus one for the station's *now* at its own low
+price:
+
+| ILP prefix                      | Price  | Handler URL                         |
+| ------------------------------- | ------ | ----------------------------------- |
+| `g.toon.slopmachine.demo.now`   | `50`   | `http://origin:3100/now`            |
+| `g.toon.slopmachine.demo.audio` | `200`  | `http://origin:3100/segments/audio` |
+| `g.toon.slopmachine.demo.480p`  | `1000` | `http://origin:3100/segments/480p`  |
+| `g.toon.slopmachine.demo.720p`  | `2000` | `http://origin:3100/segments/720p`  |
+| `g.toon.slopmachine.demo.1080p` | `3500` | `http://origin:3100/segments/1080p` |
+
+`demo` is a placeholder for the broadcaster's own handle. Each `handler_url` is a path the origin's
+addresses sit **strictly beneath** — an envelope's target resolves under the route's handler path and
+can never replace any part of it (connector ADR 0025) — so no address is reachable at another
+address's price, and `/health` and `/encode` are reachable at no price at all because they have **no
+route here and never may**. Never point a route at the bare origin or at `/segments`: the first puts
+the diagnostics on sale, the second makes every rung cost the same. **`per_kib` is never set on a
+station route** (ADR 0002) — every station price is flat per segment and the slope is always zero.
+
+`TOON_RUNGS` in `docker-compose.yml` and the routes in `connector.toml` are **one pair**: a rung with
+no route is unsellable, and a route naming a rung the origin does not offer is a paid 404. Change one
+and change the other in the same commit.
+
+The connector is the **stock GHCR image on an immutable pin**, and that pin appears in exactly one
+place — `deploy/docker-compose.yml`'s `connector.image`. This repo publishes no connector image.
+`connector.toml` is bind-mounted, never baked, so the pin and the config it was validated against
+reach a box in one `git pull`. The stream key and the RTMPS private key are mounted files, gitignored
+and never in an image.
+
+**What is still design:** the slot app has not been started, and there is no image-publishing
+workflow, no CI and no devnet node — so
+`ghcr.io/toon-protocol/station-origin:release` does not exist to pull yet, and the local overlay
+builds the origin from the checkout instead. Do not infer other commands from the sibling repos.
 
 What does exist, all run from the repo root:
 
@@ -194,11 +247,21 @@ pnpm install
 pnpm build       # bundles the origin to packages/station-origin/dist (dist/cli.js is the entrypoint)
 pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTMP at it, and
                  # pulls the encoded segments back over HTTP. Deliberately slow — real encoding
-                 # is the point, because ADR 0001 is a claim about bytes
+                 # is the point, because ADR 0001 is a claim about bytes. The include list
+                 # also covers deploy/*.test.ts, so the bundle guard (#14) lands beside
+                 # the files it guards; smol-toml and yaml are there to read them
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
 pnpm format      # prettier
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
+```
+
+And from `deploy/`, once its keys and `.env` exist (see `deploy/README.md`):
+
+```
+docker compose config                                          # validate the bundle
+docker compose up -d                                           # a real station
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d   # local, no TLS
 ```
 
 `pnpm test` needs `ffmpeg`, `ffprobe` and `openssl` on PATH: ingest is a wire protocol, and a suite
