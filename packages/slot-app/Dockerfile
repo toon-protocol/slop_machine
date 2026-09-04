@@ -14,10 +14,12 @@
 #                   reachable from inside the node only
 #   * GET /quote    PAID, at a floor price, beneath its own connector prefix
 #   * POST /buy     PAID, at the slot price, beneath its own — the peering is
-#                   established and the slot recorded before it answers
+#                   established, one forwarded route is written per address the
+#                   station's own connector publishes, and the slot is recorded,
+#                   all of it before it answers
 #
 # TOON_OPERATOR_URL is required too, and likewise has no default: it is the hub
-# connector's own base URL, where the peering is written. An app that cannot
+# connector's own base URL, where the peering and the routes are written. An app that cannot
 # reach an operator surface can admit nobody, and a hub that can admit nobody
 # must look broken rather than look fine.
 #
