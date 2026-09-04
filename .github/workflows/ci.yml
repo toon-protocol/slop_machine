@@ -227,8 +227,11 @@ jobs:
               ;;
           esac
 
-      # And with both mounted it comes up and answers liveness — unpriced, with
-      # no payment header sent and none required.
+      # And with both mounted — and an operator surface named, which is
+      # required for the same reason and has no default — it comes up and
+      # answers liveness, unpriced, with no payment header sent and none
+      # required. Nothing here dials that URL: liveness makes no operator
+      # write, and the hub's connector is not part of this job.
       - name: It answers liveness with both credentials mounted
         run: |
           set -euo pipefail
@@ -244,6 +247,7 @@ jobs:
             -v "$SECRETS:/run/secrets:ro" \
             -e TOON_OPERATOR_WRITE_KEY_FILE=/run/secrets/operator-write.key \
             -e TOON_OPERATOR_BEARER_TOKEN_FILE=/run/secrets/operator-bearer.token \
+            -e TOON_OPERATOR_URL=http://connector:3000 \
             -p 127.0.0.1:3200:3200 slot-app:ci
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:3200/health > /tmp/health.json; then break; fi
