@@ -9,21 +9,78 @@ request paid. See the repo's [`CLAUDE.md`](../../CLAUDE.md) for why that split i
 
 ## What exists today
 
-Issues #5, #6, #7 and #8 built the whole paid path across a **configurable rung ladder**: a
-broadcaster publishes, the origin encodes and cuts at every rung they configured, and a viber pulls
-segments by address at the rung — and so the price — they chose. The station's *now* (#9),
-retention (#10), reconnect (#11) and the deploy bundle (#13/#14) are still to come.
+Issues #5, #6, #7, #8 and #9 built the whole paid path across a **configurable rung ladder**: a
+broadcaster publishes, the origin encodes and cuts at every rung they configured, it reports where
+the live edge is, and a viber pulls segments by address at the rung — and so the price — they
+chose. Retention (#10), reconnect (#11) and the deploy bundle (#13/#14) are still to come.
 
-| Surface                              | Port                | Paid | What it is                                       |
-| ------------------------------------ | ------------------- | ---- | ------------------------------------------------ |
-| `GET /health`                        | `TOON_SEGMENT_PORT` | no   | Liveness, for a supervisor **inside** the node   |
-| `GET /segments/<rung>/<seq>.ts`      | `TOON_SEGMENT_PORT` | yes  | One span of the broadcaster's vibes at that rung |
-| RTMP / RTMPS                         | `TOON_INGEST_PORT`  | no   | A broadcaster's publish, gated on the stream key |
+| Surface                         | Port                | Paid | What it is                                       |
+| ------------------------------- | ------------------- | ---- | ------------------------------------------------ |
+| `GET /health`                   | `TOON_SEGMENT_PORT` | no   | Liveness, for a supervisor **inside** the node   |
+| `GET /now`                      | `TOON_SEGMENT_PORT` | yes  | The station's *now* — where the live edge is     |
+| `GET /segments/<rung>/<seq>.ts` | `TOON_SEGMENT_PORT` | yes  | One span of the broadcaster's vibes at that rung |
+| RTMP / RTMPS                    | `TOON_INGEST_PORT`  | no   | A broadcaster's publish, gated on the stream key |
+
+Three prefixes, none beneath another: `/health`, `/now` and `/segments/<rung>/`. That is what lets
+the connector in front terminate one route per rung at that rung's price and one on `/now` at its
+own low price, with no address reachable at another address's price.
 
 `/health` is process liveness — "is the origin up enough to answer". It is not a claim about
-ingest: whether a broadcaster is currently supplying vibes will be the station's *now* address,
-which a viber pays for. `/health` sits outside every prefix the connector routes, so it is
-reachable from inside the node and from nowhere else.
+ingest: whether a broadcaster is currently supplying vibes is the station's *now*, which a viber
+pays for. `/health` sits outside every prefix the connector routes, so it is unpriced and reachable
+from inside the node and from nowhere else.
+
+## The station's *now*
+
+```
+GET /now   →  200  application/json, Cache-Control: no-store
+
+{
+  "live": true,
+  "segmentSeconds": 4,
+  "rungs": [
+    { "rung": "audio", "sequence": 412 },
+    { "rung": "480p",  "sequence": 412 },
+    { "rung": "720p",  "sequence": 411 },
+    { "rung": "1080p", "sequence": 411 }
+  ]
+}
+```
+
+A station is a continuous broadcast, so a viber joining one already in progress wants what everyone
+else on it is receiving — not sequence zero, which has already passed. One cheap address reports the
+whole of what it needs to start pulling.
+
+| Field              | Type                       | What it is                                                              |
+| ------------------ | -------------------------- | ----------------------------------------------------------------------- |
+| `live`             | `boolean`                  | Whether a broadcaster is publishing **right now**                        |
+| `segmentSeconds`   | `number`                   | The fixed duration every segment covers, in seconds                      |
+| `rungs`            | array, **in ladder order** | Every rung the station offers, cheapest first                            |
+| `rungs[].rung`     | `string`                   | The rung's name — the same one in `/segments/<rung>/<sequence>.ts`       |
+| `rungs[].sequence` | `number \| null`           | The newest segment that rung is holding; `null` when it is holding none  |
+
+It is **always `200`**, even with nobody broadcasting: a station with no ingest is still a station,
+and it says `live: false` with a `sequence` of `null` at every rung rather than going missing. A
+viber cannot tell a refusal from a station that ended, and both are things it has to act on.
+`sequence` is `null` and never `0` for the same reason — `0` is a real segment somebody could pay
+for.
+
+- **A viber starts at the live edge.** Pull `/now`, then pull the sequence it named at the rung the
+  budget can afford. One paid request instead of walking forward from zero.
+- **Every rung is in one answer**, which is what makes climbing and dropping rungs mid-broadcast a
+  choice about price rather than a re-sync: a player already knows the same span's number one rung
+  along.
+- **`live` tells a stalled edge apart from a station that ended.** A sequence that stopped advancing
+  means nothing on its own; the same sequence with `live: false` is a broadcaster who dropped, and
+  with `live: true` an encoder falling behind.
+- **A station has one *now*.** The answer is read from what the station has actually finished, so
+  two vibers asking at the same moment see the same edge. Nothing is per-viber.
+- **It is paid, under its own prefix.** `/now` is outside `/segments` and beneath no rung, so the
+  connector prices it cheaply on its own. A viber re-syncing must not be charged a segment's price,
+  and a segment must never be reachable at this one's.
+- **No playlist, here or anywhere.** This report is the whole of the origin's discovery surface:
+  sequence numbers and a duration, no URIs, no prices, and nothing HLS-shaped. A station's rungs and
+  their prices are learned from the announcement a hub's relay carries.
 
 ## Segments
 
@@ -40,8 +97,8 @@ whose sequence has gone re-syncs to the live edge.
 - **The rung comes before the sequence** so that every path a viber can reach at one rung's price
   sits strictly beneath that rung's own prefix, `/segments/<rung>/`. That is what lets the connector
   terminate one route per rung at that rung's price, and it is why no address can be reached at
-  another address's price. Anything that is not a segment — `/health` today, the station's *now*
-  tomorrow — sits outside `/segments` entirely.
+  another address's price. Anything that is not a segment — `/health` and `/now`
+  — sits outside `/segments` entirely.
 - **A segment arrives whole or not at all.** `ffmpeg` writes each span under a temporary name and
   renames it only once the span is complete; nothing is servable before that rename, and a segment
   is read whole and sent with its length stated up front. A viber pays once for a span they can
@@ -214,8 +271,16 @@ const origin = await startOrigin({
 // Every rung the station offers, in ladder order — and so every prefix the
 // connector in front prices, one route each.
 const [rung] = origin.config.rungs;
+
+// Where the live edge is, at every rung, right now — so a viber starts there
+// rather than at the beginning.
+const now = await (
+  await fetch(`http://127.0.0.1:${origin.config.segmentPort}/now`)
+).json();
+const { sequence } = now.rungs.find((reported) => reported.rung === rung);
+
 await fetch(
-  `http://127.0.0.1:${origin.config.segmentPort}/segments/${rung}/0.ts`
+  `http://127.0.0.1:${origin.config.segmentPort}/segments/${rung}/${sequence}.ts`
 );
 await origin.stop();
 ```
@@ -241,6 +306,14 @@ Its ladder is ordinary configuration — two deliberately small rungs, one of th
 the suite pulls the same span at two rungs and watches the sizes differ the way the ladder says
 they should, without ever encoding a broadcaster's four real ones. The refusal is asserted the same
 way round: a ladder over the byte budget must not boot, and must name the rung.
+
+`src/now/now.test.ts` is the station's *now*, exercised the way a viber meets it: it pushes a
+broadcast **in real time** (`-re`, the way a broadcaster's software actually sends) so that "does
+the edge advance while somebody is publishing" is observable at all, then asserts over plain HTTP
+that a viber can start at the edge the report names, pull the same span one rung along, see the same
+edge as everybody else, and tell a broadcaster who dropped apart from an encoder falling behind. It
+also holds the two negatives still: no playlist is served at any playlist-shaped address, and the
+report is reachable neither under `/segments` nor beneath any rung.
 
 Nothing in any of them reaches inside the app: the data directory's layout, the RTMP chunk parser,
 the stream-key comparison, the segmenter and the `ffmpeg` argument construction must all be

@@ -72,4 +72,10 @@ export {
   SEGMENT_CONTENT_TYPE,
 } from './segmenter/routes.js';
 
+// The station's *now*: where the live edge is, at every rung, and whether
+// ingest is live. One cheap paid address under its own prefix, so a viber
+// starts at the live edge instead of at the beginning. No playlist is served.
+export { nowRoutes, NOW_ROUTE_PREFIX, NOW_CONTENT_TYPE } from './now/now.js';
+export type { StationNow, RungNow, NowDependencies } from './now/now.js';
+
 export { VERSION } from './version.js';

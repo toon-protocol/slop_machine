@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes and serves — across a configurable ladder
+## Status: the station origin ingests, encodes, serves — and reports its *now*
 
 This repository is a pnpm workspace with one package — `packages/station-origin`
 (`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
@@ -32,13 +32,14 @@ tsup/esbuild, tested with vitest.
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
 [#7](https://github.com/toon-protocol/slop_machine/issues/7),
-[#8](https://github.com/toon-protocol/slop_machine/issues/8)) is the whole paid path across a
+[#8](https://github.com/toon-protocol/slop_machine/issues/8),
+[#9](https://github.com/toon-protocol/slop_machine/issues/9)) is the whole paid path across a
 **configurable rung ladder** — boot, answer liveness, take a broadcaster's vibes in, encode and cut
-them at every rung, and serve the result by address:
+them at every rung, serve the result by address, and say where the live edge is:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
-  none. It is not a claim about ingest; the station's *now* will be a separate, paid address.
+  none. It is not a claim about ingest; the station's *now* is a separate, paid address.
 - **RTMP/RTMPS ingest** on the ingest port (`TOON_INGEST_PORT`, default `1935`) — a broadcaster
   publishes with their stream key as the stream name (`rtmps://<station>:1935/live/<stream key>`,
   which is exactly the Server/Stream Key pair OBS asks for). The key is checked on the RTMP
@@ -61,6 +62,19 @@ them at every rung, and serve the result by address:
   daemon synthesizes whatever its player needs over loopback. **Which rungs exist is
   configuration** — `TOON_RUNGS`/`--rungs`, defaulting to the four-rung placeholder ladder — and one
   ingest is encoded at every rung on it, each into its own prefix.
+- `GET /now` on the segment port — the **station's *now***: `200 application/json`,
+  `Cache-Control: no-store`, always, carrying `{"live": boolean, "segmentSeconds": number, "rungs":
+  [{"rung": string, "sequence": number | null}]}` with the rungs in ladder order and `sequence` the
+  newest segment that rung is holding (`null` when it holds none — never `0`, which is a real
+  segment somebody could pay for). This is what a viber pulls to **start at the live edge instead of
+  at the beginning**, and having every rung in one answer is what lets a player climb and drop rungs
+  mid-broadcast on a budget. `live` is the plain fact of an open publish, which is what tells a
+  **stalled edge apart from a station that ended**. It is **paid**, like a segment, but it sits under
+  its **own prefix, `/now`** — outside `/segments` and beneath no rung — so the connector prices it
+  cheaply on its own and no address is reachable at another address's price. It is deliberately not
+  `/health`: liveness is unpriced, in-node, and answers the same whether or not anybody is
+  broadcasting. **This report is the whole of the origin's discovery surface** — sequence numbers and
+  a duration, no URIs, no prices, and no playlist of any kind, per-rung or master.
 
 ### Ports, honestly, for what exists so far
 
@@ -119,9 +133,9 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** The station's *now*, retention, reconnect,
-encode-lag reporting and the `deploy/` bundle are
-[#9–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+**Everything else in the design is still design.** Retention, reconnect, encode-lag reporting and
+the `deploy/` bundle are
+[#10–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
 started. There is no `deploy/` bundle, no published image, no CI and no devnet
 node — do not infer those commands from the sibling repos.
 

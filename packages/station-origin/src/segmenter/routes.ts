@@ -11,7 +11,7 @@
  * that rung's price and no address can be reached at another address's price.
  * That is the same discipline `relay`'s `/write` route uses, and it is the
  * reason the rung comes before the sequence rather than after it. Addresses
- * that are not a segment — liveness today, the station's *now* tomorrow — sit
+ * that are not a segment — liveness, and the station's *now* at `/now` — sit
  * outside `/segments` entirely, so they can be priced (or left unpaid) on
  * their own.
  *
