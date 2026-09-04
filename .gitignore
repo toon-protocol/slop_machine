@@ -1,0 +1,112 @@
+# ─── Key material and secrets ─────────────────────────────────────────────
+#
+# This repository is PUBLIC and a radio node deploys behind the connector, so
+# it generates the same key material every other TOON box does: an ILP signer,
+# the settlement keys that actually hold value, and peering secrets. These
+# rules exist before any of that is generated, on purpose — the failure mode
+# they prevent (connector#490) is an operator running `git add -A` in a
+# checkout on a live box and committing funded private keys to a public repo.
+#
+# Wildcarded rather than listed by name so a re-derived, per-box, or
+# additional key cannot reintroduce the gap by being named slightly
+# differently. An ignore rule does not protect a file that is ALREADY tracked
+# — if one ever lands, `git rm --cached` it and rotate the key; the rotation
+# is what closes the exposure, not the rule.
+*.key
+*.pem
+*.secret
+
+# The operator surface's credentials. The bearer token is a secret outright;
+# the write-key allowlist is public halves, but it is per box and ADR 0008
+# revokes authority by editing it on the box — a committed allowlist puts that
+# behind a pull request and re-creates two sources of truth.
+operator-bearer.token
+operator-write.keys
+*.allow
+
+# Wallets and chain deploy output — private keys or per-cluster state.
+*-wallet.json
+*-keypair.json
+testnet-wallets.json
+
+# ─── Environment files ────────────────────────────────────────────────────
+#
+# Every `.env*` variant, not the bare name: operator copies like
+# `.env.bak-20260718` slipped past a bare `.env` rule and got committed
+# (connector, store). Checked-in templates are re-allowed explicitly.
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+
+# ─── Operator snapshot copies ─────────────────────────────────────────────
+#
+# Point-in-time scratch from live-box edits, never configuration the repo
+# should carry. `*.bak[0-9]*` covers `.bak2-`, `.bak3-` — a second snapshot of
+# the same file in one session, which matched none of the other rules
+# (connector#1004).
+*.bak
+*.bak-*
+*.bak.*
+*.bak[0-9]*
+*.orig
+*.rej
+*~
+
+# ─── Media and stream output ──────────────────────────────────────────────
+#
+# Generated segments, playlists, and recordings — bulky, reproducible, and
+# never source.
+#
+# NOTE: these are matched by DIRECTORY, not by extension, and deliberately so.
+# HLS segments are MPEG-TS files ending in `.ts`, which is also the TypeScript
+# extension — a `*.ts` rule here would silently ignore every source file if
+# this repo is written in TypeScript (as relay and toon-client are). Do not
+# add one. Keep generated media confined to these paths instead.
+segments/
+recordings/
+media-out/
+*.m3u8
+
+# ─── Build output ─────────────────────────────────────────────────────────
+#
+# The stack is not chosen yet; both the Node and Rust shapes are covered so
+# the first commit of real code cannot leak build artefacts.
+node_modules/
+.pnpm-store/
+dist/
+target/
+*.tsbuildinfo
+.turbo/
+.eslintcache
+coverage/
+*.tgz
+
+# ─── Local state ──────────────────────────────────────────────────────────
+data/
+.docker-data/
+.cache/
+.devbox/
+/result
+
+# ─── Logs ─────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ─── Editor and OS ────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Agent tooling ────────────────────────────────────────────────────────
+# Local Claude Code config; skills/ are project deliverables and stay tracked.
+.claude/*
+!.claude/skills/
+**/.claude/worktrees/
+.mcp.json
