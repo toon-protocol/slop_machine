@@ -32,8 +32,9 @@
  *     address a viber has already paid for.
  *
  * What this module does not do: it does not evict (issue #10), it does not
- * report the station's *now* (issue #9), it does not restart a dropped ingest
- * (issue #11), and it holds no payment code of any kind.
+ * restart a dropped ingest (issue #11), and it holds no payment code of any
+ * kind. It is where the station's *now* is read from — `latest()` is one
+ * rung's live edge — but the address that reports it is `../now/now.ts`.
  *
  * Generated media lives under `<dataDir>/segments/<rung>/` — ignored by
  * **directory**, never by extension, because an HLS segment is an MPEG-TS

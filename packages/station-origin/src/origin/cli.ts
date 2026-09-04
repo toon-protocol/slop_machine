@@ -95,7 +95,14 @@ address on the segment port:
 
   /segments/<rung>/<sequence>.ts
 
-which is the prefix the connector in front prices, one route per rung. The
+which is the prefix the connector in front prices, one route per rung. Beside
+it, at its own prefix and its own low price:
+
+  /now
+
+the station's now — every rung's current sequence number, the fixed segment
+duration, and whether ingest is live — so a viber starts at the live edge
+instead of at the beginning. No playlist is served, per-rung or master. The
 default ladder is the documented placeholder:
 
   ${DEFAULT_LADDER_SPEC}

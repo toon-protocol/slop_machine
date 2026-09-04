@@ -10,8 +10,8 @@
  * `relay` uses — and it is what makes an ordinary HTTP app monetizable
  * without knowing ILP exists.
  *
- * What exists today (issues #5, #6, #7 and #8) is the whole paid path, end to
- * end, across a configurable ladder of rungs:
+ * What exists today (issues #5, #6, #7, #8 and #9) is the whole paid path, end
+ * to end, across a configurable ladder of rungs:
  *
  *   - `GET /health` on the segment port: liveness, for a supervisor inside the
  *     node. It requires no payment header, reads none, and echoes none. It is
@@ -24,6 +24,16 @@
  *     published by the station node — stock Caddy does not speak RTMP — so it
  *     is the origin's own listener that terminates TLS and checks the key.
  *     Ingest is authenticated and never paid.
+ *
+ *   - `GET /now` on the segment port: the station's *now* — every rung's
+ *     current sequence number, the fixed segment duration, and whether ingest
+ *     is live. This is what a viber pulls to start at the live edge instead of
+ *     at the beginning, and what lets them tell a stalled edge apart from a
+ *     station that ended. It is paid, like a segment, but under its own prefix
+ *     so the connector prices it cheaply on its own — and it is deliberately
+ *     not `/health`, which is unpriced in-node liveness and a different
+ *     question. No playlist is served, here or anywhere: this report is the
+ *     whole of the origin's discovery surface.
  *
  *   - `GET /segments/<rung>/<sequence>.ts` on the segment port: one span of a
  *     broadcaster's vibes, encoded at a rung and served whole. Every path a
@@ -38,8 +48,8 @@
  * encoder rather than depending on a separately-scheduled one is what keeps
  * ingest, encoding and serving inside a single testable surface.
  *
- * The station's *now* (#9), retention (#10), reconnect (#11) and encode-lag
- * reporting (#12) are not here yet.
+ * Retention (#10), reconnect (#11) and encode-lag reporting (#12) are not here
+ * yet.
  *
  * The two ports, the data directory and the rung ladder are configuration
  * rather than constants: the integration suite boots real instances on fresh
@@ -69,6 +79,7 @@ import {
   type SegmenterInstance,
 } from '../segmenter/segmenter.js';
 import { segmentRoutes, SEGMENTS_ROUTE_PREFIX } from '../segmenter/routes.js';
+import { nowRoutes, NOW_ROUTE_PREFIX } from '../now/now.js';
 import { DEFAULT_SEGMENT_SECONDS, type Rung } from '../segmenter/rung.js';
 import {
   DEFAULT_LADDER,
@@ -216,8 +227,8 @@ export interface OriginInstance {
    * Whether a broadcaster is publishing right now.
    *
    * This is not liveness and it is not the station's *now* — it is the plain
-   * fact of an accepted publish being open, which is what a supervisor and
-   * (from issue #12) the *now* address are both built on.
+   * fact of an accepted publish being open, which is what a caller holding an
+   * `OriginInstance` and the `live` field of `GET /now` are both read off.
    */
   isIngesting(): boolean;
   /** Stop the origin and release both listeners. Idempotent. */
@@ -340,8 +351,15 @@ export async function startOrigin(
   // reachable from inside the node only.
   app.get('/health', (c) => c.json(livenessResponse()));
 
-  // The paid surface: one prefix per rung, strictly beneath this one.
+  // The paid surface, in two kinds. Each sits beneath its own prefix, and no
+  // prefix sits beneath another: one connector route per rung at that rung's
+  // price, and one on the station's *now* at its own low price, so no address
+  // can be reached at another address's price.
   app.route(SEGMENTS_ROUTE_PREFIX, segmentRoutes(segmenter));
+  app.route(
+    NOW_ROUTE_PREFIX,
+    nowRoutes({ segmenter, isLive: () => ingest.isLive() })
+  );
 
   let server: ServerType;
   let port: number;
@@ -370,7 +388,7 @@ export async function startOrigin(
     `[station-origin] v${VERSION} serving on http://${host}:${port} (data dir: ${dataDir})`
   );
   console.log(
-    `[station-origin] ladder: ${describeLadder(rungs, segmentSeconds)} — each served from ${SEGMENTS_ROUTE_PREFIX}/<rung>/<sequence>.ts in ${String(segmentSeconds)}s segments`
+    `[station-origin] ladder: ${describeLadder(rungs, segmentSeconds)} — each served from ${SEGMENTS_ROUTE_PREFIX}/<rung>/<sequence>.ts in ${String(segmentSeconds)}s segments, with the station's now at ${NOW_ROUTE_PREFIX}`
   );
 
   let running = true;

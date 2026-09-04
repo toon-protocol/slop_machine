@@ -17,15 +17,16 @@ either one it is already paid for. That separation is the whole design, and it i
 The vocabulary is not decoration — it is written down in [`CONTEXT.md`](./CONTEXT.md), and the
 decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 
-> **Status: the station origin ingests, encodes and serves — across a configurable ladder.** It
-> accepts an RTMP or RTMPS publish carrying the station's stream key, supervises an `ffmpeg` per
-> rung that cuts the vibes into fixed-duration segments, and serves them at
-> `/segments/<rung>/<sequence>.ts` on its segment port. The ladder is ordinary configuration
-> (`TOON_RUNGS`), defaulting to the four-rung placeholder ladder, and a ladder that could break the
-> 2 MiB segment budget is refused at boot. There is no *now* address, no eviction, no deploy
-> bundle, no published image and no devnet node. The diagrams below are the intended shape,
-> not a description of a running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to
-> build and test it.
+> **Status: the station origin ingests, encodes, serves — and reports its *now*.** It accepts an
+> RTMP or RTMPS publish carrying the station's stream key, supervises an `ffmpeg` per rung that cuts
+> the vibes into fixed-duration segments, and serves them at `/segments/<rung>/<sequence>.ts` on its
+> segment port. `GET /now` on that same port reports the station's *now* — every rung's current
+> sequence number, the fixed segment duration, and whether ingest is live — so a viber starts at the
+> live edge instead of at the beginning. The ladder is ordinary configuration (`TOON_RUNGS`),
+> defaulting to the four-rung placeholder ladder, and a ladder that could break the 2 MiB segment
+> budget is refused at boot. There is no eviction, no deploy bundle, no published image and no
+> devnet node. The diagrams below are the intended shape, not a description of a running system. See
+> [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it.
 
 ## A station
 
@@ -46,6 +47,11 @@ The broadcaster points OBS — or anything that speaks RTMP — at the origin ov
 stream key, and the origin cuts the vibes into HLS segments with `ffmpeg`. A viber pulls one at a
 time from `/segments/<rung>/<sequence>.ts`, through the connector, which prices one route per rung
 prefix so that choosing a rung is choosing a price.
+
+A viber finds the live edge first, from one cheap address of its own: `GET /now` reports every
+rung's current sequence number, the fixed segment duration, and whether ingest is live. **No
+playlist is served from a station** — nothing free is, and the client daemon already stands between
+the station and the player, so it synthesizes whatever playlist its player needs over loopback.
 
 **Two ports are reachable from the internet and no more: Caddy's, and the origin's RTMPS ingest
 port.** Caddy fronts only the paid HTTP path. Stock Caddy does not speak RTMP and a custom Caddy
