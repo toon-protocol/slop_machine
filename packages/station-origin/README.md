@@ -9,26 +9,82 @@ request paid. See the repo's [`CLAUDE.md`](../../CLAUDE.md) for why that split i
 
 ## What exists today
 
-Issues #5, #6, #7, #8 and #9 built the whole paid path across a **configurable rung ladder**: a
+Issues #5 through #12 built the whole paid path across a **configurable rung ladder**: a
 broadcaster publishes, the origin encodes and cuts at every rung they configured, it reports where
-the live edge is, and a viber pulls segments by address at the rung — and so the price — they
-chose. Retention (#10), reconnect (#11) and the deploy bundle (#13/#14) are still to come.
+the live edge is and whether the box is keeping up with the ladder, it survives a dropped uplink and
+evicts what has fallen out of the window, and a viber pulls segments by address at the rung — and so
+the price — they chose. The deploy bundle (#13/#14) is still to come.
 
-| Surface                         | Port                | Paid | What it is                                       |
-| ------------------------------- | ------------------- | ---- | ------------------------------------------------ |
-| `GET /health`                   | `TOON_SEGMENT_PORT` | no   | Liveness, for a supervisor **inside** the node   |
-| `GET /now`                      | `TOON_SEGMENT_PORT` | yes  | The station's *now* — where the live edge is     |
-| `GET /segments/<rung>/<seq>.ts` | `TOON_SEGMENT_PORT` | yes  | One span of the broadcaster's vibes at that rung |
-| RTMP / RTMPS                    | `TOON_INGEST_PORT`  | no   | A broadcaster's publish, gated on the stream key |
+| Surface                         | Port                | Paid | What it is                                        |
+| ------------------------------- | ------------------- | ---- | ------------------------------------------------- |
+| `GET /health`                   | `TOON_SEGMENT_PORT` | no   | Liveness, for a supervisor **inside** the node    |
+| `GET /encode`                   | `TOON_SEGMENT_PORT` | no   | Whether the encode is keeping up, **inside** only |
+| `GET /now`                      | `TOON_SEGMENT_PORT` | yes  | The station's *now* — where the live edge is      |
+| `GET /segments/<rung>/<seq>.ts` | `TOON_SEGMENT_PORT` | yes  | One span of the broadcaster's vibes at that rung  |
+| RTMP / RTMPS                    | `TOON_INGEST_PORT`  | no   | A broadcaster's publish, gated on the stream key  |
 
-Three prefixes, none beneath another: `/health`, `/now` and `/segments/<rung>/`. That is what lets
-the connector in front terminate one route per rung at that rung's price and one on `/now` at its
-own low price, with no address reachable at another address's price.
+Four prefixes, none beneath another: `/health`, `/encode`, `/now` and `/segments/<rung>/`. That is
+what lets the connector in front terminate one route per rung at that rung's price and one on `/now`
+at its own low price, with no address reachable at another address's price.
 
 `/health` is process liveness — "is the origin up enough to answer". It is not a claim about
 ingest: whether a broadcaster is currently supplying vibes is the station's *now*, which a viber
 pays for. `/health` sits outside every prefix the connector routes, so it is unpriced and reachable
 from inside the node and from nowhere else.
+
+`/encode` sits on exactly the same footing, and for the same reason: it is the
+broadcaster-operator's own diagnostic about their hardware, not anything a viber buys. **Neither is
+a connector route and neither may become one** — the segment port is published on no interface, so
+"unpriced" here means "in-node", never "free to the internet". Nothing free is served *from* a
+station.
+
+## Is this box big enough for this ladder?
+
+```
+GET /encode   →  200  application/json, Cache-Control: no-store
+
+{
+  "live": true,
+  "segmentSeconds": 4,
+  "segmentByteBudget": 2097152,
+  "rungs": [
+    { "rung": "audio", "encoding": true, "keepingUp": true,  "behindSeconds": 0,
+      "encodedSeconds": 240, "elapsedSeconds": 241.6,
+      "refusedOverBudget": 0, "lastOverBudget": null, "largestSegmentBytes": 65216 },
+    { "rung": "1080p", "encoding": true, "keepingUp": false, "behindSeconds": 31.4,
+      "encodedSeconds": 208, "elapsedSeconds": 243.4,
+      "refusedOverBudget": 0, "lastOverBudget": null, "largestSegmentBytes": 1503488 }
+  ]
+}
+```
+
+A broadcaster whose station stutters has two suspects — *my ladder is too ambitious for this
+hardware* and *my uplink is bad* — and from the outside they look identical. This is the answer,
+and it is **measured**: how many seconds of vibes have finished, against how many seconds have
+passed since the encoder started.
+
+- **Per rung, in ladder order.** One ingest is encoded at every rung at once, so a cheap rung
+  keeping pace while an expensive one falls behind names the rung to drop. The example above is a
+  box that can manage the ladder up to 1080p and not past it.
+- **`behindSeconds` is `0` while it keeps pace**, and grows when it does not. One segment of slack
+  is built in for the span the encoder is holding, and one more (at least two seconds) for its
+  start-up and flush, so an ordinary encoder start does not read as a failure. `keepingUp` is that
+  number against that allowance.
+- **A rung that starts falling behind says so in the logs too**, on the transition, and says so
+  again when it recovers — a broadcaster is watching OBS, not an address.
+- **`live` is here so the rest can be read.** A rung encoding nothing because nobody is publishing
+  is not a rung that is behind; that is the uplink, and it is `live` going false.
+- **The bytes are the alarm the arithmetic cannot raise.** A rung's capped bitrate times the fixed
+  duration is a guarantee checked at boot; `largestSegmentBytes` is what the encoder actually
+  produced, and `refusedOverBudget`/`lastOverBudget` are the segments that went over ADR 0001's
+  budget anyway and were **thrown away rather than served**.
+- **It is not the station's *now*.** That one is paid, viber-facing, and about which sequence to
+  pull next. This is unpriced, operator-facing, about the box — and carries no sequence number of
+  the live edge at all.
+- **`keepingUp` and `behindSeconds` are `null`** on a station nobody has broadcast to yet.
+  Deliberately not `true`: a box that has never been asked to do anything has not coped with
+  anything. The verdict freezes when a broadcast ends rather than being erased with it, so a
+  broadcaster who has finished can still read what their box did.
 
 ## The station's *now*
 
@@ -306,6 +362,16 @@ Its ladder is ordinary configuration — two deliberately small rungs, one of th
 the suite pulls the same span at two rungs and watches the sizes differ the way the ladder says
 they should, without ever encoding a broadcaster's four real ones. The refusal is asserted the same
 way round: a ladder over the byte budget must not boot, and must name the rung.
+
+`src/encode/encode.test.ts` is the encode report, exercised the way a broadcaster meets it. It also
+pushes **in real time**, because a publish flushed as fast as the box can encode arrives faster than
+real time and would call any box big enough, then asserts over plain HTTP that every rung is keeping
+up with numbers a real `ffmpeg` racing a real clock produced. Its second half is where the byte
+budget is asserted against actual encoded bytes: a rung configured **exactly on ADR 0001's ceiling**
+— legal, and the boot-time arithmetic lets it through — is fed incompressible noise until the real
+encoder saturates its cap and MPEG-TS framing carries a span past 2 MiB. Those spans must be
+counted, refused, and answered as a clean `unknown_segment`, while every span that *is* served is
+weighed on the wire and found inside the budget.
 
 `src/now/now.test.ts` is the station's *now*, exercised the way a viber meets it: it pushes a
 broadcast **in real time** (`-re`, the way a broadcaster's software actually sends) so that "does

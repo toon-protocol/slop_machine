@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves — and reports its *now*
+## Status: the station origin ingests, encodes, serves, and reports its *now* and its pace
 
 This repository is a pnpm workspace with one package — `packages/station-origin`
 (`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
@@ -35,14 +35,35 @@ What the station origin does today ([#5](https://github.com/toon-protocol/slop_m
 [#8](https://github.com/toon-protocol/slop_machine/issues/8),
 [#9](https://github.com/toon-protocol/slop_machine/issues/9),
 [#10](https://github.com/toon-protocol/slop_machine/issues/10),
-[#11](https://github.com/toon-protocol/slop_machine/issues/11)) is the whole paid path across a
+[#11](https://github.com/toon-protocol/slop_machine/issues/11),
+[#12](https://github.com/toon-protocol/slop_machine/issues/12)) is the whole paid path across a
 **configurable rung ladder** — boot, answer liveness, take a broadcaster's vibes in, encode and cut
 them at every rung, serve the result by address, say where the live edge is, survive a dropped
-uplink, and drop what has fallen out of the window:
+uplink, drop what has fallen out of the window, and tell the broadcaster whether the box is keeping
+up with the ladder:
 
 - `GET /health` on the segment port (`TOON_SEGMENT_PORT`, default `3100`) — process liveness, for a
   broadcaster-operator's supervisor **inside** the node. It requires no payment header and reads
   none. It is not a claim about ingest; the station's *now* is a separate, paid address.
+- `GET /encode` on the segment port — **whether the encode is keeping up with the ladder**, which
+  is the broadcaster-operator's own diagnostic and not anything a viber buys. `200
+  application/json`, `Cache-Control: no-store`, carrying `{"live": boolean, "segmentSeconds":
+  number, "segmentByteBudget": number, "rungs": [{"rung", "encoding", "keepingUp", "behindSeconds",
+  "encodedSeconds", "elapsedSeconds", "refusedOverBudget", "lastOverBudget",
+  "largestSegmentBytes"}]}` in ladder order. It is **measured, not asserted**: seconds of vibes
+  finished against seconds of real time since the encoder started, with one segment of slack for the
+  span in flight and one more (at least two seconds) for start-up and flush. Per rung, because a
+  cheap rung keeping pace while an expensive one falls behind **names the rung to drop** — which is
+  the difference between "my ladder is too ambitious for this box" and "my uplink is bad", and the
+  latter is `live` going false. `keepingUp` and `behindSeconds` are `null` before a station's first
+  broadcast and freeze when one ends. A rung that starts falling behind also says so **in the logs**,
+  on the transition and again on recovery. `refusedOverBudget`, `lastOverBudget` and
+  `largestSegmentBytes` are the byte-budget alarm the boot-time arithmetic cannot raise: what the
+  encoder *actually* produced, and which spans were thrown away rather than served. Like `/health`
+  it is **unpriced, outside every prefix the connector routes, and reachable only from inside the
+  node** — the segment port is published on no interface, so unpriced never means free to the
+  internet. It is deliberately not `/now`, which is paid, viber-facing and about the live edge; no
+  sequence number of the live edge appears here.
 - **RTMP/RTMPS ingest** on the ingest port (`TOON_INGEST_PORT`, default `1935`) — a broadcaster
   publishes with their stream key as the stream name (`rtmps://<station>:1935/live/<stream key>`,
   which is exactly the Server/Stream Key pair OBS asks for). The key is checked on the RTMP
@@ -161,9 +182,8 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
-**Everything else in the design is still design.** Encode-lag reporting and
-the `deploy/` bundle are
-[#12–#14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
+**Everything else in the design is still design.** The `deploy/` bundle is
+[#13 and #14](https://github.com/toon-protocol/slop_machine/issues/3), and the slot app has not been
 started. There is no `deploy/` bundle, no published image, no CI and no devnet
 node — do not infer those commands from the sibling repos.
 

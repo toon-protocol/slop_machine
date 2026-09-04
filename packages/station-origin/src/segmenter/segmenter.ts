@@ -12,7 +12,7 @@
  * one, which is what keeps ingest, encoding and serving inside a single
  * testable surface.
  *
- * Three properties are the whole point of this module:
+ * Five properties are the whole point of this module:
  *
  *   - **A segment arrives whole or not at all.** `ffmpeg` writes each segment
  *     to a temporary name and renames it only once the span is complete, and
@@ -37,6 +37,13 @@
  *     asking for it is the same clean not-found as asking for a sequence that
  *     never existed — the policy is `./retention.ts`.
  *
+ *   - **The encode is measured against the clock.** How many seconds of vibes
+ *     have finished, against how many seconds have passed since the encoder
+ *     started, is the whole of whether this box is big enough for this ladder
+ *     — `pace()`, and the arithmetic behind it is `./pace.ts`. A broadcaster
+ *     reads it at `/encode`; a rung that starts losing ground says so in the
+ *     logs as it happens.
+ *
  * What this module does not do: it holds no payment code of any kind, and it
  * does not decide when a broadcast has dropped — that is the ingest
  * listener's judgement, and this module simply cuts whatever publish is
@@ -59,6 +66,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { assertLadder } from './ladder.js';
+import { paceOf, type EncodeRun, type RungEncode } from './pace.js';
 import {
   assertRetention,
   DEFAULT_RETAIN_SEGMENTS,
@@ -160,6 +168,14 @@ export interface SegmenterInstance {
   cut(vibes: Readable): void;
   /** The latest finished segment at a rung, if there is one. */
   latest(rung: string): Segment | undefined;
+  /**
+   * How the encode is doing at every rung, in ladder order: whether it is
+   * keeping pace with ingest, and what its segments actually measured.
+   *
+   * Measured at this module's own boundary — the clock, and the segments that
+   * have appeared — so nothing outside has to know how encoding works to ask.
+   */
+  pace(): RungEncode[];
   /** Read one segment whole, or say why it cannot be served. */
   read(rung: string, sequence: number): Promise<SegmentLookup>;
   /** Stop every encoder and release its resources. Idempotent. */
@@ -208,6 +224,11 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
       segments: new Map<number, Segment>(),
       next: 0,
       latest: undefined,
+      run: undefined,
+      behind: false,
+      refusedOverBudget: 0,
+      lastOverBudget: undefined,
+      largestSegmentBytes: undefined,
     };
     // Whatever a previous run left behind is already finished and already
     // paid-for-able. Indexing it is what makes a restart continue rather than
@@ -293,6 +314,18 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
       return tracks.get(rung)?.latest;
     },
 
+    pace() {
+      // In ladder order, like every other per-rung answer this origin gives:
+      // a broadcaster reading it is looking for the rung the ladder stops
+      // being affordable at, and that is only legible in order.
+      return rungs.map((rung) => {
+        const track = tracks.get(rung.name);
+        /* c8 ignore next */
+        if (track === undefined) throw new Error(`no track for ${rung.name}`);
+        return measure(track);
+      });
+    },
+
     async read(rung, sequence) {
       const track = tracks.get(rung);
       if (track === undefined) return { outcome: 'unknown-rung' };
@@ -330,7 +363,64 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
 
   // ---------- The encoder ----------
 
+  /**
+   * One rung's pace and its measured bytes, as of right now.
+   *
+   * The pace arithmetic is `./pace.js` and is pure; everything this adds is
+   * the bytes the encoder actually produced, which is the half the boot-time
+   * arithmetic cannot know.
+   */
+  function measure(track: RungTrack): RungEncode {
+    return {
+      ...paceOf({ rung: track.rung.name, run: track.run, segmentSeconds }),
+      refusedOverBudget: track.refusedOverBudget,
+      lastOverBudget: track.lastOverBudget ?? null,
+      largestSegmentBytes: track.largestSegmentBytes ?? null,
+    };
+  }
+
+  /**
+   * Say it out loud when a rung starts, or stops, falling behind.
+   *
+   * On the transition only. A broadcaster is not watching an address while
+   * their box struggles — they are looking at OBS — so the answer has to reach
+   * their logs too, and a line per poll would bury it rather than deliver it.
+   */
+  function reportPace(track: RungTrack): void {
+    const pace = paceOf({
+      rung: track.rung.name,
+      run: track.run,
+      segmentSeconds,
+    });
+    if (pace.keepingUp === null) return;
+
+    if (!pace.keepingUp && !track.behind) {
+      track.behind = true;
+      console.error(
+        `[station-origin] rung "${track.rung.name}" is falling behind: ` +
+          `${String(pace.encodedSeconds)}s of vibes encoded in ${String(pace.elapsedSeconds)}s of ingest, ` +
+          `${String(pace.behindSeconds)}s behind real time — this box may not be big enough for this ladder, ` +
+          `so drop a rung or lower its bitrate`
+      );
+      return;
+    }
+
+    if (pace.keepingUp && track.behind) {
+      track.behind = false;
+      console.log(
+        `[station-origin] rung "${track.rung.name}" is keeping up again ` +
+          `(${String(pace.encodedSeconds)}s of vibes encoded in ${String(pace.elapsedSeconds)}s of ingest)`
+      );
+    }
+  }
+
   function startEncoder(track: RungTrack): Encoder {
+    // A run is one publish. Whether the box kept up is a question about this
+    // broadcast, so the clock starts here rather than at boot — and the count
+    // starts at zero even though the sequence numbers do not.
+    track.run = { startedAt: Date.now(), segments: 0 };
+    track.behind = false;
+
     const child = spawn(
       ffmpegPath,
       encoderArgs(track.rung, segmentSeconds, track.directory, track.next),
@@ -362,6 +452,9 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
       // The last span is renamed into place as the encoder exits, so sweep
       // once more before deciding there is nothing new.
       sweep(track);
+      // The run stops here, and what it measured stops moving with it: a
+      // broadcaster who has finished can still read what their box did.
+      if (track.run !== undefined) track.run.endedAt ??= Date.now();
       // An encoder we asked to stop is not an encoder that failed, however it
       // chose to report the interruption.
       if (encoder.stopping || signal !== null || code === 0) return;
@@ -414,7 +507,12 @@ export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
   function startPolling(): void {
     if (poll !== undefined) return;
     poll = setInterval(() => {
-      for (const track of tracks.values()) sweep(track);
+      for (const track of tracks.values()) {
+        sweep(track);
+        // Whether the box is keeping up is only worth saying while it is
+        // encoding, which is exactly as long as this poll runs.
+        reportPace(track);
+      }
       stopPollingIfIdle();
     }, POLL_INTERVAL_MS);
     // A poll is bookkeeping, not work the node should stay alive for.
@@ -454,6 +552,16 @@ interface RungTrack {
   /** The sequence number the encoder is expected to finish next. */
   next: number;
   latest: Segment | undefined;
+  /** This rung's current or last publish, or `undefined` before the first. */
+  run: EncodeRun | undefined;
+  /** Whether this rung has already been said, in the logs, to be behind. */
+  behind: boolean;
+  /** Segments refused for the byte budget since the origin started. */
+  refusedOverBudget: number;
+  /** The last one refused that way. */
+  lastOverBudget: { sequence: number; bytes: number } | undefined;
+  /** The largest segment seen at this rung, servable or not, in bytes. */
+  largestSegmentBytes: number | undefined;
 }
 
 /**
@@ -478,6 +586,13 @@ function sweep(track: RungTrack): void {
       break;
     }
     track.next = sequence + 1;
+    // A span that finished is a span the encoder spent real time on, whether
+    // or not it turns out to be servable. Counting it here — in the live walk,
+    // never in the boot-time index — is what keeps the pace a measurement of
+    // *this* publish's encode.
+    if (track.run !== undefined && track.run.endedAt === undefined) {
+      track.run.segments += 1;
+    }
     admit(track, sequence, bytes);
   }
 
@@ -540,10 +655,18 @@ function admit(track: RungTrack, sequence: number, bytes: number): void {
     discard(track, sequence);
     return;
   }
+  // Measured, not computed. The boot-time arithmetic bounds what a rung may
+  // produce; this is what it actually produced.
+  track.largestSegmentBytes = Math.max(track.largestSegmentBytes ?? 0, bytes);
+
   if (bytes > SEGMENT_BYTE_BUDGET) {
     // The arithmetic is the guarantee; this is the alarm for an encoder that
     // broke it anyway. Serving it would hand a viber a span their connector
-    // may refuse to carry, having already charged them for asking.
+    // may refuse to carry, having already charged them for asking. The count
+    // is kept as well as logged, so a broadcaster reading the in-node encode
+    // report finds it without going through their logs.
+    track.refusedOverBudget += 1;
+    track.lastOverBudget = { sequence, bytes };
     console.error(
       `[station-origin] rung "${track.rung.name}" produced sequence ${String(sequence)} at ${String(bytes)} bytes, over the ${String(SEGMENT_BYTE_BUDGET)}-byte budget (ADR 0001) — it will not be served; lower the rung's bitrate or shorten the segment`
     );

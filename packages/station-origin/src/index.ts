@@ -90,4 +90,32 @@ export {
 export { nowRoutes, NOW_ROUTE_PREFIX, NOW_CONTENT_TYPE } from './now/now.js';
 export type { StationNow, RungNow, NowDependencies } from './now/now.js';
 
+// How the encode is doing: whether this box is keeping pace with the ladder it
+// was given, per rung, and what its segments actually measured. Unpriced and
+// in-node, on the same footing as liveness — a broadcaster's own diagnostic,
+// never a viber's address.
+export {
+  encodeRoutes,
+  ENCODE_ROUTE_PREFIX,
+  ENCODE_CONTENT_TYPE,
+} from './encode/encode.js';
+export type {
+  EncodeReport,
+  RungEncodeReport,
+  EncodeDependencies,
+} from './encode/encode.js';
+export {
+  paceOf,
+  lagToleranceSeconds,
+  LAG_TOLERANCE_SEGMENTS,
+  LAG_TOLERANCE_FLOOR_SECONDS,
+} from './segmenter/pace.js';
+export type {
+  EncodeRun,
+  RungPace,
+  RungEncode,
+  OverBudgetSegment,
+  PaceInput,
+} from './segmenter/pace.js';
+
 export { VERSION } from './version.js';
