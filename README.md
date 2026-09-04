@@ -17,11 +17,13 @@ either one it is already paid for. That separation is the whole design, and it i
 The vocabulary is not decoration — it is written down in [`CONTEXT.md`](./CONTEXT.md), and the
 decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 
-> **Status: the station origin ingests, encodes and serves — at one rung.** It accepts an RTMP or
-> RTMPS publish carrying the station's stream key, supervises an `ffmpeg` that cuts the vibes into
-> fixed-duration segments, and serves them at `/segments/<rung>/<sequence>.ts` on its segment port.
-> The rung ladder is still a single hard-coded rung, and there is no *now* address, no eviction, no
-> deploy bundle, no published image and no devnet node. The diagrams below are the intended shape,
+> **Status: the station origin ingests, encodes and serves — across a configurable ladder.** It
+> accepts an RTMP or RTMPS publish carrying the station's stream key, supervises an `ffmpeg` per
+> rung that cuts the vibes into fixed-duration segments, and serves them at
+> `/segments/<rung>/<sequence>.ts` on its segment port. The ladder is ordinary configuration
+> (`TOON_RUNGS`), defaulting to the four-rung placeholder ladder, and a ladder that could break the
+> 2 MiB segment budget is refused at boot. There is no *now* address, no eviction, no deploy
+> bundle, no published image and no devnet node. The diagrams below are the intended shape,
 > not a description of a running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to
 > build and test it.
 

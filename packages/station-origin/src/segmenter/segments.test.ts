@@ -9,7 +9,12 @@
  * Nothing here reaches inside the segmenter, the `ffmpeg` argument
  * construction, or the on-disk layout. All three must stay rewritable without
  * touching this file, so the only things it knows are the address shape, the
- * rung it configured, and the bytes that come back.
+ * ladder it configured, and the bytes that come back.
+ *
+ * The ladder is the point of most of it: two rungs, written exactly the way a
+ * broadcaster writes them, cut from one ingest and each served at its own
+ * address. A deliberately small ladder, because it is ordinary configuration
+ * and a broadcaster's four real rungs would cost minutes per run.
  *
  * The suite is deliberately slow, because real encoding is the point:
  * [ADR 0001](../../../../docs/adr/0001-a-segment-is-bounded-so-a-response-cap-cannot-break-it.md)
@@ -31,16 +36,17 @@ import { startOrigin } from '../origin/origin.js';
 import type { OriginConfig, OriginInstance } from '../origin/origin.js';
 
 /**
- * The rung the suite runs, which is ordinary configuration and nothing else. A
- * small one: the point of the suite is that the bytes are real, not that they
- * are pretty, and a broadcaster's four-rung ladder would cost minutes per run.
+ * The ladder the suite runs, as the one string an operator would put in a
+ * compose file. Two rungs of different shapes — one sound only, one with a
+ * picture — so that "the same span at two rungs" is a real choice of price and
+ * not two spellings of one encode.
  */
-const RUNG = {
-  name: 'small',
-  height: 360,
-  videoBitrate: 500_000,
-  audioBitrate: 64_000,
-} as const;
+const LADDER = 'audio:64k, small:360:500k:64k';
+
+/** What that ladder is called, in ladder order. Each is its own address. */
+const AUDIO_RUNG = 'audio';
+const VIDEO_RUNG = 'small';
+const RUNGS = [AUDIO_RUNG, VIDEO_RUNG];
 
 /** Fixed segment duration for the suite. */
 const SEGMENT_SECONDS = 2;
@@ -53,17 +59,22 @@ const SEGMENT_SECONDS = 2;
 const SEGMENT_BYTE_BUDGET = 2 * 1024 * 1024;
 
 /**
- * The bound the suite's own rung claims, from the arithmetic that makes the
- * cap meaningful — a hard maximum bitrate over a fixed duration, plus the one
- * second of encoder buffer the cap smooths over, plus audio:
+ * The bound each rung of the suite's ladder claims, from the arithmetic that
+ * makes a cap meaningful — a hard maximum bitrate over a fixed duration, plus
+ * the one second of encoder buffer the video cap smooths over:
  *
- *   (500 000 × 2 + 500 000 + 64 000 × 2) ÷ 8 = 203 500 bytes
+ *   audio: 64 000 × 2 ÷ 8                       =  16 000 bytes
+ *   small: (500 000 × 3 + 64 000 × 2) ÷ 8       = 203 500 bytes
  *
- * with a fifth again allowed for MPEG-TS packetisation, which is carriage
- * rather than picture. A segment over this is an encoder that treated its cap
- * as an average, which is exactly what ADR 0001 forbids.
+ * with 3% and a flat 12 KiB allowed on top for MPEG-TS carriage — four bytes
+ * of header on every 188-byte packet, plus the program tables repeated a few
+ * times a second. Carriage is not picture. A segment over this is an encoder
+ * that treated its cap as an average, which is exactly what ADR 0001 forbids.
  */
-const RUNG_WORST_CASE_BYTES = Math.ceil(203_500 * 1.2);
+const WORST_CASE_BYTES: Record<string, number> = {
+  [AUDIO_RUNG]: Math.ceil(16_000 * 1.03) + 12 * 1024,
+  [VIDEO_RUNG]: Math.ceil(203_500 * 1.03) + 12 * 1024,
+};
 
 /** How long a broadcast the suite pushes, in seconds. */
 const BROADCAST_SECONDS = 10;
@@ -73,14 +84,17 @@ const tempDirs: string[] = [];
 
 /** The one station the read-side assertions share, broadcast to once. */
 let station: OriginInstance;
-/** The sequence numbers that station actually served, in order. */
-let served: number[];
+/** The sequence numbers that station actually served, per rung, in order. */
+let served: Record<string, number[]>;
 
 beforeAll(async () => {
   station = await boot();
   await publish({ origin: station, streamKey: keyOf(station) });
-  await waitForSegment(station, RUNG.name, 2);
-  served = await servedSequences(station, RUNG.name);
+  for (const rung of RUNGS) await waitForSegment(station, rung, 2);
+  served = {
+    [AUDIO_RUNG]: await servedSequences(station, AUDIO_RUNG),
+    [VIDEO_RUNG]: await servedSequences(station, VIDEO_RUNG),
+  };
 }, 180_000);
 
 afterEach(async () => {
@@ -129,13 +143,26 @@ async function boot(
     ingestHost: '127.0.0.1',
     dataDir: freshDir(),
     streamKey,
-    rung: { ...RUNG },
+    // The ladder as ordinary configuration — the same string a broadcaster
+    // sets, not a shape only a test can build.
+    rungs: LADDER,
     segmentSeconds: SEGMENT_SECONDS,
     ...config,
   });
   keys.set(origin, streamKey);
   running.push(origin);
   return origin;
+}
+
+/** What a station refuses to boot with, and what it says about it. */
+async function refusal(config: Partial<OriginConfig>): Promise<Error> {
+  try {
+    const origin = await boot(config);
+    await origin.stop();
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error('that station started, and it should not have');
 }
 
 /**
@@ -212,6 +239,22 @@ function get(
   );
 }
 
+/** Pull one segment and hand back its bytes. */
+async function pull(
+  origin: OriginInstance,
+  rung: string,
+  sequence: number
+): Promise<Buffer> {
+  const res = await fetch(segmentUrl(origin, rung, sequence));
+  if (res.status !== 200) {
+    await res.arrayBuffer();
+    throw new Error(
+      `${rung}/${String(sequence)} came back ${String(res.status)}`
+    );
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /** Wait until a station is holding a sequence number, or give up loudly. */
 async function waitForSegment(
   origin: OriginInstance,
@@ -272,52 +315,86 @@ function probe(body: Buffer): string {
 
 // ---------- The tests ----------
 
-describe('a broadcast, cut into segments', () => {
+describe('a broadcast, cut into segments at every rung on the ladder', () => {
   it('is served at an address carrying its rung and its sequence number', async () => {
-    // A ten-second broadcast at two-second segments is several spans, each at
-    // its own address beneath its rung's prefix.
-    expect(served.length).toBeGreaterThanOrEqual(3);
-    expect(served).toEqual(served.map((_, index) => index));
+    for (const rung of RUNGS) {
+      const sequences = served[rung] ?? [];
+      // A ten-second broadcast at two-second segments is several spans, each
+      // at its own address beneath its rung's prefix.
+      expect(sequences.length).toBeGreaterThanOrEqual(3);
+      expect(sequences).toEqual(sequences.map((_, index) => index));
 
-    for (const sequence of served) {
-      const res = await fetch(segmentUrl(station, RUNG.name, sequence));
-      expect(res.status).toBe(200);
-      expect(res.headers.get('content-type')).toBe('video/mp2t');
-      // A segment was paid for by whoever pulled it; nothing invites a cache
-      // to hand it on for free.
-      expect(res.headers.get('cache-control')).toBe('no-store');
-      expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      for (const sequence of sequences) {
+        const res = await fetch(segmentUrl(station, rung, sequence));
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toBe('video/mp2t');
+        // A segment was paid for by whoever pulled it; nothing invites a cache
+        // to hand it on for free.
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      }
     }
   });
 
-  it('serves the rung and the fixed duration it was configured with', () => {
-    expect(station.config.rungs).toEqual([RUNG.name]);
+  it('serves the ladder and the fixed duration it was configured with', () => {
+    expect(station.config.rungs).toEqual(RUNGS);
     expect(station.config.segmentSeconds).toBe(SEGMENT_SECONDS);
   });
 
+  it('serves the same span at either rung, at the size that rung costs', async () => {
+    // The span a viber's player would climb or drop between: the same
+    // sequence number, pulled at two rungs mid-broadcast.
+    const common = (served[AUDIO_RUNG] ?? []).filter((sequence) =>
+      (served[VIDEO_RUNG] ?? []).includes(sequence)
+    );
+    // Drop the last one: whichever rung finished a beat later ends on a short
+    // span, and the comparison is about full ones.
+    const spans = common.slice(0, -1);
+    expect(spans.length).toBeGreaterThanOrEqual(2);
+
+    for (const sequence of spans) {
+      const cheap = await pull(station, AUDIO_RUNG, sequence);
+      const dear = await pull(station, VIDEO_RUNG, sequence);
+
+      // Both come back whole, and the one carrying a picture is the bigger
+      // one. That difference is the whole reason a rung has its own price:
+      // choosing a rung is choosing what it costs to carry.
+      expect(cheap.length).toBeGreaterThan(0);
+      // Half again as many bytes, at least: the picture is what the dearer
+      // rung is carrying, and carrying it is what it costs.
+      expect(dear.length).toBeGreaterThan(cheap.length * 1.25);
+    }
+  });
+
   it('serves playable spans, not empty or truncated files', async () => {
-    for (const sequence of served.slice(0, 3)) {
-      const res = await fetch(segmentUrl(station, RUNG.name, sequence));
-      const body = Buffer.from(await res.arrayBuffer());
+    for (const rung of RUNGS) {
+      for (const sequence of (served[rung] ?? []).slice(0, 3)) {
+        const probed = probe(await pull(station, rung, sequence));
 
-      // Probed as a whole file rather than inspected byte by byte: what
-      // matters is that a viber's player can decode what it paid for.
-      const probed = probe(body);
-      expect(probed).toMatch(/format_name=mpegts/);
-      expect(probed).toMatch(/codec_type=video/);
-      expect(probed).toMatch(/codec_type=audio/);
+        // Probed as a whole file rather than inspected byte by byte: what
+        // matters is that a viber's player can decode what it paid for.
+        expect(probed).toMatch(/format_name=mpegts/);
+        expect(probed).toMatch(/codec_type=audio/);
+        // A rung with a picture carries one; a rung sold as sound only carries
+        // no video at all, which is what makes it the cheap rung.
+        if (rung === VIDEO_RUNG) {
+          expect(probed).toMatch(/codec_type=video/);
+        } else {
+          expect(probed).not.toMatch(/codec_type=video/);
+        }
 
-      // And that it is the span it claims to be, not a fragment of one.
-      const duration = Number(/duration=([\d.]+)/.exec(probed)?.[1]);
-      expect(duration).toBeGreaterThan(SEGMENT_SECONDS * 0.5);
-      expect(duration).toBeLessThan(SEGMENT_SECONDS * 1.5);
+        // And that it is the span it claims to be, not a fragment of one.
+        const duration = Number(/duration=([\d.]+)/.exec(probed)?.[1]);
+        expect(duration).toBeGreaterThan(SEGMENT_SECONDS * 0.5);
+        expect(duration).toBeLessThan(SEGMENT_SECONDS * 1.5);
+      }
     }
   });
 
   it('serves a segment whole or not at all', async () => {
-    const sequence = served[0] ?? 0;
+    const sequence = served[VIDEO_RUNG]?.[0] ?? 0;
 
-    const res = await fetch(segmentUrl(station, RUNG.name, sequence));
+    const res = await fetch(segmentUrl(station, VIDEO_RUNG, sequence));
     const body = Buffer.from(await res.arrayBuffer());
 
     // The length is stated up front and the body is all of it: a viber pays
@@ -326,27 +403,87 @@ describe('a broadcast, cut into segments', () => {
 
     // Pulled again, byte for byte the same span. A segment does not change
     // under an address someone has already paid for.
-    const again = await fetch(segmentUrl(station, RUNG.name, sequence));
-    expect(Buffer.from(await again.arrayBuffer()).equals(body)).toBe(true);
+    const again = await pull(station, VIDEO_RUNG, sequence);
+    expect(again.equals(body)).toBe(true);
   });
 
   it('keeps every segment inside the byte budget, in actual encoded bytes', async () => {
-    // The last span of a broadcast is however much was left when the
-    // broadcaster stopped, so it is short rather than over — the bound is
-    // about the full ones.
-    const full = served.slice(0, -1);
-    expect(full.length).toBeGreaterThanOrEqual(2);
+    for (const rung of RUNGS) {
+      // The last span of a broadcast is however much was left when the
+      // broadcaster stopped, so it is short rather than over — the bound is
+      // about the full ones.
+      const full = (served[rung] ?? []).slice(0, -1);
+      expect(full.length).toBeGreaterThanOrEqual(2);
 
-    for (const sequence of full) {
-      const res = await fetch(segmentUrl(station, RUNG.name, sequence));
-      const bytes = (await res.arrayBuffer()).byteLength;
+      for (const sequence of full) {
+        const bytes = (await pull(station, rung, sequence)).length;
 
-      expect(bytes).toBeGreaterThan(0);
-      // ADR 0001: whatever else changes, a segment fits in one fulfill.
-      expect(bytes).toBeLessThanOrEqual(SEGMENT_BYTE_BUDGET);
-      // And it fits because the cap is a ceiling, not an average.
-      expect(bytes).toBeLessThanOrEqual(RUNG_WORST_CASE_BYTES);
+        expect(bytes).toBeGreaterThan(0);
+        // ADR 0001: whatever else changes, a segment fits in one fulfill.
+        expect(bytes).toBeLessThanOrEqual(SEGMENT_BYTE_BUDGET);
+        // And it fits because that rung's cap is a ceiling, not an average.
+        expect(bytes).toBeLessThanOrEqual(WORST_CASE_BYTES[rung] ?? 0);
+      }
     }
+  });
+});
+
+describe('a ladder the origin will not run', () => {
+  it('refuses to start, naming the rung, when one is over the byte budget', async () => {
+    // 8 Mbit/s over four-second segments is 4 MiB a segment: twice what a
+    // fulfill may carry, and a station that came up like this would go dark
+    // the day the connector caps responses.
+    const error = await refusal({
+      rungs: 'small:360:500k:64k, greedy:1080:8M:128k',
+      segmentSeconds: 4,
+    });
+
+    expect(error.name).toBe('RungError');
+    // Named, because the operator's next move is to edit that line.
+    expect(error.message).toContain('greedy');
+    expect(error.message).toContain('2097152');
+    // And not a complaint about the rung that was fine.
+    expect(error.message).not.toContain('small');
+  });
+
+  it('re-runs the byte check on the next start, so a raised bitrate is caught', async () => {
+    const ladder = (videoBitrate: string) =>
+      `edge:1080:${videoBitrate}:128k` as const;
+
+    // The rung as it was: 3 Mbit/s over four seconds is 1.5 MiB, inside the
+    // budget, and the station comes up.
+    const before = await boot({ rungs: ladder('3M'), segmentSeconds: 4 });
+    expect(before.config.rungs).toEqual(['edge']);
+    await before.stop();
+
+    // The same rung, one number changed, restarted. Nothing else about the
+    // station moved, and it refuses.
+    const error = await refusal({ rungs: ladder('5M'), segmentSeconds: 4 });
+    expect(error.name).toBe('RungError');
+    expect(error.message).toContain('edge');
+  });
+
+  it('refuses a rung it could not address', async () => {
+    // A rung whose name escapes its own prefix could be reached at another
+    // rung's price.
+    const error = await refusal({ rungs: '../secret:360:500k:64k' });
+
+    expect(error.name).toBe('RungError');
+    expect(error.message).toContain('secret');
+  });
+
+  it('refuses a ladder it cannot read, rather than dropping the rung', async () => {
+    for (const ladder of ['', 'small:360:500k', 'small:360:fast:64k']) {
+      const error = await refusal({ rungs: ladder });
+      expect(error.name).toBe('RungError');
+    }
+  });
+
+  it('refuses two rungs of one name, which would be two prices at one address', async () => {
+    const error = await refusal({ rungs: 'small:96k, small:360:500k:64k' });
+
+    expect(error.name).toBe('RungError');
+    expect(error.message).toContain('small');
   });
 });
 
@@ -359,7 +496,7 @@ describe('a request the station cannot answer', () => {
   });
 
   it('fails cleanly, and differently, for a sequence it does not have', async () => {
-    const res = await get(station, `/segments/${RUNG.name}/9999.ts`);
+    const res = await get(station, `/segments/${VIDEO_RUNG}/9999.ts`);
 
     expect(res.status).toBe(404);
     // Distinguishable from the rung miss above: a player whose rung is gone
@@ -373,8 +510,8 @@ describe('a request the station cannot answer', () => {
 
   it('fails cleanly for an address that is not a segment at all', async () => {
     for (const path of [
-      `/segments/${RUNG.name}/latest`,
-      `/segments/${RUNG.name}/`,
+      `/segments/${VIDEO_RUNG}/latest`,
+      `/segments/${VIDEO_RUNG}/`,
       '/segments',
       '/segments/',
     ]) {
@@ -387,7 +524,7 @@ describe('a request the station cannot answer', () => {
   it('holds no segments before a broadcaster has ever gone live', async () => {
     const quiet = await boot();
 
-    const res = await fetch(segmentUrl(quiet, RUNG.name, 0));
+    const res = await fetch(segmentUrl(quiet, VIDEO_RUNG, 0));
 
     expect(res.status).toBe(404);
     await expect(res.json()).resolves.toMatchObject({
@@ -397,28 +534,12 @@ describe('a request the station cannot answer', () => {
     // nothing yet.
     expect(quiet.isIngesting()).toBe(false);
   });
-
-  it('refuses to start on a rung it could not address', async () => {
-    await expect(
-      startOrigin({
-        segmentPort: 0,
-        ingestPort: 0,
-        host: '127.0.0.1',
-        ingestHost: '127.0.0.1',
-        dataDir: freshDir(),
-        streamKey: `test-station-key-${randomUUID()}`,
-        // A rung whose name escapes its own prefix could be reached at another
-        // rung's price.
-        rung: { ...RUNG, name: '../secret' },
-      })
-    ).rejects.toMatchObject({ name: 'RungError' });
-  });
 });
 
 describe('the served path holds no payment code', () => {
   it('serves a segment with no payment header, and echoes none back', async () => {
-    const sequence = served[0] ?? 0;
-    const path = `/segments/${RUNG.name}/${String(sequence)}.ts`;
+    const sequence = served[VIDEO_RUNG]?.[0] ?? 0;
+    const path = `/segments/${VIDEO_RUNG}/${String(sequence)}.ts`;
 
     // No headers at all. By the time a request reaches the origin the
     // connector in front has already proven it paid; the origin asks for

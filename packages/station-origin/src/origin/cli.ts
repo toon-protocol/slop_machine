@@ -29,7 +29,7 @@ import {
   DEFAULT_DATA_DIR,
   DEFAULT_INGEST_PORT,
   DEFAULT_INGEST_HOST,
-  DEFAULT_RUNG,
+  DEFAULT_LADDER_SPEC,
   DEFAULT_SEGMENT_SECONDS,
 } from './origin.js';
 import type { OriginConfig } from './origin.js';
@@ -56,6 +56,15 @@ Options:
                          purpose: a flat per-segment price is only honestly a
                          per-second rate when every segment covers the same
                          span
+  --rungs <ladder>       The rung ladder this station offers (default: the
+                         placeholder ladder below; env: TOON_RUNGS). Rungs are
+                         comma-separated, fields colon-separated:
+                           <name>:<height>:<video bitrate>:<audio bitrate>
+                           <name>:<audio bitrate>              (sound only)
+                         Bitrates are caps, not targets, in bits per second
+                         with optional k / M suffixes. The origin REFUSES TO
+                         START, naming the rung, if any rung's capped bitrate
+                         times the segment duration exceeds 2 MiB (ADR 0001)
   --ingest-port <port>   Port a broadcaster publishes to (default:
                          ${DEFAULT_INGEST_PORT}; env: TOON_INGEST_PORT). This port IS
                          published by the station node — stock Caddy does not
@@ -81,12 +90,18 @@ echoed, or reported back. A broadcaster publishes with it as their stream name:
 
 which is exactly the Server/Stream Key pair OBS asks for.
 
-The station offers one rung, ${DEFAULT_RUNG.name}, and serves its segments at
+Every rung on the ladder is encoded from the one ingest and served at its own
+address on the segment port:
 
-  /segments/${DEFAULT_RUNG.name}/<sequence>.ts
+  /segments/<rung>/<sequence>.ts
 
-on the segment port. The configurable rung ladder is not built yet, so there is
-deliberately no flag for it rather than one that will change shape.
+which is the prefix the connector in front prices, one route per rung. The
+default ladder is the documented placeholder:
+
+  ${DEFAULT_LADDER_SPEC}
+
+Changing a number needs no ceremony; a rung over the byte budget is refused at
+the next start rather than by review.
 `.trim()
   );
 }
@@ -130,6 +145,7 @@ function configFromEnvironment(
       host: { type: 'string' },
       'data-dir': { type: 'string' },
       'segment-seconds': { type: 'string' },
+      rungs: { type: 'string' },
       'ingest-port': { type: 'string' },
       'ingest-host': { type: 'string' },
       'stream-key-file': { type: 'string' },
@@ -172,6 +188,19 @@ function configFromEnvironment(
     config.segmentSeconds = parseSeconds(secondsFlag, '--segment-seconds');
   } else if (secondsEnv !== undefined && secondsEnv !== '') {
     config.segmentSeconds = parseSeconds(secondsEnv, 'TOON_SEGMENT_SECONDS');
+  }
+
+  // Passed through as the operator wrote it: parsing it here and again in the
+  // origin would be two grammars to keep in step. A ladder that cannot be read,
+  // or that breaks the byte budget, is a RungError below and a non-zero exit —
+  // including an empty `--rungs`, which is an operator asking for a station
+  // that would serve nothing rather than one asking for the default.
+  const rungsFlag = values.rungs;
+  const rungsEnv = env['TOON_RUNGS'];
+  if (rungsFlag !== undefined) {
+    config.rungs = rungsFlag;
+  } else if (rungsEnv !== undefined && rungsEnv !== '') {
+    config.rungs = rungsEnv;
   }
 
   const ingestPortFlag = values['ingest-port'];

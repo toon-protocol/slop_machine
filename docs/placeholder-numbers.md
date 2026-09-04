@@ -29,6 +29,16 @@ headroom for VBR overshoot.
 | `720p`    | 1.8 Mbit/s | ~900 KB      | `2000`        | $1.80      |
 | `1080p`   | 3 Mbit/s   | ~1.4 MiB     | `3500`        | $3.15      |
 
+The station origin ships this ladder as its default, written the way an operator writes it:
+
+```
+TOON_RUNGS="audio:128k,480p:480:800k:128k,720p:720:1800k:128k,1080p:1080:3000k:128k"
+```
+
+`audio` carries no picture at all, which is what makes it the cheap rung. Changing a number here
+needs no ceremony — but the origin recomputes bitrate × duration at every start and **refuses to
+start, naming the rung**, if one exceeds the byte budget.
+
 Do not add a rung above 3 Mbit/s without re-reading ADR 0001 — the ceiling is what keeps a station
 working if the connector ever caps responses the way it caps requests.
 

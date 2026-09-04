@@ -49,8 +49,9 @@ import { mkdirSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
+import { assertLadder } from './ladder.js';
 import {
-  assertRung,
+  hasVideo,
   SEGMENT_BYTE_BUDGET,
   VBV_BUFFER_SECONDS,
   type Rung,
@@ -108,8 +109,8 @@ export interface SegmenterConfig {
   /** The origin's data directory. Segments are written beneath it. */
   dataDir: string;
   /**
-   * The rungs this station offers. One, for now — the configurable ladder is
-   * issue #8, and this is the list it will populate.
+   * The ladder this station offers: every rung one ingest is encoded at, each
+   * served beneath its own prefix at its own price.
    */
   rungs: readonly Rung[];
   /** Fixed segment duration, in seconds. */
@@ -147,17 +148,19 @@ export interface SegmenterInstance {
  * already holds, so a restarted origin keeps serving the window it had and
  * numbers the next segment after the last one it produced.
  *
- * @throws RungError if a rung cannot be addressed, or the duration is unusable.
+ * @throws RungError if a rung cannot be addressed, if two rungs share a name,
+ * if the duration is unusable, or if a rung's capped bitrate times that
+ * duration exceeds the byte budget of ADR 0001.
  */
 export function createSegmenter(config: SegmenterConfig): SegmenterInstance {
   const { dataDir, segmentSeconds } = config;
   const rungs = [...config.rungs];
   const ffmpegPath = config.ffmpegPath ?? 'ffmpeg';
 
-  if (rungs.length === 0) {
-    throw new Error('a station with no rungs would serve nothing');
-  }
-  for (const rung of rungs) assertRung(rung, segmentSeconds);
+  // The whole ladder, before a directory is created or an encoder spawned.
+  // The byte-budget arithmetic is re-run here on every start, so a bitrate
+  // raised between runs is refused at the next one rather than quietly served.
+  assertLadder(rungs, segmentSeconds);
 
   const tracks = new Map<string, RungTrack>();
   for (const rung of rungs) {
@@ -434,6 +437,9 @@ function sweep(track: RungTrack): void {
  *   - `-force_key_frames` puts a keyframe at every segment boundary, so each
  *     segment decodes on its own and a viber who joins mid-broadcast can play
  *     the first one they buy.
+ *   - a rung with no picture drops the video stream outright rather than
+ *     encoding one nobody asked for. It is the cheapest rung on the shipped
+ *     ladder, and what makes it cheap is that the bytes are not there.
  *   - `temp_file` is what makes a segment arrive whole: each span is written
  *     under a temporary name and renamed only once it is complete.
  *   - `-start_number` continues the sequence rather than restarting it.
@@ -449,6 +455,34 @@ function encoderArgs(
   directory: string,
   startNumber: number
 ): string[] {
+  const video = hasVideo(rung)
+    ? [
+        // Optional map: a broadcaster who sent no picture is still a station.
+        '-map',
+        '0:v:0?',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-profile:v',
+        'main',
+        '-pix_fmt',
+        'yuv420p',
+        // Down to the rung's height, never up: vibes that arrived smaller than
+        // the rung are passed through at their own size rather than inflated.
+        '-vf',
+        `scale=-2:2*trunc(min(${String(rung.height)}\\,ih)/2)`,
+        '-crf',
+        String(CRF),
+        '-maxrate',
+        String(rung.videoBitrate),
+        '-bufsize',
+        String(rung.videoBitrate * VBV_BUFFER_SECONDS),
+        '-force_key_frames',
+        `expr:gte(t,n_forced*${String(segmentSeconds)})`,
+      ]
+    : ['-vn'];
+
   return [
     '-hide_banner',
     '-loglevel',
@@ -460,35 +494,13 @@ function encoderArgs(
     'flv',
     '-i',
     'pipe:0',
-    // Optional maps: a station carrying only audio is still a station.
-    '-map',
-    '0:v:0?',
-    '-map',
-    '0:a:0?',
 
-    // Video, at a hard cap.
-    '-c:v',
-    'libx264',
-    '-preset',
-    'veryfast',
-    '-profile:v',
-    'main',
-    '-pix_fmt',
-    'yuv420p',
-    // Down to the rung's height, never up: vibes that arrived smaller than the
-    // rung are passed through at their own size rather than inflated.
-    '-vf',
-    `scale=-2:2*trunc(min(${String(rung.height)}\\,ih)/2)`,
-    '-crf',
-    String(CRF),
-    '-maxrate',
-    String(rung.videoBitrate),
-    '-bufsize',
-    String(rung.videoBitrate * VBV_BUFFER_SECONDS),
-    '-force_key_frames',
-    `expr:gte(t,n_forced*${String(segmentSeconds)})`,
+    // Video, at a hard cap — or none at all, on a rung that is sound only.
+    ...video,
 
     // Audio.
+    '-map',
+    '0:a:0?',
     '-c:a',
     'aac',
     '-b:a',

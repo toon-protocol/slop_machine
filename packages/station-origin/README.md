@@ -9,10 +9,10 @@ request paid. See the repo's [`CLAUDE.md`](../../CLAUDE.md) for why that split i
 
 ## What exists today
 
-Issues #5, #6 and #7 built the whole paid path at **one rung**: a broadcaster publishes, the origin
-encodes and cuts, and a viber pulls segments by address. The configurable rung ladder (#8), the
-station's *now* (#9), retention (#10), reconnect (#11) and the deploy bundle (#13/#14) are still to
-come.
+Issues #5, #6, #7 and #8 built the whole paid path across a **configurable rung ladder**: a
+broadcaster publishes, the origin encodes and cuts at every rung they configured, and a viber pulls
+segments by address at the rung — and so the price — they chose. The station's *now* (#9),
+retention (#10), reconnect (#11) and the deploy bundle (#13/#14) are still to come.
 
 | Surface                              | Port                | Paid | What it is                                       |
 | ------------------------------------ | ------------------- | ---- | ------------------------------------------------ |
@@ -62,10 +62,57 @@ Segments are written to `$TOON_DATA_DIR/segments/<rung>/`. Generated media is ig
 TypeScript extension. The corollary is that the code lives in `src/segmenter/`, not `src/segments/`:
 `.gitignore`'s `segments/` rule matches a directory of that name anywhere, source included.
 
-**One rung**, `720p` from [`docs/placeholder-numbers.md`](../../docs/placeholder-numbers.md), until
-issue #8 makes the ladder configuration. It is `OriginConfig.rung` programmatically — which is how
-the suite runs a small one — and deliberately has no flag yet rather than one that will change
-shape.
+## The rung ladder
+
+Which rungs a station offers is ordinary configuration — one string, `--rungs`/`TOON_RUNGS`, so
+that a broadcaster trades bandwidth cost against quality without a code change, and so that the
+rungs are readable beside the connector routes that price them in the same compose file:
+
+```
+TOON_RUNGS="audio:128k,480p:480:800k:128k,720p:720:1800k:128k,1080p:1080:3000k:128k"
+```
+
+Rungs are separated by commas and their fields by colons; whitespace around either is ignored:
+
+```
+<name>:<height>:<video bitrate>:<audio bitrate>    a rung with a picture
+<name>:<audio bitrate>                             a rung carrying only sound
+```
+
+A bitrate is bits per second with the broadcast-conventional `k` and `M` suffixes (`1800k` is
+1.8 Mbit/s), and it is a **cap, never a target**. One ingest is encoded at every rung on the ladder,
+each into its own prefix, and the rung names are exactly the routes the connector in front needs.
+
+The default is the four-rung, four-second ladder of
+[`docs/placeholder-numbers.md`](../../docs/placeholder-numbers.md) — placeholders, not decisions,
+and safe to change:
+
+| Rung    | Cap                          | Worst case per 4s segment |
+| ------- | ---------------------------- | ------------------------- |
+| `audio` | 128 kbit/s, sound only       | 64 000 bytes              |
+| `480p`  | 800 kbit/s + 128 kbit/s      | 464 000 bytes             |
+| `720p`  | 1.8 Mbit/s + 128 kbit/s      | 964 000 bytes             |
+| `1080p` | 3 Mbit/s + 128 kbit/s        | 1 564 000 bytes           |
+
+### It is validated fail-closed, at every start
+
+Worst-case bytes are computed as **capped bitrate × fixed segment duration**, and the origin
+**refuses to start — non-zero exit, naming the offending rung** — if any rung exceeds the 2 MiB
+budget of [ADR 0001](../../docs/adr/0001-a-segment-is-bounded-so-a-response-cap-cannot-break-it.md):
+
+```
+[station-origin] RungError: rung "4k" would produce segments of up to 8064000 bytes
+(16128000 bit/s × 4s), over the 2097152-byte budget of ADR 0001 — cap rung "4k" below
+4194304 bit/s in total, or shorten the segment
+```
+
+Same posture as `connector.toml`: a bad config is a refuse-to-start, never a degraded run. It
+refuses just as flatly on a ladder it cannot read, a rung name it could not address, or two rungs of
+one name — the last would be two prices at one address. Because the check is arithmetic over
+configuration it re-runs on **every** start, so raising a rung's bitrate and restarting is refused
+rather than quietly breaking the bound. At four-second segments the ceiling is 4.19 Mbit/s, which is
+why the top rung sits at 3 Mbit/s: the headroom is for VBR overshoot. Do not add a rung above it
+without re-reading ADR 0001.
 
 ## Ingest
 
@@ -116,6 +163,7 @@ Flags override environment variables, which override defaults.
 | `--host`             | `TOON_SEGMENT_HOST`     | `0.0.0.0` | Bind host for that port                                 |
 | `--data-dir`         | `TOON_DATA_DIR`         | `./data`  | Directory the origin owns on disk; segments land in `<path>/segments/<rung>/` |
 | `--segment-seconds`  | `TOON_SEGMENT_SECONDS`  | `4`       | How long each segment is, in whole seconds              |
+| `--rungs`            | `TOON_RUNGS`            | the four-rung placeholder ladder | The rung ladder; a rung over the byte budget is a refusal to start |
 | `--ingest-port`      | `TOON_INGEST_PORT`      | `1935`    | Port a broadcaster publishes to. `0` binds an ephemeral port |
 | `--ingest-host`      | `TOON_INGEST_HOST`      | `0.0.0.0` | Bind host for the ingest port                           |
 | `--stream-key-file`  | `TOON_STREAM_KEY_FILE`  | —         | Mounted file holding the stream key                     |
@@ -157,11 +205,14 @@ const origin = await startOrigin({
   ingestPort: 0,
   dataDir: '/tmp/station',
   streamKeyFile: '/run/secrets/station.key',
-  // One rung, ordinary configuration. Omitted, it is the 720p placeholder.
-  rung: { name: '480p', height: 480, videoBitrate: 800_000, audioBitrate: 96_000 },
+  // The ladder, as ordinary configuration. Omitted, it is the four-rung
+  // placeholder. Rungs already parsed are accepted here too.
+  rungs: 'audio:96k,480p:480:800k:96k',
   segmentSeconds: 4,
 });
 
+// Every rung the station offers, in ladder order — and so every prefix the
+// connector in front prices, one route each.
 const [rung] = origin.config.rungs;
 await fetch(
   `http://127.0.0.1:${origin.config.segmentPort}/segments/${rung}/0.ts`
@@ -185,6 +236,11 @@ the real ingest port, and then asserts **entirely over plain HTTP** on what a vi
 It is deliberately slow, because real encoding is the point: ADR 0001 is a claim about bytes, and a
 mocked segmenter cannot falsify it. Every expected value is a literal in the test rather than read
 back out of the code under test, and the byte bound is asserted against actual encoded bytes.
+
+Its ladder is ordinary configuration — two deliberately small rungs, one of them sound only — so
+the suite pulls the same span at two rungs and watches the sizes differ the way the ladder says
+they should, without ever encoding a broadcaster's four real ones. The refusal is asserted the same
+way round: a ladder over the byte budget must not boot, and must name the rung.
 
 Nothing in any of them reaches inside the app: the data directory's layout, the RTMP chunk parser,
 the stream-key comparison, the segmenter and the `ffmpeg` argument construction must all be

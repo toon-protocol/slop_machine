@@ -21,9 +21,11 @@
  *     which is when a viber is least able to afford a segment that will not
  *     fit in one fulfill.
  *
- * This module is one rung wide on purpose: the configurable ladder, and the
- * startup refusal that re-runs the byte arithmetic over it, are issue #8. The
- * shape here is what that ladder will be a list of.
+ * The arithmetic those two numbers make possible is {@link segmentBytes}, and
+ * {@link assertRung} is where it refuses: a rung whose cap times the fixed
+ * duration exceeds {@link SEGMENT_BYTE_BUDGET} stops the origin at boot,
+ * naming the rung. This module is one rung wide; the ladder a station is
+ * configured with is `./ladder.ts`.
  *
  * @module
  */
@@ -58,6 +60,11 @@ export const VBV_BUFFER_SECONDS = 1;
 /**
  * What a rung is: a name that appears in its address, and the caps the encoder
  * may not exceed while producing it.
+ *
+ * A rung carrying only sound leaves `height` and `videoBitrate` off. That is
+ * the cheapest rung on the shipped ladder and the one a viber on a small
+ * budget lands on, so it is a shape of rung rather than a special case: either
+ * both video fields are present or neither is.
  */
 export interface Rung {
   /**
@@ -69,28 +76,18 @@ export interface Rung {
   /**
    * Video height in pixels. The width follows the source's aspect ratio, and
    * vibes that arrive smaller than this are not upscaled — paying more for a
-   * bigger picture than the broadcaster sent would be a lie.
+   * bigger picture than the broadcaster sent would be a lie. Absent on a rung
+   * that carries sound only.
    */
-  height: number;
-  /** Hard cap on the video bitrate, in bits per second. Never a target. */
-  videoBitrate: number;
+  height?: number | undefined;
+  /**
+   * Hard cap on the video bitrate, in bits per second. Never a target. Absent
+   * on a rung that carries sound only.
+   */
+  videoBitrate?: number | undefined;
   /** Hard cap on the audio bitrate, in bits per second. */
   audioBitrate: number;
 }
-
-/**
- * The rung a station offers unless it is told otherwise: the `720p` row of
- * [`docs/placeholder-numbers.md`](../../../../docs/placeholder-numbers.md).
- *
- * A placeholder, not a decision — and one rung, not a ladder. The ladder is
- * issue #8.
- */
-export const DEFAULT_RUNG: Rung = {
-  name: '720p',
-  height: 720,
-  videoBitrate: 1_800_000,
-  audioBitrate: 128_000,
-};
 
 /**
  * What a rung may be called.
@@ -104,17 +101,15 @@ export const DEFAULT_RUNG: Rung = {
  */
 export const RUNG_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
-/** A rung, or a segment duration, that the origin will not run with. */
+/** A rung, a ladder, or a segment duration that the origin will not run with. */
 export class RungError extends Error {
   override readonly name = 'RungError';
 }
 
 /**
- * The address prefix a rung's segments sit strictly beneath.
- *
- * This is the string a connector route is written against — one route per
- * rung, at that rung's price — so every path a viber can reach at that price
- * begins with it and no path outside it can be reached *by* it.
+ * The address prefix a rung's segments — and only a rung's segments — sit
+ * beneath. This is what a connector route is written against, at that rung's
+ * price.
  */
 export function rungPrefix(rung: string): string {
   return `/segments/${rung}/`;
@@ -125,17 +120,56 @@ export function segmentPath(rung: string, sequence: number): string {
   return `${rungPrefix(rung)}${String(sequence)}.ts`;
 }
 
+/** Whether a rung carries a picture at all, or only sound. */
+export function hasVideo(
+  rung: Rung
+): rung is Rung & { height: number; videoBitrate: number } {
+  return rung.height !== undefined && rung.videoBitrate !== undefined;
+}
+
 /**
- * Check a rung and a segment duration, or refuse.
+ * The most bytes one segment at this rung can be: **capped bitrate × fixed
+ * duration**, which is the whole of ADR 0001's arithmetic.
  *
- * Fail-closed, the same posture the stream key and the TLS pair already take:
- * a station that came up with a rung it cannot address, or a duration that
- * makes a flat price meaningless, is worse than one that did not come up.
+ * Deliberately the plain product and not a byte the encoder might actually
+ * produce. The cap is a ceiling the encoder may not cross, so this is the
+ * worst case rather than an average — and it is worst case *per rung*, because
+ * each rung is priced and pulled on its own. The one-second VBV buffer is
+ * excluded here on purpose: it is slack inside the cap, and the budget is
+ * checked against the number a broadcaster can compute in their head from the
+ * two numbers they wrote down.
+ */
+export function segmentBytes(rung: Rung, segmentSeconds: number): number {
+  const bitsPerSecond = (rung.videoBitrate ?? 0) + rung.audioBitrate;
+  return Math.ceil((bitsPerSecond * segmentSeconds) / 8);
+}
+
+/**
+ * The highest total bitrate a rung may cap at, given a fixed duration, before
+ * ADR 0001's budget refuses it. At four-second segments this is 4.19 Mbit/s,
+ * which is why the shipped ladder tops out at 3 Mbit/s.
+ */
+export function bitrateCeiling(segmentSeconds: number): number {
+  return Math.floor((SEGMENT_BYTE_BUDGET * 8) / segmentSeconds);
+}
+
+/**
+ * Refuse a rung the origin must not run with.
  *
- * This is *not* the byte-budget check. Re-running ADR 0001's arithmetic over a
- * configured ladder and naming the rung that breaks it is issue #8.
+ * Fail-closed and at boot, before a port is bound: a bad ladder is a
+ * refuse-to-start, never a degraded run. Two kinds of refusal live here and
+ * both name the rung, because the operator's next move is to edit that line of
+ * their ladder:
  *
- * @throws RungError if the rung cannot be addressed or a number is unusable.
+ *   - a name that could not be addressed, or caps that are not numbers — a
+ *     rung whose name escapes its own prefix could be reached at another
+ *     rung's price;
+ *   - a rung over the byte budget, which is ADR 0001 enforced rather than
+ *     restated. The check is arithmetic over configuration, so it re-runs
+ *     every time the origin starts: raising a bitrate and restarting is
+ *     refused, and a bound cannot be quietly broken by a tweak.
+ *
+ * @throws RungError naming the rung, or the duration.
  */
 export function assertRung(rung: Rung, segmentSeconds: number): void {
   if (!RUNG_NAME_PATTERN.test(rung.name)) {
@@ -143,7 +177,20 @@ export function assertRung(rung: Rung, segmentSeconds: number): void {
       `"${rung.name}" is not a usable rung name: a rung is a path segment and a price is attached to it, so it must match ${String(RUNG_NAME_PATTERN)}`
     );
   }
-  if (!Number.isInteger(rung.height) || rung.height < 16) {
+  if (!Number.isInteger(segmentSeconds) || segmentSeconds <= 0) {
+    throw new RungError(
+      `segment duration must be a whole number of seconds, not ${String(segmentSeconds)}`
+    );
+  }
+
+  // Half a video rung would silently become an audio one, which is a different
+  // thing at the same price.
+  if ((rung.height === undefined) !== (rung.videoBitrate === undefined)) {
+    throw new RungError(
+      `rung "${rung.name}" has half a picture: a rung carries both a height and a video bitrate, or neither and only sound`
+    );
+  }
+  if (hasVideo(rung) && (!Number.isInteger(rung.height) || rung.height < 16)) {
     throw new RungError(
       `rung "${rung.name}" has an unusable height: ${String(rung.height)}`
     );
@@ -152,15 +199,22 @@ export function assertRung(rung: Rung, segmentSeconds: number): void {
     ['video', rung.videoBitrate],
     ['audio', rung.audioBitrate],
   ] as const) {
+    if (bitrate === undefined) continue;
     if (!Number.isInteger(bitrate) || bitrate <= 0) {
       throw new RungError(
         `rung "${rung.name}" has an unusable ${what} bitrate: ${String(bitrate)}`
       );
     }
   }
-  if (!Number.isInteger(segmentSeconds) || segmentSeconds <= 0) {
+
+  // ADR 0001, as arithmetic rather than as a comment.
+  const bytes = segmentBytes(rung, segmentSeconds);
+  if (bytes > SEGMENT_BYTE_BUDGET) {
     throw new RungError(
-      `segment duration must be a whole number of seconds, not ${String(segmentSeconds)}`
+      `rung "${rung.name}" would produce segments of up to ${String(bytes)} bytes ` +
+        `(${String((rung.videoBitrate ?? 0) + rung.audioBitrate)} bit/s × ${String(segmentSeconds)}s), ` +
+        `over the ${String(SEGMENT_BYTE_BUDGET)}-byte budget of ADR 0001 — ` +
+        `cap rung "${rung.name}" below ${String(bitrateCeiling(segmentSeconds))} bit/s in total, or shorten the segment`
     );
   }
 }
