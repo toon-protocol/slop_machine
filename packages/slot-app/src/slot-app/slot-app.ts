@@ -1,0 +1,279 @@
+/**
+ * startSlotApp() — the slot app, as a running app.
+ *
+ * The slot app is the hub's admission desk. A broadcaster buys a **slot** from
+ * it, and the hub's operator key creates the **peering** and writes the routes
+ * that make that broadcaster's station reachable. Slot and peering are two
+ * words for two things and this app never spells one of them with the other's
+ * name (ADR 0003).
+ *
+ * Like the station origin it sits behind the connector, and like the origin it
+ * contains **no payment code**: no claim validation, no settlement key, no
+ * payment-header parsing, no pricing logic. By the time a request reaches this
+ * process the connector in front of it has already proven it paid. Pricing a
+ * route is connector configuration. That split is the repo's invariant and
+ * this app — the one that reaches back into a connector's operator surface —
+ * does not become the exception to it.
+ *
+ * What exists today (issue #33) is the boot, and only the boot:
+ *
+ *   - `GET /health` on the app port: process liveness, for a hub operator's
+ *     supervisor inside the node. It requires no payment header, reads none,
+ *     and echoes none. It sits outside every prefix the hub's connector routes
+ *     and **must never acquire a route** — the app port is published on no
+ *     interface, which is what makes "unpriced" mean "in-node" rather than
+ *     "free to the internet".
+ *
+ *   - the two operator credentials, resolved from their mounted files before
+ *     anything binds. Both are named by path only and the app refuses to start
+ *     without either, saying which one — see `../operator/credentials.ts`.
+ *
+ * The paid surface a broadcaster actually buys at — a cheap quote and the buy
+ * that establishes the peering — is #34 onward and is deliberately not here
+ * yet. Nothing in this file anticipates it beyond leaving the shape it will
+ * hang off.
+ *
+ * The app port and the data directory are configuration rather than constants:
+ * the suite boots real instances on fresh ports against temporary directories,
+ * and a hub operator moves either without a code change.
+ *
+ * @module
+ */
+
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { serve, type ServerType } from '@hono/node-server';
+import { Hono } from 'hono';
+import { resolveOperatorCredentials } from '../operator/credentials.js';
+import { VERSION } from '../version.js';
+
+// ---------- Defaults ----------
+
+/**
+ * Default app port (env: `TOON_SLOT_PORT`).
+ *
+ * A default, never a constant the app depends on. Pass `0` to bind an
+ * ephemeral port; the port actually bound is reported back on
+ * `SlotAppInstance.config.slotPort`.
+ */
+export const DEFAULT_SLOT_PORT = 3200;
+
+/** Default bind host for the app port (env: `TOON_SLOT_HOST`). */
+export const DEFAULT_HOST = '0.0.0.0';
+
+/** Default data directory — the hub's own state lives here (env: `TOON_DATA_DIR`). */
+export const DEFAULT_DATA_DIR = './data';
+
+/**
+ * Where liveness answers. Unpriced, and outside every prefix the hub's
+ * connector routes — a route to it would put a hub operator's diagnostics on
+ * sale and on the internet at the same time.
+ */
+export const HEALTH_ROUTE_PATH = '/health';
+
+// ---------- Configuration ----------
+
+/** Configuration for starting a slot app via `startSlotApp()`. */
+export interface SlotAppConfig {
+  /**
+   * Port the app serves on (default: 3200).
+   *
+   * This port must never be published to a host interface: a hub publishes
+   * exactly Caddy's 80 and 443, and the app reaches the compose network only.
+   * `0` binds an ephemeral port.
+   */
+  slotPort?: number;
+  /** Bind host for the app port (default: 0.0.0.0). */
+  host?: string;
+  /**
+   * Directory the app owns on disk (default: ./data). Created at boot if it
+   * does not exist.
+   */
+  dataDir?: string;
+
+  /**
+   * Path to the mounted file holding the hub's operator **write key**.
+   *
+   * Required — there is no default, and there is deliberately no form of this
+   * that takes the key itself. The app refuses to start without it.
+   */
+  operatorWriteKeyFile?: string | undefined;
+  /**
+   * Path to the mounted file holding the hub's operator **bearer token**.
+   *
+   * Required, on exactly the same terms as the write key.
+   */
+  operatorBearerTokenFile?: string | undefined;
+}
+
+/**
+ * A `SlotAppConfig` with every default applied and the bound port resolved.
+ *
+ * **Neither operator credential's value appears here**, or anywhere else a
+ * caller can reach. The two file *paths* do: a path is not a secret, and an
+ * operator reading back what the app resolved needs to see which mount it
+ * took.
+ */
+export interface ResolvedSlotAppConfig {
+  /** The port actually bound — never `0`, even when `0` was configured. */
+  slotPort: number;
+  host: string;
+  /** Absolute path to the data directory. */
+  dataDir: string;
+  /** The path the operator write key was read from. Never its contents. */
+  operatorWriteKeyFile: string;
+  /** The path the operator bearer token was read from. Never its contents. */
+  operatorBearerTokenFile: string;
+}
+
+/** A running slot app returned by `startSlotApp()`. */
+export interface SlotAppInstance {
+  /** Whether the app is currently running. */
+  isRunning(): boolean;
+  /** Stop the app and release its listener. Idempotent. */
+  stop(): Promise<void>;
+  /** The resolved configuration, including the port actually bound. */
+  config: ResolvedSlotAppConfig;
+}
+
+// ---------- Liveness ----------
+
+/**
+ * The liveness response.
+ *
+ * This is *process* liveness — "is the slot app up enough to answer" — and it
+ * is what a hub operator's supervisor dials to decide whether to restart. It
+ * is not a claim about the roster, about the hub's capacity, or about whether
+ * any broadcaster holds a slot; those are the operator's roster address and a
+ * broadcaster's quote, and neither is this.
+ */
+interface LivenessResponse {
+  status: 'healthy';
+  service: 'slot-app';
+  version: string;
+  timestamp: number;
+}
+
+function livenessResponse(): LivenessResponse {
+  return {
+    status: 'healthy',
+    service: 'slot-app',
+    version: VERSION,
+    timestamp: Date.now(),
+  };
+}
+
+// ---------- Boot ----------
+
+/**
+ * Start a slot app.
+ *
+ * Resolves configuration, reads both operator credentials, creates the data
+ * directory, and binds the app port. Resolves once the listener is accepting
+ * connections, so a caller that awaits it can dial the app on the next line.
+ *
+ * Fails closed. A missing or unreadable credential, or a port that will not
+ * bind, is a refusal to start rather than a degraded run — a hub that cannot
+ * admit anybody must look broken rather than look fine.
+ *
+ * @param config - Slot app configuration. Every field has a default except the
+ * two operator credential paths, both of which are required.
+ * @returns A running `SlotAppInstance`.
+ * @throws OperatorCredentialError if either credential path is unset, or the
+ * file it names is unreadable or empty. The refusal names which credential.
+ *
+ * @example
+ * ```ts
+ * const app = await startSlotApp({
+ *   slotPort: 0,
+ *   dataDir: '/tmp/hub',
+ *   operatorWriteKeyFile: '/run/secrets/operator-write.key',
+ *   operatorBearerTokenFile: '/run/secrets/operator-bearer.token',
+ * });
+ * await fetch(`http://127.0.0.1:${app.config.slotPort}/health`);
+ * await app.stop();
+ * ```
+ */
+export async function startSlotApp(
+  config: SlotAppConfig = {}
+): Promise<SlotAppInstance> {
+  const host = config.host ?? DEFAULT_HOST;
+  const dataDir = resolve(config.dataDir ?? DEFAULT_DATA_DIR);
+  const requestedPort = config.slotPort ?? DEFAULT_SLOT_PORT;
+
+  // The credentials first, before anything binds. An app that cannot make an
+  // operator write should never have reached the point of holding a port
+  // open: it would answer liveness, satisfy every supervisor on the box, and
+  // then fail the first broadcaster who paid.
+  //
+  // Only the two PATHS are kept. Nothing signs a write or makes a read yet
+  // (#34 onward), and a secret held by a process that cannot use it is a
+  // secret for nothing — so the values are read, checked, and dropped on the
+  // next line. What this call is here for is the refusal, and the refusal is
+  // the same one it will be when the writes exist.
+  const { writeKeyFile, bearerTokenFile } = resolveOperatorCredentials(config);
+
+  // Fail at boot rather than at the first write: a directory the app cannot
+  // create is a refuse-to-start, never a degraded run.
+  mkdirSync(dataDir, { recursive: true });
+
+  const app = new Hono();
+
+  // Liveness. No middleware runs before it, nothing reads a request header,
+  // and the response carries only what a supervisor needs. It sits outside
+  // every prefix the hub's connector routes, which is what keeps it unpriced
+  // and reachable from inside the node only.
+  app.get(HEALTH_ROUTE_PATH, (c) => c.json(livenessResponse()));
+
+  const { server, port } = await listen(app.fetch, host, requestedPort);
+
+  const resolvedConfig: ResolvedSlotAppConfig = {
+    slotPort: port,
+    host,
+    dataDir,
+    // The paths, never the contents. This record is what a caller reads back
+    // and what a log line may safely repeat.
+    operatorWriteKeyFile: writeKeyFile,
+    operatorBearerTokenFile: bearerTokenFile,
+  };
+
+  console.log(
+    `[slot-app] v${VERSION} serving on http://${host}:${port} (data dir: ${dataDir})`
+  );
+  console.log(
+    `[slot-app] operator credentials mounted at ${resolvedConfig.operatorWriteKeyFile} (write key) and ${resolvedConfig.operatorBearerTokenFile} (bearer token) — neither value is ever logged`
+  );
+
+  let running = true;
+
+  return {
+    isRunning() {
+      return running;
+    },
+    async stop() {
+      if (!running) return;
+      running = false;
+      await new Promise<void>((resolveStop, rejectStop) => {
+        server.close((err) => (err ? rejectStop(err) : resolveStop()));
+      });
+    },
+    config: resolvedConfig,
+  };
+}
+
+/**
+ * Bind the app port, resolving with the server and the port actually bound —
+ * which differs from the requested one whenever `0` was asked for.
+ */
+function listen(
+  fetch: Hono['fetch'],
+  hostname: string,
+  port: number
+): Promise<{ server: ServerType; port: number }> {
+  return new Promise((resolveListen, rejectListen) => {
+    const server = serve({ fetch, hostname, port }, (info) => {
+      resolveListen({ server, port: info.port });
+    });
+    server.once('error', rejectListen);
+  });
+}

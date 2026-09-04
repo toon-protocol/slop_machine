@@ -48,6 +48,7 @@ const CONNECTOR_TOML_PATH = 'deploy/connector.toml';
 const CADDYFILE_PATH = 'deploy/Caddyfile';
 const ENV_EXAMPLE_PATH = 'deploy/.env.example';
 const ORIGIN_DOCKERFILE_PATH = 'packages/station-origin/Dockerfile';
+const SLOT_APP_DOCKERFILE_PATH = 'packages/slot-app/Dockerfile';
 const DOCKERIGNORE_PATH = '.dockerignore';
 
 /** Every file in this repository that decides what a copy of it carries. */
@@ -244,6 +245,14 @@ const HEALTHCHECK_WGET_SITES: { file: string; pattern: RegExp }[] = [
     file: ORIGIN_DOCKERFILE_PATH,
     pattern:
       /wget -q --spider "http:\/\/([^:/]+):\$\{TOON_SEGMENT_PORT:-3100\}\/health"/,
+  },
+  // The slot app ships from this repository too, so its own healthcheck is
+  // held to the same rule. Its deploy bundle is not this bundle's business —
+  // a hub is never a station — but the image is this repository's.
+  {
+    file: SLOT_APP_DOCKERFILE_PATH,
+    pattern:
+      /wget -q --spider "http:\/\/([^:/]+):\$\{TOON_SLOT_PORT:-3200\}\/health"/,
   },
 ];
 

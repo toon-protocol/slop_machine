@@ -22,12 +22,15 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves, and deploys
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots
 
-This repository is a pnpm workspace with one package — `packages/station-origin`
-(`@toon-protocol/station-origin`). It is the fleet's house shape, the same one `relay` and `store`
+This repository is a pnpm workspace with two packages, one per toon app it ships —
+`packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
+(`@toon-protocol/slot-app`). Both take the fleet's house shape, the same one `relay` and `store`
 use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoint with
-tsup/esbuild, tested with vitest.
+tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
+to `main`. The slot app is the newer and by far the smaller of the two — see
+[the slot app](#the-slot-app) below for exactly what it does today, which is boot.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
@@ -227,6 +230,48 @@ start**, because a station anyone can broadcast on looks exactly like a working 
 never logged, never echoed, and never appears in `OriginInstance.config`. Ingest without a mounted
 certificate is plain RTMP and says so loudly at boot; a station on the internet mounts one.
 
+### The slot app
+
+[`packages/slot-app`](packages/slot-app/) (`@toon-protocol/slot-app`) is this repo's **second** toon
+app and the hub's admission desk: a broadcaster buys a **slot** with a paid request and the hub's
+operator key creates the **peering** and writes the routes that make their station reachable.
+[#32](https://github.com/toon-protocol/slop_machine/issues/32) is the whole spec;
+[#33](https://github.com/toon-protocol/slop_machine/issues/33) is what exists, and it is **the boot
+and only the boot**.
+
+It takes the origin's shape rather than inventing one: it exports
+`startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
+environment over defaults the same way, and bundles to `dist/cli.js` behind its own `Dockerfile`.
+
+- `GET /health` on the app port (`TOON_SLOT_PORT`, default `3200`) — process liveness, for a hub
+  operator's supervisor **inside** the node. `200 application/json` carrying `{"status": "healthy",
+  "service": "slot-app", "version": string, "timestamp": number}`. It requires no payment header and
+  reads none. It is **unpriced, has no route on the hub's connector and never may** — the app port is
+  published on no interface, so unpriced never means free to the internet. It is not a claim about
+  the roster or about the hub's capacity; those are separate addresses and are not written yet.
+- Configuration: `--slot-port`/`TOON_SLOT_PORT`, `--host`/`TOON_SLOT_HOST`,
+  `--data-dir`/`TOON_DATA_DIR`. Port `0` binds an ephemeral port, which is how the suite runs slot
+  apps side by side. **The port is configuration, not a constant.**
+- **The hub's two operator credentials are the exception with no default, and both are named by path
+  only**: `--operator-write-key-file`/`TOON_OPERATOR_WRITE_KEY_FILE` for the ed25519 write key whose
+  public half sits on the connector's `write_keys` allowlist, and
+  `--operator-bearer-token-file`/`TOON_OPERATOR_BEARER_TOKEN_FILE` for the bearer token that gates
+  reads. **There is no flag and no environment variable carrying either literal** — a command line is
+  world-readable on the box and an image's environment is readable from its metadata. **The app
+  refuses to start without either and says which one**, because a hub that cannot admit anybody must
+  look broken rather than look fine. Neither value is ever logged, echoed, put in an error message,
+  or present on `SlotAppInstance.config`; the two *paths* are, because an operator fixing a bad mount
+  needs to know which file was read. Both filenames an operator is told to create
+  (`operator-write.key`, `operator-bearer.token`) are already covered by `.gitignore` and
+  `.dockerignore` wildcards.
+
+**The slot app contains no payment code**, and it does not become the exception to the invariant
+below just because it is the app that reaches back into a connector's operator surface: no claim
+validation, no settlement key, no payment-header parsing, no pricing logic.
+
+The quote, the buy, the peering, the routes, the roster, the lapse, the boot reconciliation and the
+hub deploy bundle are #34 onward and **do not exist**. There is no `deploy/hub/`.
+
 ### The deploy bundle
 
 [`deploy/`](deploy/) is the fleet's house bundle shape, the same one `relay` and `store` ship:
@@ -269,40 +314,64 @@ and never in an image. `.dockerignore` excludes them from the **build context** 
 is otherwise one `COPY . .` away from a published image — and `pnpm test:image` proves it by building
 with dummy keys planted and looking inside the result.
 
-**CI and the published image.** `.github/workflows/ci.yml` is the gate — `pnpm lint`, `build`,
-`typecheck`, `format:check` and `test` on every PR and every push to main, plus a build of the
-origin image (where `pnpm test:image` also runs, because it is the job with a Docker daemon) and the
-fleet's shared no-op merge guard, aggregated into one required `CI OK` check.
+**CI and the published images.** `.github/workflows/ci.yml` is the gate — `pnpm lint`, `build`,
+`typecheck`, `format:check` and `test` on every PR and every push to main, plus **one image-build
+job per published image** (the origin's is where `pnpm test:image` also runs, because it is the job
+with a Docker daemon and the planted key material) and the fleet's shared no-op merge guard, all
+aggregated into one required `CI OK` check. An image-build job exists because its publish workflow
+runs only on push to main: without it a Dockerfile that cannot build would be found after merge,
+with `:release` left pointing at the previous build. **A job added to that workflow must be added to
+`ci-ok`'s `needs:`** — the aggregate is the single required context, and a red non-required check is
+only a warning on the merge button.
 The suite encodes for real, so that workflow installs `ffmpeg` (which brings `ffprobe`) on the
 runner; `openssl`, which the ingest-TLS suites shell out to, is already on the GitHub image.
-`.github/workflows/publish-station-origin-image.yml` publishes
-`ghcr.io/toon-protocol/station-origin` on every merge to main, moving `:latest` and `:release` and
+`.github/workflows/publish-station-origin-image.yml` and
+`.github/workflows/publish-slot-app-image.yml` publish `ghcr.io/toon-protocol/station-origin` and
+`ghcr.io/toon-protocol/slot-app` on every merge to main, each moving `:latest` and `:release` and
 keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compose.yml` defaults to
 and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
-image. This repo publishes that one image and no other — never a connector.
+image. This repo publishes those two app images and no others — never a connector.
 
-**What is still design:** the slot app has not been started and there is no devnet node. Do not
-infer other commands from the sibling repos.
+**What is still design:** the slot app boots and answers liveness, but the slot itself — the quote,
+the buy, the peering, the routes, the roster and the lapse ([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s
+remaining slices, [#34](https://github.com/toon-protocol/slop_machine/issues/34) onward) — is not
+written yet, there is no hub deploy bundle, and there is no devnet node. Do not infer other commands
+from the sibling repos.
 
 What does exist, all run from the repo root:
 
 ```
 pnpm install
-pnpm build       # bundles the origin to packages/station-origin/dist (dist/cli.js is the entrypoint)
+pnpm build       # bundles every package to its own dist/ (dist/cli.js is each entrypoint)
 pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTMP at it, and
-                 # pulls the encoded segments back over HTTP. Deliberately slow — real encoding
-                 # is the point, because ADR 0001 is a claim about bytes. The include list
-                 # also covers deploy/*.test.ts, so deploy/bundle.test.ts runs beside
-                 # the files it guards; smol-toml and yaml are there to read them
+                 # pulls the encoded segments back over HTTP, and boots the real slot app on
+                 # fresh ports against a temporary directory. Deliberately slow — real encoding
+                 # is the point, because ADR 0001 is a claim about bytes. The include list is
+                 # packages/*/src/**/*.test.ts, so a new package's suites are picked up with
+                 # no change here; it also covers deploy/*.test.ts, so deploy/bundle.test.ts
+                 # runs beside the files it guards; smol-toml and yaml are there to read them
 pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key material where
                  # deploy/README.md says to generate the real thing, then builds the build
-                 # context and the image and proves neither carries it. Needs a Docker daemon
-                 # and takes minutes; deploy/bundle.test.ts holds the fast half of that guard
+                 # context and EVERY published image and proves none carries it. Needs a Docker
+                 # daemon and takes minutes; deploy/bundle.test.ts holds the fast half of that
+                 # guard. An image this repo publishes belongs in its PUBLISHED_IMAGES list
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
 pnpm format      # prettier over packages/*/src/**/*.ts and deploy/*.ts
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
+docker build -f packages/slot-app/Dockerfile -t ghcr.io/toon-protocol/slot-app:latest .
 ```
+
+Both image builds take the **repository root** as their context, never the package directory: each
+Dockerfile's first `COPY` takes the workspace root's `package.json`, `pnpm-workspace.yaml`,
+`pnpm-lock.yaml` and `tsconfig.json`, which is how the frozen install resolves. Each copies only its
+own package's manifest — a frozen install resolves against the importers the context actually holds,
+so a sibling package missing from it is simply not part of that workspace.
+
+The root `vitest.config.ts` applies **one `define` per package**, each substituting that package's
+own version placeholder from its `version-define.ts`. A new package adds a line there rather than
+replacing one; without it, that package's `VERSION` falls back to `0.0.0-dev` under the root suite
+while its own config gets it right, and only the image's version assertion in CI would notice.
 
 And from `deploy/`, once its keys and `.env` exist (see `deploy/README.md`):
 
@@ -313,14 +382,18 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d   # local
 ```
 
 `pnpm test` needs `ffmpeg`, `ffprobe` and `openssl` on PATH: ingest is a wire protocol, and a suite
-that spoke it through a mock would be testing the mock. The **image** needs `ffmpeg` too — the
-origin owns its encoder, so the runtime stage installs it.
+that spoke it through a mock would be testing the mock. The **station origin's image** needs
+`ffmpeg` too — the origin owns its encoder, so its runtime stage installs it. The slot app's suite
+and image need none of the three: a hub carries no vibes of its own and that app encodes nothing.
 
 Tests assert at the app's boundary only — they boot the real app and speak HTTP and real RTMP at it.
 Nothing reaches into the data directory's layout, the RTMP chunk parser, the stream-key comparison,
-the segmenter or the `ffmpeg` argument construction; all of them must stay rewritable without
-touching a test. The suite's ladder is ordinary configuration — two small rungs, one of them sound
-only — so a broadcaster's four real rungs never have to be encoded to prove the ladder works.
+the segmenter, the `ffmpeg` argument construction or the slot app's credential reading; all of them
+must stay rewritable without touching a test. The suite's ladder is ordinary configuration — two
+small rungs, one of them sound only — so a broadcaster's four real rungs never have to be encoded to
+prove the ladder works. **No credential literal belongs in this repository, not even a test's**: the
+slot app's suite mints throwaway credentials per boot and mounts them at real files in a temporary
+directory, exactly as the origin's suite mints a throwaway stream key.
 Replace this section in the same commit that invalidates it.
 
 The design is settled and written down; the open questions the README used to list — which
@@ -347,7 +420,9 @@ route is connector config, not application code.
 **The slot app holds an operator write key.** It is the one app in the fleet that reaches back into
 its own connector's operator surface, so compromising it means mutating the hub's routing table.
 Scope the credential to the writes it needs. Writes are RFC 9421 signature-gated, never
-bearer-gated — do not add a bearer path for convenience.
+bearer-gated — the app's bearer token is for **reads only**, and do not add a bearer path for a
+write for convenience. Both credentials are mounted files named by path, both are required at boot,
+and neither value may reach a log line, an error message or `SlotAppInstance.config`.
 
 **A segment is bounded to 2 MiB on purpose.** Nothing enforces this: the connector's 2 MiB body
 limit is request-only and the response direction has no cap at all. That absence is an open question
@@ -366,10 +441,11 @@ Quality is priced per rung, by address ([ADR 0002](docs/adr/0002-bitrate-follows
 A slopmachine node deploys the standard connector bundle and so generates an ILP signer key,
 settlement keys that hold real value, and peering secrets. A station additionally holds its
 broadcaster's **stream key** and the private key of its RTMPS certificate; a hub additionally holds
-an operator write key. `.gitignore` already covers these by wildcard (`*.key`, `*.secret`, `*.pem`,
-operator credentials) before any of them exist — see its comments for the incidents that shaped
-those rules. The stream key is provisioned as a mounted value: never baked into an image, never a
-default in code, never a literal in a test.
+an operator **write key** and an operator **bearer token**, both of which the slot app reads.
+`.gitignore` already covers these by wildcard (`*.key`, `*.secret`, `*.pem`, operator credentials)
+before any of them exist — see its comments for the incidents that shaped those rules. Every one of
+them is provisioned as a mounted value: never baked into an image, never a default in code, never a
+literal in a test. `pnpm test:image` proves that for every image this repo publishes.
 
 - Never commit key material, and never weaken those rules to make a file visible. An ignore rule
   does not protect an already-tracked file: if one lands, `git rm --cached` it **and rotate the

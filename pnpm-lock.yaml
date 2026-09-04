@@ -42,6 +42,15 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
 
+  packages/slot-app:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.0.0
+        version: 1.19.17(hono@4.13.5)
+      hono:
+        specifier: ^4.11.10
+        version: 4.13.5
+
   packages/station-origin:
     dependencies:
       '@hono/node-server':

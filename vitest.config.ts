@@ -1,10 +1,13 @@
 import { defineConfig } from 'vitest/config';
 import { stationOriginVersionDefine } from './packages/station-origin/version-define';
+import { slotAppVersionDefine } from './packages/slot-app/version-define';
 
 export default defineConfig({
-  // This config runs the station origin's suites, so it needs the same
-  // build-time version substitution that package's own configs apply.
-  define: stationOriginVersionDefine,
+  // This config runs every package's suites, so it needs the same build-time
+  // version substitution each of those packages applies to its own bundle.
+  // One `define` for both: each names its own placeholder, so a package added
+  // here adds a line rather than replacing one.
+  define: { ...stationOriginVersionDefine, ...slotAppVersionDefine },
   test: {
     globals: true,
     environment: 'node',
@@ -15,8 +18,8 @@ export default defineConfig({
     poolOptions: {
       forks: { minForks: 1, maxForks: 4 },
     },
-    // The station origin's own suites, plus deploy/*.test.ts — the guard
-    // that reads the real deploy artifacts (it is not origin source, so it
+    // Every workspace package's own suites, plus deploy/*.test.ts — the guard
+    // that reads the real deploy artifacts (it is not app source, so it
     // lives next to the files it guards, exactly as relay's does).
     include: ['packages/*/src/**/*.test.ts', 'deploy/*.test.ts'],
     // deploy/image-secrets.test.ts is the one exception: it needs a Docker
