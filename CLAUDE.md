@@ -271,7 +271,8 @@ with dummy keys planted and looking inside the result.
 
 **CI and the published image.** `.github/workflows/ci.yml` is the gate — `pnpm lint`, `build`,
 `typecheck`, `format:check` and `test` on every PR and every push to main, plus a build of the
-origin image and the fleet's shared no-op merge guard, aggregated into one required `CI OK` check.
+origin image (where `pnpm test:image` also runs, because it is the job with a Docker daemon) and the
+fleet's shared no-op merge guard, aggregated into one required `CI OK` check.
 The suite encodes for real, so that workflow installs `ffmpeg` (which brings `ffprobe`) on the
 runner; `openssl`, which the ingest-TLS suites shell out to, is already on the GitHub image.
 `.github/workflows/publish-station-origin-image.yml` publishes
