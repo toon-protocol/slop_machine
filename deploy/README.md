@@ -13,7 +13,7 @@ what each file is and how to bring a station up.
 | `docker-compose.local.yml`      | Local overlay: no TLS, origin built from this checkout, plain RTMP.                                                                                                    |
 | `docker-compose.watchtower.yml` | Auto-redeploy overlay, scoped to the origin's moving tag.                                                                                                              |
 | `auto-apply.sh` + systemd units | The box half of following main: fast-forward, `compose up -d`, require the connector healthy.                                                                          |
-| `bundle.test.ts`                | Fails the build if the ports invariant, the prices, the routes or the pin ever drift. Owned by [#14](https://github.com/toon-protocol/slop_machine/issues/14).          |
+| `bundle.test.ts`                | The guard. Reads the real files above — never fixtures — and fails the build if the segment port is ever host-published, if `per_kib` is ever set on a route, if the ladder and the routes drift apart, if a route stops terminating strictly beneath the origin path it prices, if `/health` or `/encode` acquires a route, if the pin appears twice, or if a healthcheck goes back to `localhost`. Run by `pnpm test` from the repo root. |
 
 ## The ports story
 
