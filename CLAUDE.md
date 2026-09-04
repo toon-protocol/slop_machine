@@ -24,7 +24,7 @@ distinction) and **segment is not packet**.
 
 ## Status: design only — there is no code here
 
-This repository contains `README.md`, `CONTEXT.md`, `docs/adr/`, `.gitignore` and `LICENSE`.
+This repository contains `README.md`, `CONTEXT.md`, `docs/`, `.gitignore` and `LICENSE`.
 Nothing else. There is no package, no image, no deployment and no devnet node.
 
 **Do not infer commands from the sibling repos.** There is no `pnpm install`, no `pnpm test`, no
@@ -34,8 +34,12 @@ section's replacement in the same commit that adds the thing it describes.
 
 The design is settled and written down; the open questions the README used to list — which
 direction pays, the unit of payment, and how discovery works — are all answered. Vibers pay, per
-segment, and stations announce to a hub's relay. What is deliberately **not** decided is numeric:
-slot price, renewal period, hub collateral per broadcaster, and the rung ladder itself.
+segment, and stations announce to a hub's relay.
+
+The numbers — slot price, renewal period, hub collateral, the rung ladder — are **placeholders**,
+not decisions, and live in [`docs/placeholder-numbers.md`](docs/placeholder-numbers.md). They are
+internally consistent and safe to build against; none has been reasoned about economically. Change
+one freely, but keep the ladder under ADR 0001's byte bound.
 
 ## The invariant that outlives everything else
 
