@@ -17,12 +17,13 @@ either one it is already paid for. That separation is the whole design, and it i
 The vocabulary is not decoration — it is written down in [`CONTEXT.md`](./CONTEXT.md), and the
 decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 
-> **Status: the station origin boots and takes a broadcaster's vibes in.** It answers
-> `GET /health` on its segment port, and it accepts an RTMP or RTMPS publish on its ingest port if
-> the publish carries the station's stream key. Nothing is encoded, segmented or served yet, and
-> there is no deploy bundle, no published image and no devnet node. The diagrams below are the
-> intended shape, not a description of a running system. See [`CLAUDE.md`](./CLAUDE.md) for what
-> exists and how to build and test it.
+> **Status: the station origin ingests, encodes and serves — at one rung.** It accepts an RTMP or
+> RTMPS publish carrying the station's stream key, supervises an `ffmpeg` that cuts the vibes into
+> fixed-duration segments, and serves them at `/segments/<rung>/<sequence>.ts` on its segment port.
+> The rung ladder is still a single hard-coded rung, and there is no *now* address, no eviction, no
+> deploy bundle, no published image and no devnet node. The diagrams below are the intended shape,
+> not a description of a running system. See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to
+> build and test it.
 
 ## A station
 
@@ -40,7 +41,9 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 ```
 
 The broadcaster points OBS — or anything that speaks RTMP — at the origin over RTMPS with their
-stream key, and the origin cuts the vibes into HLS segments with `ffmpeg`.
+stream key, and the origin cuts the vibes into HLS segments with `ffmpeg`. A viber pulls one at a
+time from `/segments/<rung>/<sequence>.ts`, through the connector, which prices one route per rung
+prefix so that choosing a rung is choosing a price.
 
 **Two ports are reachable from the internet and no more: Caddy's, and the origin's RTMPS ingest
 port.** Caddy fronts only the paid HTTP path. Stock Caddy does not speak RTMP and a custom Caddy

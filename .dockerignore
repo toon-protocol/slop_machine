@@ -7,6 +7,8 @@
 **/*.tsbuildinfo
 **/coverage
 **/data
+# Generated media only — the origin's own segmenter source is src/segmenter/,
+# which must not be excluded from the build context.
 **/segments
 **/recordings
 *.log

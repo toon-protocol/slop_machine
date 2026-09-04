@@ -1,4 +1,4 @@
-# The station origin (slop_machine#5, #6)
+# The station origin (slop_machine#5, #6, #7)
 #
 # One broadcaster's node. It contains no payment code: no payment-header
 # parsing, no settlement key, no operator write key. Payment is enforced
@@ -8,8 +8,15 @@
 # Entrypoint is the bundled CLI (dist/cli.js):
 #   * GET /health   on TOON_SEGMENT_PORT (default 3100) — liveness, unpaid,
 #                   reachable from inside the node only
+#   * GET /segments/<rung>/<sequence>.ts
+#                   on TOON_SEGMENT_PORT — one span of the broadcaster's vibes.
+#                   Reached only through the connector, which prices one route
+#                   per rung prefix. This image holds no payment code.
 #   * RTMP/RTMPS    on TOON_INGEST_PORT (default 1935) — a broadcaster's
 #                   publish, gated on the station's stream key and never paid
+#
+# The origin supervises a child ffmpeg, so the runtime stage installs it. That
+# is the whole reason this image is bigger than a plain Node one.
 #
 # The two ports are not alike:
 #   * TOON_SEGMENT_PORT is EXPOSEd on the compose network and must never be
@@ -69,6 +76,10 @@ RUN npm install --omit=dev --no-package-lock --no-audit --no-fund
 # ── Stage 2: Production ──────────────────────────────────────
 FROM node:22-alpine
 
+# The origin owns its encoder rather than depending on a separately-scheduled
+# one, so ffmpeg is part of the runtime and not a build-time convenience.
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /app
 
 COPY --from=builder /prod/dist ./dist
@@ -79,6 +90,7 @@ ENV NODE_ENV=production
 ENV TOON_SEGMENT_PORT=3100
 ENV TOON_SEGMENT_HOST=0.0.0.0
 ENV TOON_DATA_DIR=/data
+ENV TOON_SEGMENT_SECONDS=4
 ENV TOON_INGEST_PORT=1935
 ENV TOON_INGEST_HOST=0.0.0.0
 
@@ -93,6 +105,9 @@ EXPOSE 3100
 # the broadcaster's own publish inward — and it is gated on the stream key.
 EXPOSE 1935
 
+# Segments are written to $TOON_DATA_DIR/segments/<rung>/ — generated media
+# lives in a directory, never behind an extension, because an HLS segment is an
+# MPEG-TS .ts file.
 VOLUME /data
 
 # Run unprivileged; /data must be writable by the runtime user

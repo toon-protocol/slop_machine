@@ -32,4 +32,31 @@ export type {
 export { resolveStreamKey, StreamKeyError } from './ingest/stream-key.js';
 export type { StreamKeySource } from './ingest/stream-key.js';
 
+// Segments: what a viber pays for. One rung, cut into fixed-duration spans and
+// addressed by rung and sequence number.
+export {
+  DEFAULT_RUNG,
+  DEFAULT_SEGMENT_SECONDS,
+  SEGMENT_BYTE_BUDGET,
+  VBV_BUFFER_SECONDS,
+  RUNG_NAME_PATTERN,
+  RungError,
+  rungPrefix,
+  segmentPath,
+  assertRung,
+} from './segmenter/rung.js';
+export type { Rung } from './segmenter/rung.js';
+export { createSegmenter } from './segmenter/segmenter.js';
+export type {
+  Segment,
+  SegmentLookup,
+  SegmenterConfig,
+  SegmenterInstance,
+} from './segmenter/segmenter.js';
+export {
+  segmentRoutes,
+  SEGMENTS_ROUTE_PREFIX,
+  SEGMENT_CONTENT_TYPE,
+} from './segmenter/routes.js';
+
 export { VERSION } from './version.js';
