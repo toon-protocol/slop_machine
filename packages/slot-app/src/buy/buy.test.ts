@@ -151,18 +151,18 @@ interface Hub {
 function mountCredentials(dir: string): {
   seed: string;
   writeKeyFile: string;
+  bearerToken: string;
   bearerTokenFile: string;
 } {
   const seed = randomBytes(32).toString('hex');
   const writeKeyFile = join(dir, 'operator-write.key');
   writeFileSync(writeKeyFile, `${seed}\n`, { mode: 0o600 });
 
+  const bearerToken = randomBytes(32).toString('hex');
   const bearerTokenFile = join(dir, 'operator-bearer.token');
-  writeFileSync(bearerTokenFile, `${randomBytes(32).toString('hex')}\n`, {
-    mode: 0o600,
-  });
+  writeFileSync(bearerTokenFile, `${bearerToken}\n`, { mode: 0o600 });
 
-  return { seed, writeKeyFile, bearerTokenFile };
+  return { seed, writeKeyFile, bearerToken, bearerTokenFile };
 }
 
 function freshDir(): string {
@@ -190,6 +190,7 @@ async function boot(
   // their connector's `write_keys`.
   const operator = await startFakeOperatorSurface({
     writeKeys: [publicKeyOf(mounted.seed)],
+    bearerToken: mounted.bearerToken,
     ...(options.stationIsReadable === undefined
       ? {}
       : { stationIsReadable: options.stationIsReadable }),

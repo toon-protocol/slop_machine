@@ -45,12 +45,43 @@
  *   7. **The routes, written**, one `POST /routes/peers` each. Being peered
  *      is not yet being reachable: a hub carries only what its routing table
  *      names.
- *   8. **The slot, recorded durably, before the answer.** Gas is spent inside
+ *   8. **The routes the station has stopped publishing, taken back out**, one
+ *      `DELETE /routes/peers/:prefix` each and only ever beneath the prefix
+ *      this caller was granted. A write is an upsert, so nothing about step 7
+ *      removes a rung a broadcaster dropped, and a row left behind is an
+ *      address the hub carries toward a node that no longer terminates it.
+ *   9. **The slot, recorded durably, before the answer.** Gas is spent inside
  *      a paid request here, so a purchase whose answer arrived too late must
  *      be found already done when the broadcaster retries rather than paying
  *      for the same peering twice.
- *   9. **The answer**: the granted prefix, the routes written, and when the
+ *  10. **The answer**: the granted prefix, the routes written, and when the
  *      slot lapses.
+ *
+ * **Buying again is renewing, and there is no second call to learn.** A
+ * purchase by a payer who already holds a slot walks exactly the steps above:
+ * the handle is read off the roster rather than derived again, so the prefix
+ * a broadcaster printed on their page is the prefix they keep; the peering
+ * write finds the established peering rather than opening a second channel;
+ * the routes are rewritten by prefix rather than duplicated; the document is
+ * read afresh, so a rung added since is routed and a rung dropped is taken
+ * out; and the roster ends up holding **one** slot for that payer, never two.
+ *
+ * **A renewal adds a period to the slot rather than replacing it.** The new
+ * lapse is measured from whichever is later — the lapse the broadcaster
+ * already holds, or now:
+ *
+ * ```
+ *   lapsesAt = max(now, the lapse already held) + the slot period
+ * ```
+ *
+ * Measuring from *now* alone would take back the time a broadcaster had
+ * already paid for, so renewing a fortnight early would cost them a
+ * fortnight and the safe move would be to wait until the last minute — a hub
+ * would have taught every broadcaster to renew late. Measuring from the held
+ * lapse alone would do the opposite where the slot has already lapsed:
+ * a station that stopped broadcasting for a month and came back would have
+ * the hub's own downtime, and its own absence, credited to it. `max` is both
+ * readings at once, and it is the only one that cheats nobody.
  *
  * **The request body carries only the station connector's URL.** The handle
  * comes from the payer, the fee and the packet cap from the hub's own
@@ -89,13 +120,16 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { establishPeering, PeeringError } from '../peering/peering.js';
-import type { PeeringDependencies } from '../peering/peering.js';
 import {
   deriveForwardedRoutes,
   ForwardedRouteError,
+  retireForwardedRoutes,
   writeForwardedRoutes,
 } from '../peering/routes.js';
-import type { ForwardedRoute } from '../peering/routes.js';
+import type {
+  ForwardedRoute,
+  ForwardedRouteDependencies,
+} from '../peering/routes.js';
 import { readStationDescription } from '../peering/station-description.js';
 import {
   PAYER_HEADER,
@@ -169,7 +203,16 @@ export const STATION_NOT_AT_PREFIX = 'station_not_at_prefix';
  */
 export const ROUTE_OWNED_BY_CONFIG = 'route_owned_by_config';
 
-/** The hub's operator surface would not take a route write. */
+/**
+ * The hub's operator surface would not take a route write — or would not say
+ * what it carries, or would not take back out a row the station has stopped
+ * publishing.
+ *
+ * One code for all three because they are one fault with one owner: the hub's
+ * own operator surface. A refusal at a paid address is paid for, so a second
+ * code here would be a second way to charge a broadcaster for nothing without
+ * telling them anything they could act on differently.
+ */
 export const ROUTES_NOT_WRITTEN = 'routes_not_written';
 
 /** The hub's operator surface would not take the write. */
@@ -280,7 +323,7 @@ export interface BoughtSlot {
 }
 
 /** What the buy route needs to answer. */
-export interface BuyDependencies extends PeeringDependencies {
+export interface BuyDependencies extends ForwardedRouteDependencies {
   /** The hub's admission policy: price, period, cap, and its own address. */
   slotPolicy: SlotPolicy;
   /** The hub's roster — read for the handle, written before the answer. */
@@ -416,12 +459,38 @@ export function buyRoutes(deps: BuyDependencies): Hono {
       return refuseRoutes(c, error);
     }
 
-    // 8. The slot, on disk, BEFORE the answer. This is what bounds the damage
+    // 8. The rows the station has stopped publishing, taken back out — after
+    //    the writes rather than before them, so a rung is never briefly
+    //    unreachable in the middle of its own broadcaster's renewal. Only
+    //    ever beneath the prefix this caller was granted: a hub's routing
+    //    table is shared by every broadcaster it admitted, and a runtime row
+    //    carries no owner for the connector to check on this app's behalf.
+    let retired: string[];
+    try {
+      retired = await retireForwardedRoutes(deps, {
+        grantedPrefix: prefix,
+        keep: derived.routes,
+      });
+    } catch (error) {
+      return refuseRoutes(c, error);
+    }
+
+    // 9. The slot, on disk, BEFORE the answer. This is what bounds the damage
     //    when a chain is slow enough that the broadcaster's own deadline
     //    passes before the answer arrives: their retry derives the same
     //    handle, finds the same channel, and rewrites the same row, rather
     //    than paying for a second peering.
-    const lapsesAt = Date.now() + slotPolicy.slotPeriodSeconds * 1000;
+    //
+    //    A purchase ADDS a period rather than replacing one, measured from
+    //    the later of now and the lapse this payer already holds. Measuring
+    //    from now alone would take back time a broadcaster had already paid
+    //    for and teach every one of them to renew at the last minute;
+    //    measuring from the held lapse alone would credit a lapsed slot with
+    //    the time nobody was broadcasting. See this module's own header.
+    const now = Date.now();
+    const lapsesAt =
+      Math.max(now, held?.lapsesAt ?? now) +
+      slotPolicy.slotPeriodSeconds * 1000;
     try {
       await roster.record({ payer: payerKey, label, lapsesAt });
     } catch (error) {
@@ -443,10 +512,10 @@ export function buyRoutes(deps: BuyDependencies): Hono {
     }
 
     console.log(
-      `[slot-app] slot at ${prefix} lapses at ${new Date(lapsesAt).toISOString()}; peering ${label} ${peering.channel.status} a ${peering.channel.chain} channel; ${String(written.length)} route(s): ${written.map((route) => `${route.prefix} at ${route.stationPrice.toString()}+${String(deps.policy.fee)}`).join(', ')}`
+      `[slot-app] slot at ${prefix} ${held === undefined ? 'bought' : 'renewed'}, lapses at ${new Date(lapsesAt).toISOString()}; peering ${label} ${peering.channel.status} a ${peering.channel.chain} channel; ${String(written.length)} route(s): ${written.map((route) => `${route.prefix} at ${route.stationPrice.toString()}+${String(deps.policy.fee)}`).join(', ')}${retired.length === 0 ? '' : `; no longer published, removed: ${retired.join(', ')}`}`
     );
 
-    // 9. The answer.
+    // 10. The answer.
     const bought: BoughtSlot = {
       prefix,
       label,
@@ -577,11 +646,13 @@ function refusePeering(c: Context, error: unknown): Response {
  *
  * **What a refusal here leaves behind is deliberate.** No slot is recorded,
  * so the hub never counts this caller as admitted, never lapses a slot that
- * was never sold, and answers the next quote exactly as it answered the last.
- * What may survive is the peering and any route written before the one that
- * was refused — both keyed by the caller's own derived label, both rewritten
- * to the same values by a retry rather than duplicated, and neither of them a
- * slot. Undoing them here would be worse than leaving them: a purchase by a
+ * was never sold, and answers the next quote exactly as it answered the last
+ * — and a renewal refused here leaves the broadcaster holding the slot and
+ * the lapse they already had, rather than a shortened one. What may survive
+ * is the peering and any route written before the one that was refused —
+ * both keyed by the caller's own derived label, both rewritten to the same
+ * values by a retry rather than duplicated, and neither of them a slot.
+ * Undoing them here would be worse than leaving them: a purchase by a
  * broadcaster who already holds a slot writes the same rows, and a rollback
  * could not tell a row it had just created from one it had merely rewritten,
  * so it would tear down a slot that is working to tidy up after one that
@@ -623,7 +694,7 @@ function refuseRoutes(c: Context, error: unknown): Response {
   return c.json(
     refusal(
       ROUTES_NOT_WRITTEN,
-      "this hub established the peering and could not write the routes that make you reachable through it, so nothing about your node is the thing to fix. The hub operator's own operator surface or its write-key allowlist is. No slot was recorded, and retrying is safe — a repeat finds the same channel rather than opening a second one."
+      "this hub could not make its own routing table match what your station publishes — either writing a route that makes you reachable, or taking back out one you no longer sell. Nothing about your node is the thing to fix; the hub operator's own operator surface, its write-key allowlist or its bearer token is. No slot was recorded, and retrying is safe — a repeat finds the same channel rather than opening a second one."
     ),
     503,
     noStore()

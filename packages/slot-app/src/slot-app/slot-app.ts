@@ -36,9 +36,17 @@
  *     connector's own self-description, establishes the **peering** toward
  *     that station, writes one forwarded route per address the station sells
  *     — each priced from that station's own published price plus the hub's
- *     carriage — and records the **slot** durably, all of it before it
- *     answers. The fulfill means you are peered. See `../buy/buy.ts`,
- *     `../peering/station-description.ts` and `../peering/routes.ts`.
+ *     carriage — takes back out any row beneath that caller's granted prefix
+ *     the station has stopped publishing, and records the **slot** durably,
+ *     all of it before it answers. The fulfill means you are peered. See
+ *     `../buy/buy.ts`, `../peering/station-description.ts` and
+ *     `../peering/routes.ts`.
+ *
+ *   - **buying again at that same address is renewing** (#37). One call, not
+ *     two: the same handle, the same granted prefix, one slot on the roster,
+ *     the established peering found rather than a second channel opened, and
+ *     the lapse extended by a period from whichever is later — the lapse
+ *     already held, or now.
  *
  *   - the two operator credentials, resolved from their mounted files before
  *     anything binds. Both are named by path only and the app refuses to start
@@ -60,8 +68,9 @@
  *   - the roster, opened in the data directory and **read back at boot**, so a
  *     restarted hub still knows who it admitted and when each slot lapses.
  *
- * What a renewal means (#37), the lapse ticker (#38) and the boot
- * reconciliation (#39) are deliberately not here yet.
+ * The lapse ticker (#38) and the boot reconciliation (#39) are deliberately
+ * not here yet: nothing walks the roster on a timer, so a slot past its lapse
+ * time still holds its routes and its peering until somebody buys again.
  *
  * The app port, the data directory and every number in the hub's admission
  * policy are configuration rather than constants: the suite boots real
@@ -328,12 +337,14 @@ export async function startSlotApp(
   // open: it would answer liveness, satisfy every supervisor on the box, and
   // then fail the first broadcaster who paid.
   //
-  // The bearer token's VALUE is read, checked and dropped on the next line —
-  // nothing makes an operator read yet (#39), and a secret held by a process
-  // that cannot use it is a secret for nothing. The write key's value goes
-  // straight into the signer below and is held there as a key object rather
-  // than as bytes; neither value ever reaches the resolved configuration.
-  const { writeKey, writeKeyFile, bearerTokenFile } =
+  // Both values are used and neither is kept anywhere a caller can reach. The
+  // write key's goes straight into the signer below and is held there as a
+  // key object rather than as bytes. The bearer token's goes to the buy,
+  // which needs it to ask the hub's own connector what its routing table
+  // currently carries before it takes a stale row back out — a READ, which is
+  // the only thing that token is ever used for here. Neither value reaches
+  // the resolved configuration, a log line or an error message.
+  const { writeKey, writeKeyFile, bearerToken, bearerTokenFile } =
     resolveOperatorCredentials(config);
 
   // Decoding the seed is the signer's job, not the mounter's, so this is
@@ -381,7 +392,13 @@ export async function startSlotApp(
   // quote's prefix, so a slot is never sold for the cost of a quote.
   app.route(
     BUY_ROUTE_PREFIX,
-    buyRoutes({ slotPolicy: policy, roster, policy: peering, signer })
+    buyRoutes({
+      slotPolicy: policy,
+      roster,
+      policy: peering,
+      signer,
+      bearerToken,
+    })
   );
 
   const { server, port } = await listen(app.fetch, host, requestedPort);

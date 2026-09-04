@@ -91,6 +91,15 @@ export interface FakeStationConnector {
    * prefix their quote granted them into their own `connector.toml` and boot.
    */
   terminateAt(apex: string): void;
+  /**
+   * Sell this ladder from now on: what a broadcaster does when they add a
+   * rung, drop one, or reprice one and boot.
+   *
+   * The document is served afresh on every read, so a hub that goes back and
+   * looks sees what the station sells *now* rather than what it sold when it
+   * first bought in — which is the whole reason a renewal re-reads it.
+   */
+  publish(ladder: readonly FakeStationRung[]): void;
   /** How many times the document has been read. */
   reads(): number;
   /** Stop it. Idempotent. */
@@ -102,6 +111,7 @@ export async function startFakeStationConnector(
   options: FakeStationConnectorOptions
 ): Promise<FakeStationConnector> {
   let apex = options.apex;
+  let ladder = options.ladder;
   let reads = 0;
 
   const connector = new Hono();
@@ -125,7 +135,7 @@ export async function startFakeStationConnector(
     // precisely so that reading it is reading a real document.
     return c.json({
       ilpAddresses: [
-        ...options.ladder.map((rung) => `${apex}.${rung.rung}`),
+        ...ladder.map((rung) => `${apex}.${rung.rung}`),
         ...(options.alsoPublishes ?? []).map((route) => route.prefix),
       ],
       httpEndpoint: 'https://station.example/ilp',
@@ -146,7 +156,7 @@ export async function startFakeStationConnector(
         },
       ],
       routes: [
-        ...options.ladder.map((rung) => ({
+        ...ladder.map((rung) => ({
           prefix: `${apex}.${rung.rung}`,
           price: rung.price,
           ...(rung.pricePerKib === undefined
@@ -166,6 +176,9 @@ export async function startFakeStationConnector(
     url: `http://127.0.0.1:${String(port)}/ilp`,
     terminateAt(next) {
       apex = next;
+    },
+    publish(next) {
+      ladder = next;
     },
     reads: () => reads,
     stop() {

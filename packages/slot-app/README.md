@@ -15,17 +15,20 @@ proven the request paid. Pricing a route is connector configuration. See the rep
 
 Issues [#33](https://github.com/toon-protocol/slop_machine/issues/33),
 [#34](https://github.com/toon-protocol/slop_machine/issues/34),
-[#35](https://github.com/toon-protocol/slop_machine/issues/35) and
-[#36](https://github.com/toon-protocol/slop_machine/issues/36): the app comes up from its bundled
+[#35](https://github.com/toon-protocol/slop_machine/issues/35),
+[#36](https://github.com/toon-protocol/slop_machine/issues/36) and
+[#37](https://github.com/toon-protocol/slop_machine/issues/37): the app comes up from its bundled
 entrypoint on a configured port, holds the hub's two operator credentials, answers liveness from
 inside the node, **quotes a slot**, and **sells one — establishing the peering and writing one
-forwarded route per address the station sells, before it answers**.
+forwarded route per address the station sells, before it answers**. **Buying again is renewing**:
+the same handle, one slot rather than two, the lapse extended, and the hub's routing table brought
+back into line with what the station publishes today.
 
 | Surface       | Port             | Paid                | What it is                                         |
 | ------------- | ---------------- | ------------------- | -------------------------------------------------- |
 | `GET /health` | `TOON_SLOT_PORT` | **never**           | Liveness, for a supervisor **inside** the node      |
 | `GET /quote`  | `TOON_SLOT_PORT` | yes, a floor price  | What a slot costs, and which prefix you'd be granted |
-| `POST /buy`   | `TOON_SLOT_PORT` | yes, the slot price | Buy a slot: be peered, then be told so             |
+| `POST /buy`   | `TOON_SLOT_PORT` | yes, the slot price | Buy a slot — or renew it: be peered, then be told so |
 
 `/health` is process liveness — "is the slot app up enough to answer". It is not a claim about the
 roster, about the hub's capacity, or about whether anybody holds a slot. It sits outside every
@@ -120,7 +123,9 @@ touched**; check the stated `X-TOON-Amount` covers the configured slot price —
 connector stated, not validating a payment, so a route misconfigured to under-charge cannot sell
 slots; derive the handle; **read the station connector's own self-description** at `stationUrl` and
 derive one route per address it publishes; establish the peering with one signed `POST /peers`;
-write those routes with one signed `POST /routes/peers` each; **record the slot durably**; answer.
+write those routes with one signed `POST /routes/peers` each; **take back out** any row beneath that
+caller's granted prefix the station no longer publishes, with one signed
+`DELETE /routes/peers/:prefix` each; **record the slot durably**; answer.
 
 ### The routes, and where their prices come from
 
@@ -183,7 +188,7 @@ Its refusals are the ones that cannot be moved to the quote, and each is a **pai
 | `502`  | `station_not_at_prefix`   | **the caller's own node**: it publishes nothing beneath the granted prefix |
 | `409`  | `route_owned_by_config`   | the hub's own config file already owns one of those rows               |
 | `503`  | `peering_not_established` | the hub's own operator surface                                         |
-| `503`  | `routes_not_written`      | the hub's own operator surface, after the peering landed               |
+| `503`  | `routes_not_written`      | the hub's own operator surface: a route it would not write, would not remove, or a table it would not report |
 | `503`  | `slot_not_recorded`       | the hub's own data directory — you *are* peered; retrying is safe      |
 
 **A refusal never leaves a half-written slot.** The slot is recorded last and only once the peering
@@ -200,17 +205,56 @@ price, and charging the slot price for it a second time is exactly what
 [ADR 0003's amendment](../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md#amendment-2026-09-04-a-refusal-is-paid-for-so-the-design-moves-refusals-rather-than-pricing-them-at-nothing)
 forbids.
 
-What a renewal means
-([#37](https://github.com/toon-protocol/slop_machine/issues/37)), the lapse
-([#38](https://github.com/toon-protocol/slop_machine/issues/38)) and the boot reconciliation
-([#39](https://github.com/toon-protocol/slop_machine/issues/39)) are next, under the spec in
-[#32](https://github.com/toon-protocol/slop_machine/issues/32).
+### Buying again is renewing
+
+There is no second call to learn. A purchase by a payer who already holds a slot walks exactly the
+path above and ends up with **one** slot, not two:
+
+- **the same handle and the same granted prefix**, read off the roster rather than derived again, so
+  the address a broadcaster printed on their page keeps working;
+- **the established peering found, not a second channel opened** — `"status": "found"`, which is the
+  retry-safety the write already had, put to its second use;
+- **the lapse extended rather than reset**:
+
+  ```
+  lapsesAt = max(now, the lapse you already hold) + TOON_SLOT_PERIOD_SECONDS
+  ```
+
+  Resetting to `now + period` would take back every second you had already paid for, so renewing a
+  fortnight early would cost you a fortnight and the safe move would be to renew at the last
+  minute. Extending from the held lapse *alone* would do the opposite once a slot has lapsed: a
+  station that went dark for a month and came back would have that month credited to it. `max` is
+  the only reading that cheats nobody. The `/quote` answers the same number the renewal did.
+
+**And the hub's routing table ends up matching what your station sells today.** The renewal re-reads
+your self-description, so a rung you added since is routed — and **a rung you dropped is taken back
+out**, because a route write is an upsert and rewriting the survivors removes nothing.
+
+That removal is the one destructive write this app makes against a hub's routing table, and it is
+fenced twice. The candidates are read off the hub's own bearer-gated `GET /routes/peers` and
+filtered to **runtime** rows **at or beneath your own granted prefix** — a config row is the hub
+operator's and the connector refuses it `409` — and the only function that issues the `DELETE`
+re-checks that fence itself before sending anything. A grant is derived from a verified payer and
+lengthened until it is free, so no two grants ever nest, and a renewal can never reach another
+broadcaster's row. A `404` back is a success: the row is already gone, which is the state that was
+asked for. Removal happens **after** the writes, so a rung is never briefly unreachable in the
+middle of its own broadcaster's renewal.
+
+A renewal the hub could not finish is a `503 routes_not_written` that leaves you holding the slot
+and the lapse you already had — never a shortened one — and retrying is safe.
+
+The lapse ([#38](https://github.com/toon-protocol/slop_machine/issues/38)) and the boot
+reconciliation ([#39](https://github.com/toon-protocol/slop_machine/issues/39)) are next, under the
+spec in [#32](https://github.com/toon-protocol/slop_machine/issues/32). Nothing walks the roster on
+a timer yet, so a slot past its lapse time keeps its routes and its peering until somebody buys
+again.
 
 ## The two operator credentials
 
 The app holds the hub's **operator write key** (an ed25519 seed whose public half sits on the
 connector's `write_keys` allowlist, and which signature-gates every operator write the app makes)
-and the hub's **operator bearer token** (which gates the reads).
+and the hub's **operator bearer token** (which gates the reads — today, asking the connector what
+its routing table already carries, so a renewal knows which rows to take back out).
 
 Both arrive as **mounted files, named by path**:
 
