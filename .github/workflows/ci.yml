@@ -105,6 +105,19 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # For `pnpm test:image` at the end of this job — the guard that an
+      # operator's key material reaches neither the build context nor the
+      # image. It is the one suite that needs a Docker daemon, which is why it
+      # runs here rather than in `build`.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
       - name: Build the station origin image
         uses: docker/build-push-action@v6
         with:
@@ -140,6 +153,16 @@ jobs:
           # `sed -n 1p` rather than `head -1` — see the note on the encoder
           # install step above.
           docker run --rm --entrypoint ffmpeg station-origin:ci -version | sed -n 1p
+
+      # deploy/image-secrets.test.ts (#27). It plants dummy key material where
+      # deploy/README.md tells a broadcaster to generate the real thing, then
+      # builds the whole build context into a probe image and the origin image
+      # itself, and proves neither carries it. Deliberately outside `pnpm
+      # test`: it needs this job's daemon, and it builds. The fast half of the
+      # same guard — that .dockerignore still names the patterns — is in
+      # deploy/bundle.test.ts and runs in `build` with everything else.
+      - name: It carries no operator key material
+        run: pnpm test:image
 
   ci-ok:
     name: CI OK

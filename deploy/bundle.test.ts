@@ -48,6 +48,10 @@ const CONNECTOR_TOML_PATH = 'deploy/connector.toml';
 const CADDYFILE_PATH = 'deploy/Caddyfile';
 const ENV_EXAMPLE_PATH = 'deploy/.env.example';
 const ORIGIN_DOCKERFILE_PATH = 'packages/station-origin/Dockerfile';
+const DOCKERIGNORE_PATH = '.dockerignore';
+
+/** Every file in this repository that decides what a copy of it carries. */
+const IGNORE_FILES = [DOCKERIGNORE_PATH, '.gitignore', 'deploy/.gitignore'];
 
 // The pin of record, and the only file in this repository a connector build
 // may be named in.
@@ -157,6 +161,39 @@ const EXPECTED_ROUTE_PRICES: Record<string, number> = {
  * AND is the first half of pointing a route at the bare origin.
  */
 const UNROUTED_ORIGIN_PATHS = ['/health', '/encode'];
+
+// ── Key material ─────────────────────────────────────────────────────────────
+
+/**
+ * The patterns that keep an operator's key material out of the build context.
+ * `docker-compose.local.yml` builds the origin with `context: ..`, so every
+ * key `deploy/README.md` tells a broadcaster to generate — the stream key, the
+ * RTMPS private key, the connector's signer and settlement keys — sits inside
+ * the directory handed to the daemon.
+ *
+ * Each is written with a leading globstar, because a `.dockerignore` pattern
+ * with no slash in it matches the context ROOT only — and the keys are one
+ * directory down, in `deploy/`.
+ */
+const DOCKERIGNORED_KEY_MATERIAL = [
+  '**/*.key',
+  '**/*.pem',
+  '**/*.secret',
+  '**/operator-bearer.token',
+  '**/operator-write.keys',
+  '**/*.allow',
+  '**/ingest-tls.crt',
+  '**/*-wallet.json',
+  '**/*-keypair.json',
+  '**/.env',
+  '**/.env.*',
+];
+
+/**
+ * A rule that ignores TypeScript by extension: `*.ts`, and any globstar or
+ * directory prefixed form of it. A `.tsbuildinfo` rule is not one.
+ */
+const IGNORES_TS_BY_EXTENSION = /(^|\/)\*\.ts$/;
 
 // ── The connector image ──────────────────────────────────────────────────────
 
@@ -574,6 +611,50 @@ describe('deploy bundle', () => {
           labelOf(address),
           `${CONNECTOR_TOML_PATH}: [node].addresses advertises "${address}" — ${path} is not for sale`
         ).not.toBe(path.slice(1));
+      }
+    }
+  });
+
+  // ── Key material ───────────────────────────────────────────────────────────
+
+  it('excludes key material from the build context by wildcard', () => {
+    // The Dockerfile COPYs an explicit path list naming neither `deploy/` nor
+    // the context root, so nothing reaches the image today — but that is one
+    // COPY line away from being untrue, and shortening a Dockerfile to
+    // `COPY . .` is an ordinary thing to do. These patterns are the second
+    // line, and they are wildcarded so that a re-derived, per-box or
+    // additional key cannot reintroduce the gap by being named slightly
+    // differently.
+    //
+    // This assertion is the fast half of the guard: `pnpm test:image`
+    // (deploy/image-secrets.test.ts) plants dummy key material and builds real
+    // images to prove the patterns do what they say, but it needs a Docker
+    // daemon and minutes, so this holds the list still for every run.
+    const dockerignored = readFile(DOCKERIGNORE_PATH)
+      .split('\n')
+      .map((line) => line.trim());
+
+    for (const pattern of DOCKERIGNORED_KEY_MATERIAL) {
+      expect(
+        dockerignored,
+        `${DOCKERIGNORE_PATH}: no \`${pattern}\` rule. \`docker-compose.local.yml\` builds with \`context: ..\`, so an operator's key beside the bundle is inside the build context; this is what keeps it out of one.`
+      ).toContain(pattern);
+    }
+  });
+
+  it('ignores generated media by directory, never by extension', () => {
+    // An HLS segment is an MPEG-TS `.ts` file and so is every source file in
+    // this repository. A `*.ts` rule in any of these files would silently
+    // untrack or unbuild the whole origin — `segments/` and `recordings/` are
+    // how generated media is excluded instead.
+    for (const file of IGNORE_FILES) {
+      for (const line of readFile(file).split('\n')) {
+        const rule = line.trim();
+        if (rule.startsWith('#')) continue;
+        expect(
+          IGNORES_TS_BY_EXTENSION.test(rule),
+          `${file}: the rule \`${rule}\` ignores TypeScript by extension. HLS segments are MPEG-TS .ts files and so is this repository's source — ignore generated media by directory (segments/, recordings/) instead.`
+        ).toBe(false);
       }
     }
   });

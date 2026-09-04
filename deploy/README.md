@@ -232,6 +232,13 @@ root ignores the same wildcards. `connector.toml` is committed and holds
 nothing secret: it names key _paths_, and the files themselves are mounted
 read-only at runtime.
 
+They are excluded from the **Docker build context** by the same wildcards:
+`docker-compose.local.yml` builds the origin with `context: ..`, so every key
+in this directory is inside the directory handed to the daemon, and
+`.dockerignore` is what keeps it out of the image. `pnpm test:image` builds
+with dummy keys planted here and proves neither the context nor the image
+carries them.
+
 The two a station holds that no other node in the fleet does are the
 broadcaster's **stream key** and the private half of the **RTMPS certificate**.
 Both are mounted values. An ignore rule does not protect an already-tracked

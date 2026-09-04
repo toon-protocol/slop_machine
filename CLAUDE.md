@@ -264,11 +264,15 @@ The connector is the **stock GHCR image on an immutable pin**, and that pin appe
 place — `deploy/docker-compose.yml`'s `connector.image`. This repo publishes no connector image.
 `connector.toml` is bind-mounted, never baked, so the pin and the config it was validated against
 reach a box in one `git pull`. The stream key and the RTMPS private key are mounted files, gitignored
-and never in an image.
+and never in an image. `.dockerignore` excludes them from the **build context** by the same wildcards
+`.gitignore` uses — `docker-compose.local.yml` builds with `context: ..`, so a key beside the bundle
+is otherwise one `COPY . .` away from a published image — and `pnpm test:image` proves it by building
+with dummy keys planted and looking inside the result.
 
 **CI and the published image.** `.github/workflows/ci.yml` is the gate — `pnpm lint`, `build`,
 `typecheck`, `format:check` and `test` on every PR and every push to main, plus a build of the
-origin image and the fleet's shared no-op merge guard, aggregated into one required `CI OK` check.
+origin image (where `pnpm test:image` also runs, because it is the job with a Docker daemon) and the
+fleet's shared no-op merge guard, aggregated into one required `CI OK` check.
 The suite encodes for real, so that workflow installs `ffmpeg` (which brings `ffprobe`) on the
 runner; `openssl`, which the ingest-TLS suites shell out to, is already on the GitHub image.
 `.github/workflows/publish-station-origin-image.yml` publishes
@@ -290,6 +294,10 @@ pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTM
                  # is the point, because ADR 0001 is a claim about bytes. The include list
                  # also covers deploy/*.test.ts, so deploy/bundle.test.ts runs beside
                  # the files it guards; smol-toml and yaml are there to read them
+pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key material where
+                 # deploy/README.md says to generate the real thing, then builds the build
+                 # context and the image and proves neither carries it. Needs a Docker daemon
+                 # and takes minutes; deploy/bundle.test.ts holds the fast half of that guard
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
 pnpm format      # prettier over packages/*/src/**/*.ts and deploy/*.ts

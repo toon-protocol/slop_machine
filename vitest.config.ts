@@ -19,6 +19,13 @@ export default defineConfig({
     // that reads the real deploy artifacts (it is not origin source, so it
     // lives next to the files it guards, exactly as relay's does).
     include: ['packages/*/src/**/*.test.ts', 'deploy/*.test.ts'],
-    exclude: ['**/node_modules/**', '**/dist/**'],
+    // deploy/image-secrets.test.ts is the one exception: it needs a Docker
+    // daemon and builds real images, so it runs from vitest.image.config.ts
+    // via `pnpm test:image` rather than adding minutes to every run here.
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'deploy/image-secrets.test.ts',
+    ],
   },
 });
