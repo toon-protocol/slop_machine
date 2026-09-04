@@ -19,6 +19,7 @@ export {
   DEFAULT_DATA_DIR,
   HEALTH_ROUTE_PATH,
   QUOTE_ROUTE_PREFIX,
+  BUY_ROUTE_PREFIX,
 } from './slot-app/slot-app.js';
 export type {
   SlotAppConfig,
@@ -29,8 +30,34 @@ export type {
 // The quote: what a broadcaster reads before they buy, and the address every
 // foreseeable refusal is moved onto so the expensive one is only ever reached
 // when the answer is already yes (ADR 0003's amendment).
-export { QUOTE_CONTENT_TYPE, NO_PAID_TERMINATION } from './quote/quote.js';
+export { QUOTE_CONTENT_TYPE } from './quote/quote.js';
 export type { SlotQuote, HeldSlot, QuoteRefusal } from './quote/quote.js';
+
+// The buy: the peering, established synchronously, before the answer. The
+// fulfill means you are peered.
+export {
+  AMOUNT_HEADER,
+  CHAIN_HEADER,
+  ROUTE_UNDER_CHARGES,
+  NO_STATION_URL,
+  STATION_UNREADABLE,
+  PEERING_NOT_ESTABLISHED,
+  SLOT_NOT_RECORDED,
+} from './buy/buy.js';
+export type {
+  BuyRequest,
+  BoughtSlot,
+  BoughtPeering,
+  BoughtChannel,
+} from './buy/buy.js';
+
+// The refusals both paid addresses share. A refusal at a paid address is paid
+// for (ADR 0003's amendment), so this set is deliberately small.
+export {
+  NO_PAID_TERMINATION,
+  NO_PAID_TERMINATION_MESSAGE,
+} from './slot/refusal.js';
+export type { SlotAppRefusal } from './slot/refusal.js';
 
 // The hub's admission policy: price, period, cap and the hub's own address.
 // Configuration a hub operator sets, never constants.
@@ -45,10 +72,42 @@ export {
 } from './slot/policy.js';
 export type { SlotPolicy, SlotPolicyConfig } from './slot/policy.js';
 
-// The roster — who holds a slot, and until when. A read surface only: the buy
-// that writes one is #35.
-export { createSlotRoster } from './slot/roster.js';
+// The roster — who holds a slot, and until when. Durable: `record` returns
+// only once the slot is on disk, which is what makes a purchase whose answer
+// arrived too late findable by the retry rather than paid for twice.
+export {
+  createSlotRoster,
+  openSlotRoster,
+  SlotRosterError,
+} from './slot/roster.js';
 export type { Slot, SlotRoster } from './slot/roster.js';
+
+// The peering the hub's operator key creates in response to a purchase — and
+// the hub's own terms for it, which a broadcaster never chooses.
+export { establishPeering, PeeringError } from './peering/peering.js';
+export type {
+  EstablishedPeering,
+  PeeringChannel,
+  PeeringFailure,
+} from './peering/peering.js';
+export {
+  DEFAULT_PEERING_FEE,
+  DEFAULT_PEERING_MAX_PACKET_AMOUNT,
+  PeeringPolicyError,
+  resolvePeeringPolicy,
+  describePeeringPolicy,
+} from './peering/policy.js';
+export type { PeeringPolicy, PeeringPolicyConfig } from './peering/policy.js';
+
+// Signing an operator write: RFC 9421, held to the verifier it targets.
+export {
+  createWriteSigner,
+  SIGNATURE_TTL_SECONDS,
+} from './operator/write-signature.js';
+export type {
+  WriteSigner,
+  WriteSignature,
+} from './operator/write-signature.js';
 
 // The handle a hub grants, derived from the payer the connector verified.
 export {

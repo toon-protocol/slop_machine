@@ -12,8 +12,14 @@
 # Entrypoint is the bundled CLI (dist/cli.js):
 #   * GET /health   on TOON_SLOT_PORT (default 3200) — liveness, unpaid,
 #                   reachable from inside the node only
+#   * GET /quote    PAID, at a floor price, beneath its own connector prefix
+#   * POST /buy     PAID, at the slot price, beneath its own — the peering is
+#                   established and the slot recorded before it answers
 #
-# The paid surface a broadcaster buys at is slop_machine#34 onward.
+# TOON_OPERATOR_URL is required too, and likewise has no default: it is the hub
+# connector's own base URL, where the peering is written. An app that cannot
+# reach an operator surface can admit nobody, and a hub that can admit nobody
+# must look broken rather than look fine.
 #
 # THE TWO OPERATOR CREDENTIALS ARE NOT IN THIS IMAGE AND MUST NEVER BE. Both
 # are mounted files named by path, and the container refuses to start without
@@ -104,8 +110,10 @@ ENV TOON_DATA_DIR=/data
 # beside them.
 EXPOSE 3200
 
-# The hub's own state — the roster of who holds a slot — lives here from
-# slop_machine#38 onward.
+# The hub's own state — the roster of who holds a slot and when it lapses —
+# lives here. It is written before a purchase is answered and read back at
+# boot, so this volume is what keeps a reboot from re-admitting broadcasters
+# the hub is already funding a channel toward.
 VOLUME /data
 
 # Run unprivileged; /data must be writable by the runtime user

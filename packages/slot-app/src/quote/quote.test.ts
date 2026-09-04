@@ -17,12 +17,13 @@
  * What this covers (issue #34): the prefix a caller would be granted and its
  * stability, the price and the period, capacity against the operator's cap,
  * the refusal for a request that did not arrive through a paid termination,
- * and that the quote's address is its own and not the buy's. The buy, the
- * peering, the routes and the roster's writer are #35 onward.
+ * and that the quote's address is its own and not the buy's. The buy itself —
+ * the peering, and the slot written down — has its own suite next door; the
+ * routes are #36 and the lapse is #38.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -66,8 +67,10 @@ afterEach(async () => {
 
 /**
  * A throwaway credential per boot, mounted at a real file the way a hub's
- * compose file mounts the real thing. No credential literal belongs in this
- * repository, not even a test's.
+ * compose file mounts the real thing — 64 hex characters, which is what a hub
+ * operator's own `openssl rand -hex 32` writes and what the operator write
+ * key has to be. No credential literal belongs in this repository, not even a
+ * test's.
  */
 function mountCredentials(): {
   dir: string;
@@ -78,7 +81,7 @@ function mountCredentials(): {
   tempDirs.push(dir);
   const mount = (name: string): string => {
     const path = join(dir, name);
-    writeFileSync(path, `test-operator-${name}-${randomUUID()}\n`, {
+    writeFileSync(path, `${randomBytes(32).toString('hex')}\n`, {
       mode: 0o600,
     });
     return path;
@@ -100,6 +103,9 @@ async function boot(
     host: '127.0.0.1',
     dataDir: mounted.dir,
     hubAddress: HUB_ADDRESS,
+    // Configuration, never an injected port. The quote makes no operator
+    // write, so nothing in this file ever dials it.
+    operatorUrl: 'http://127.0.0.1:1',
     operatorWriteKeyFile: mounted.writeKeyFile,
     operatorBearerTokenFile: mounted.bearerTokenFile,
     ...config,
@@ -318,9 +324,8 @@ describe('the caller own slot', () => {
 
     const body = await quote(app, evmPayer());
 
-    // Nothing writes a slot yet — the buy is #35 — so every caller is a
-    // broadcaster who holds none, and the quote says so rather than omitting
-    // the field.
+    // Nothing in this file buys one, so every caller here is a broadcaster
+    // who holds none, and the quote says so rather than omitting the field.
     expect(body.slot).toBeNull();
     expect(Object.keys(body).sort()).toEqual([
       'hasCapacity',
@@ -402,7 +407,7 @@ describe('where the quote lives', () => {
     }
   });
 
-  it('is a GET, and the buy does not exist here yet', async () => {
+  it('is a GET, and never answers the verb the buy uses', async () => {
     const app = await boot();
     const payer = evmPayer();
 

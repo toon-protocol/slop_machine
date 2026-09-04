@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots and quotes
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes and sells
 
 This repository is a pnpm workspace with two packages, one per toon app it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -30,8 +30,8 @@ This repository is a pnpm workspace with two packages, one per toon app it ships
 use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoint with
 tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
 to `main`. The slot app is the newer and by far the smaller of the two — see
-[the slot app](#the-slot-app) below for exactly what it does today, which is boot and quote a
-slot.
+[the slot app](#the-slot-app) below for exactly what it does today, which is boot, quote a slot,
+and sell one.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
@@ -237,9 +237,10 @@ certificate is plain RTMP and says so loudly at boot; a station on the internet 
 app and the hub's admission desk: a broadcaster buys a **slot** with a paid request and the hub's
 operator key creates the **peering** and writes the routes that make their station reachable.
 [#32](https://github.com/toon-protocol/slop_machine/issues/32) is the whole spec;
-[#33](https://github.com/toon-protocol/slop_machine/issues/33) and
-[#34](https://github.com/toon-protocol/slop_machine/issues/34) are what exists, and they are **the
-boot and the quote**.
+[#33](https://github.com/toon-protocol/slop_machine/issues/33),
+[#34](https://github.com/toon-protocol/slop_machine/issues/34) and
+[#35](https://github.com/toon-protocol/slop_machine/issues/35) are what exists, and they are **the
+boot, the quote and the buy**.
 
 It takes the origin's shape rather than inventing one: it exports
 `startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
@@ -268,6 +269,55 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   "no_paid_termination"}`, and the message names the missing paid termination rather than blaming
   the caller's body: absent means the packet did not arrive through a termination this connector
   verified, and a caller's own spelling of that header never survives the connector's strip.
+- `POST /buy` on the app port — **paid**, at the slot price, beneath **its own connector prefix**,
+  never the quote's. The body carries exactly one thing, `{"stationUrl": string}` — the station
+  connector's own self-description URL — and everything else is derived. `200 application/json`,
+  `Cache-Control: no-store`, carrying `{"prefix": string, "label": string, "hubAddress": string,
+  "lapsesAt": number, "slotPeriodSeconds": number, "peering": {"localLabel": string, "channel":
+  {"id": string, "status": string, "chain": string}}}`. **The fulfill means you are peered**: in
+  order, inside the request and all of it before the answer — read the three attribution headers;
+  refuse an absent payer **before the operator surface is touched at all**; check the stated
+  `X-TOON-Amount` covers `TOON_SLOT_PRICE` (reading a fact the connector stated, never validating a
+  payment, so a route misconfigured to under-charge cannot sell slots); derive the handle from the
+  payer, or read it off the roster where they already hold a slot; establish the peering with one
+  signed `POST /peers`; **record the slot durably**; answer. The peering write carries the derived
+  handle as the hub's **local label**, the station URL from the body, the hub's own `fee` and
+  `max_packet_amount`, and `chain` from `X-TOON-Chain` — a broadcaster chooses none of them. It is
+  **retry-safe**: a repeat against an established peering answers `"status": "found"` rather than
+  opening a second channel. **The slot is on disk before the answer goes out**, which is what makes
+  a purchase whose answer arrived too late findable by the retry instead of paid for twice. Its
+  refusals are only the ones the quote cannot foresee, and every one is a **paid** answer: `403
+  no_paid_termination` and `403 route_under_charges` (the hub's route), `400 no_station_url` (the
+  caller's request), `502 station_unreadable` (**the caller's own node**, named as such), `503
+  peering_not_established` (the hub's own operator surface) and `503 slot_not_recorded` (the hub's
+  own data directory, after the peering already landed — said out loud rather than left as a bare
+  `500`, because what the broadcaster needs to know is that they are peered and that a retry costs
+  no second channel). **A hub at its cap is deliberately not
+  refused here** — that answer is the quote's, and charging the slot price for it again is what the
+  ADR 0003 amendment forbids.
+- **Operator writes are RFC 9421-signed, and this app holds the fleet's only TypeScript
+  implementation of that.** `packages/slot-app/src/operator/write-signature.ts`, held to the
+  verifier it targets (`crates/connector-operator/src/rfc9421.rs` in the connector, and
+  `docs/operators/sign-write.sh` beside it): `Content-Digest: sha-256=:<base64 of SHA-256(body)>:`
+  binding the signature to the body; a base over exactly `@method`, `@path`, `content-digest`, then
+  `@signature-params` carrying `created`, `expires`, `keyid` and `alg="ed25519"`; signed as **one
+  string with PureEdDSA**, since Ed25519 hashes its own input (so `crypto.sign(null, …)` — a named
+  hash there is Ed25519ph and never verifies). **An accepted signature is spent**: the verifier
+  keys its replay cache on the signature bytes and ed25519 is deterministic, so the signer **waits
+  for the clock** rather than re-emitting a base it has already signed. `created` is never pushed
+  into the future to dodge that wait — it is a claim about when a hub wrote to its own routing
+  table, and the connector retains it as the audit record.
+- **The operator write key file is a 32-byte ed25519 seed as 64 hex characters** — exactly what
+  `openssl rand -hex 32` writes — wrapped at use time in the fixed Ed25519 PKCS8 DER prefix.
+  `keyid` is its **public** half, hex, which is the value on the connector's `write_keys`
+  allowlist and the one thing about that credential the app prints at boot. A file that is not a
+  seed is a **refusal to start**, because finding out at the first purchase costs a broadcaster the
+  slot price. `credentials.ts` still only reads and trims; decoding belongs to the code that signs.
+- **The roster is durable and read back at boot.** It lives in `TOON_DATA_DIR`, is written whole
+  through a temporary file that is flushed and renamed over, and `record` returns only once the
+  slot is on disk. A roster the app cannot read is a `SlotRosterError` and a non-zero exit, never a
+  silent start from empty: a hub that re-admitted everybody it already holds would front the
+  collateral twice and lapse nothing it promised.
 - Configuration: `--slot-port`/`TOON_SLOT_PORT`, `--host`/`TOON_SLOT_HOST`,
   `--data-dir`/`TOON_DATA_DIR`. Port `0` binds an ephemeral port, which is how the suite runs slot
   apps side by side. **The port is configuration, not a constant.**
@@ -283,6 +333,19 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   cost before buying, and it is the floor the buy will check the connector's own stated
   `X-TOON-Amount` against. Charging is the connector's job, so `TOON_SLOT_PRICE` and the hub's
   `connector.toml` buy route are **one pair**, changed in one commit.
+- **The hub's peering policy is configuration too**: `--operator-url`/`TOON_OPERATOR_URL` (the hub
+  connector's own base URL, where the peering is written — **required, no default**, on the same
+  terms as the credentials, because an app that cannot reach an operator surface can admit nobody),
+  `--peering-fee`/`TOON_PEERING_FEE` (default `10`) and
+  `--peering-max-packet-amount`/`TOON_PEERING_MAX_PACKET_AMOUNT` (default `10000000`). The last two
+  are the hub's own terms about a counterparty and are unreachable from any request — a broadcaster
+  never chooses how far the hub trusts them. **The operator URL is configuration, not an injected
+  port**: the suite points it at a fake operator surface
+  (`packages/slot-app/src/operator/fake-operator-surface.ts`) that verifies the RFC 9421 signature
+  and the `Content-Digest` for real against an allowlisted public key, refuses an unsigned write,
+  refuses a replayed signature and records what was written — so the buy's assertions are about
+  what the hub's routing table holds, never about which function was called. **Do not add an
+  injected port to `startSlotApp`'s own API for it.**
 - **The hub's two operator credentials are the exception with no default, and both are named by path
   only**: `--operator-write-key-file`/`TOON_OPERATOR_WRITE_KEY_FILE` for the ed25519 write key whose
   public half sits on the connector's `write_keys` allowlist, and
@@ -300,10 +363,17 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 below just because it is the app that reaches back into a connector's operator surface: no claim
 validation, no settlement key, no payment-header parsing, no pricing logic.
 
-The buy, the peering, the routes, the roster's **writer**, the lapse, the boot reconciliation and
-the hub deploy bundle are #35 onward and **do not exist**. There is no `deploy/hub/`. The roster the
-quote reads is a read surface only — `size()`, `find(payer)`, `holderOf(label)` — and it is always
-empty, because nothing writes a slot yet; #35 hangs a writer off it rather than reshaping it.
+The routes derived from the station's self-description (#36), what a renewal *means* (#37 — buying
+again today re-establishes the peering and rewrites the row with a fresh lapse), the lapse ticker
+(#38), the boot reconciliation against the connector's own tables (#39) and the hub deploy bundle
+(#40) **do not exist**. There is no `deploy/hub/`.
+
+**Vocabulary is enforced by a test, not only by prose.**
+`packages/slot-app/src/slot-app/vocabulary.test.ts` reads the package's own source: `src/slot/` and
+`src/quote/` name no peer and no channel in code, `src/peering/` names no slot and no roster, and
+**nothing anywhere fuses the two words** into a `slotPeering`, a `peer_slot` or a `slot-peering`.
+`src/buy/` and `src/slot-app/` are the only modules exempt from the first two rules, because being
+the join between a slot and a peering is what they are for.
 
 ### The deploy bundle
 

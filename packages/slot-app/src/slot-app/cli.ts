@@ -16,6 +16,7 @@
  * Usage:
  *   slot-app --slot-port 3200 --data-dir /data \
  *     --hub-address g.toon.slopmachine --slot-price 1000000 --slot-cap 100 \
+ *     --operator-url http://connector:3000 \
  *     --operator-write-key-file /run/secrets/operator-write.key \
  *     --operator-bearer-token-file /run/secrets/operator-bearer.token
  *   TOON_OPERATOR_WRITE_KEY_FILE=... TOON_OPERATOR_BEARER_TOKEN_FILE=... slot-app
@@ -44,6 +45,10 @@ import {
   DEFAULT_SLOT_PERIOD_SECONDS,
   DEFAULT_SLOT_PRICE,
 } from '../slot/policy.js';
+import {
+  DEFAULT_PEERING_FEE,
+  DEFAULT_PEERING_MAX_PACKET_AMOUNT,
+} from '../peering/policy.js';
 import { VERSION } from '../version.js';
 
 function printHelp(): void {
@@ -83,14 +88,37 @@ Options:
                          hub's collateral bound: every admission opens a
                          channel the hub fronts collateral toward. 0 is a legal
                          policy and means admitting nobody
+  --operator-url <url>   Base URL of the hub connector's OPERATOR SURFACE,
+                         where the peering is written (env:
+                         TOON_OPERATOR_URL). Required; there is no default,
+                         because an app that cannot reach an operator surface
+                         can admit nobody and must look broken rather than
+                         look fine. In a hub bundle this is the connector on
+                         the compose network, e.g. http://connector:3000
+  --peering-fee <amount> What the hub retains for carrying one packet to a
+                         broadcaster it peered with (default:
+                         ${DEFAULT_PEERING_FEE}; env: TOON_PEERING_FEE). The
+                         hub's own policy — a broadcaster never chooses how
+                         far the hub trusts them. Carriage is where a hub
+                         earns; the slot price is not
+  --peering-max-packet-amount <n>
+                         The largest amount the hub will forward to a
+                         broadcaster in one packet (default:
+                         ${DEFAULT_PEERING_MAX_PACKET_AMOUNT}; env:
+                         TOON_PEERING_MAX_PACKET_AMOUNT). It has to sit above
+                         the most expensive thing a station sells, or the top
+                         rung is a rung nobody can pay for
   --operator-write-key-file <p>
                          File holding the hub's operator WRITE KEY (env:
                          TOON_OPERATOR_WRITE_KEY_FILE). Required; there is no
                          default and no form of this that takes the key
-                         itself. Every operator write the app makes is
-                         signature-gated with it, which is what makes the
-                         write attributable to the app rather than to the
-                         operator's own hand
+                         itself. It is a 32-byte ed25519 seed written as 64
+                         hex characters — what "openssl rand -hex 32"
+                         produces — and its PUBLIC half is what goes on the
+                         connector's write_keys allowlist. Every operator
+                         write the app makes is signature-gated with it (RFC
+                         9421), which is what makes the write attributable to
+                         the app rather than to the operator's own hand
   --operator-bearer-token-file <p>
                          File holding the hub's operator BEARER TOKEN (env:
                          TOON_OPERATOR_BEARER_TOKEN_FILE). Required, on the
@@ -106,11 +134,12 @@ rather than look fine.
 
   /health   unpriced process liveness, for a supervisor inside the node
   /quote    PAID, at a floor price, beneath its own connector prefix
+  /buy      PAID, at the slot price, beneath its own connector prefix
 
 /health has no route on the hub's connector and never may: the app port is
 published on no interface, which is what makes "unpriced" mean "in-node" rather
-than "free to the internet". /quote does have one, at its own prefix and never
-the buy's, so neither address is ever reachable at the other's price.
+than "free to the internet". /quote and /buy each have one, at their own
+prefixes, so neither address is ever reachable at the other's price.
 `.trim()
   );
 }
@@ -154,6 +183,9 @@ function configFromEnvironment(
       'slot-price': { type: 'string' },
       'slot-period-seconds': { type: 'string' },
       'slot-cap': { type: 'string' },
+      'operator-url': { type: 'string' },
+      'peering-fee': { type: 'string' },
+      'peering-max-packet-amount': { type: 'string' },
       'operator-write-key-file': { type: 'string' },
       'operator-bearer-token-file': { type: 'string' },
       version: { type: 'boolean' },
@@ -211,6 +243,30 @@ function configFromEnvironment(
     config.slotCap = parseWhole(cap, '--slot-cap', 0);
   }
 
+  // The hub's peering policy. The operator URL is required and has no
+  // default; the two numbers are the hub's own terms about a counterparty and
+  // are never reachable from a broadcaster's request.
+  const operatorUrl = values['operator-url'] ?? env['TOON_OPERATOR_URL'];
+  if (operatorUrl) config.operatorUrl = operatorUrl;
+
+  // Zero is free carriage, which is a policy a hub may state, so an explicit
+  // 0 must not be read as "unset".
+  const peeringFee = values['peering-fee'] ?? env['TOON_PEERING_FEE'];
+  if (peeringFee !== undefined && peeringFee !== '') {
+    config.peeringFee = parseWhole(peeringFee, '--peering-fee', 0);
+  }
+
+  const packetCap =
+    values['peering-max-packet-amount'] ??
+    env['TOON_PEERING_MAX_PACKET_AMOUNT'];
+  if (packetCap) {
+    config.peeringMaxPacketAmount = parseWhole(
+      packetCap,
+      '--peering-max-packet-amount',
+      1
+    );
+  }
+
   // Paths only, for both. A credential literal has no flag and no environment
   // variable on purpose: a command line is world-readable on the box and an
   // image's environment is readable from its metadata by anyone who pulls it.
@@ -253,7 +309,10 @@ main().catch((err: unknown) => {
   // names the credential and its path; it never carries either value.
   if (
     err instanceof Error &&
-    (err.name === 'OperatorCredentialError' || err.name === 'SlotPolicyError')
+    (err.name === 'OperatorCredentialError' ||
+      err.name === 'SlotPolicyError' ||
+      err.name === 'PeeringPolicyError' ||
+      err.name === 'SlotRosterError')
   ) {
     console.error(`[slot-app] ${err.name}: ${err.message}`);
     process.exit(1);
