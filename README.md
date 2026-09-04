@@ -1,74 +1,111 @@
 # slop_machine
 
-**Audio you get paid to broadcast.** A stream origin that sits behind the
-[TOON connector](https://github.com/toon-protocol/connector), so listeners pay
-per request and the origin never sees a payment.
+**Vibes you get paid to broadcast.** Listeners and viewers — *vibers* — pay per segment as they
+watch or listen, and the money lands with the broadcaster. No subscription, no account, no card on
+file, and no payment code in any app here.
 
-The slop machine itself contains no payment code at all. It ingests audio and
-serves segments; by the time a request reaches it, it is already paid for. That
-separation is the entire design, and it is the same one the
-[relay](https://github.com/toon-protocol/relay) uses — everything below the
-dashed line changes per app, everything above it does not.
+slop_machine is two toon apps that ship together. Both sit behind the
+[TOON connector](https://github.com/toon-protocol/connector), so by the time a request reaches
+either one it is already paid for. That separation is the whole design, and it is the same one
+[relay](https://github.com/toon-protocol/relay) uses.
+
+- A **station** is one broadcaster's node: an **origin** that ingests their stream and serves
+  segments of it.
+- A **hub** is the node broadcasters peer with and announce to. It routes vibers' packets on to
+  stations and sells the **slots** that make a station reachable.
+
+The vocabulary is not decoration — it is written down in [`CONTEXT.md`](./CONTEXT.md), and the
+decisions behind the shape are in [`docs/adr/`](./docs/adr/).
+
+> **Status: nothing is implemented yet.** This repository holds the design, the glossary and three
+> ADRs. There is no code, no image, no deployment and no devnet node. The diagrams below are the
+> intended shape, not a description of a running system.
+
+## A station
 
 ```
                           ╔═══════════════════════════════════╗
-  listener ─ POST /ilp ──▶║  Caddy  ──▶  connector            ║  pays, verifies
-   (paid segment)         ║   :443        :3000               ║  ─────────────
+  viber ─ paid segment ──▶║  Caddy  ──▶  connector            ║  pays, verifies
+   (one per segment)      ║   :443        :3000               ║  ─────────────
                           ║                 │                 ║
                           ║ ─ ─ ─ ─ ─ ─ ─ ─ │ ─ ─ ─ ─ ─ ─ ─ ─ ║
                           ║                 ▼                 ║
-  broadcaster ─ ingest ──▶║  Caddy  ──▶  slop_machine  :3100  ║  ingests, serves
+  broadcaster ─ RTMP ────▶║  Caddy  ──▶  origin        :3100  ║  ingests, serves
    (authenticated)        ║   :443        │                   ║
                           ╚═══════════════════════════════════╝
                                           └── segments/
 ```
 
-Only Caddy is reachable from the internet. The origin's segment port is not
-published on any interface — the only route to it is a paid packet through the
+The broadcaster points OBS — or anything that speaks RTMP — at the origin, which cuts the stream
+into HLS segments with `ffmpeg`. Only Caddy is reachable from the internet; the origin's segment
+port is not published on any interface, so the only route to it is a paid packet through the
 connector.
 
-> **Status: nothing is implemented yet.** This repository holds the design
-> above and no code. The diagram is the intended shape, not a description of a
-> running system. There is no devnet deployment, no published image, and no
-> package to install.
+The broadcaster **is** the operator. They own the origin and the connector in front of it, they hold
+the settlement key, and vibers' payments accrue to them directly. Nobody collects on a broadcaster's
+behalf and nobody owes them a payout.
 
-## Why the connector does the paying
+## A hub
 
-Metered audio is the case per-request payment is actually good at. A listener
-pays for the segments they pull and stops paying when they stop listening —
-no subscription, no account, no card on file, and no payment logic in the
-origin. Pricing a route is a connector config change, not a code change.
+```
+                     ╔════════════════════════════════════════╗
+  viber ────────────▶║  Caddy ──▶ connector                   ║
+   (one channel)     ║             │                          ║
+                     ║             ├─▶ relay      announce    ║  stock image
+                     ║             ├─▶ slot app   buy a slot  ║  this repo
+                     ║             │                          ║
+                     ║             └─▶ peers ────────────────────▶ g.toon.slopmachine.<broadcaster>
+                     ╚════════════════════════════════════════╝
+```
 
-Because the origin is a plain HTTP server, it can be anything that emits
-segments: a live encoder, a file-backed archive, or a generated feed.
+A viber holds **one** payment channel — with the hub — and reaches every station by ILP address.
+Without this, a channel is derived from its two participants, so paying a station you just found
+would mean an on-chain transaction, gas and locked capital *per broadcaster*. The hub is what makes
+sampling a new broadcaster a packet instead of a commitment.
 
-## Open design questions
+The hub is mostly not new software: the announcement surface is a stock deployment of the
+**relay** toon app, and the router is the stock connector. The only new part is the **slot app**.
 
-These are unsettled, and the answers will shape the first implementation:
+## What money does
 
-- **Which direction pays.** Paid listens with authenticated ingest is the
-  default drawn above. Paid *ingest* — broadcasters pay for airtime, listening
-  is free — inverts it and is the closer analogue to the relay's pay-to-write
-  model. It may be that both are routes on the same node.
-- **Unit of payment.** Per segment is the obvious granularity for HLS-style
-  delivery, but it puts a payment on the hot path every few seconds. Prepaid
-  windows are the alternative.
-- **Discovery.** Whether a station announces itself over Nostr (as the rest of
-  the network does) or through ArNS names.
+- **Vibers pay per segment.** Metered vibes are the case per-request payment is actually good at:
+  you pay for what you pull and stop paying when you stop. A price attaches to a handler, so each
+  quality **rung** is its own address at its own price — and a viber sets a *budget* the player
+  climbs and drops rungs to fit. Adaptive bitrate against money instead of bandwidth
+  ([ADR 0002](docs/adr/0002-bitrate-follows-the-vibers-budget.md)).
+- **Broadcasters buy slots.** Paying the hub gets a station into the routing table and the
+  directory. The slot lapses unless renewed, so dead stations fall out on their own
+  ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md)).
+- **The hub earns carriage.** A fee attaches to a peering, so the hub is paid per packet it carries
+  — never by holding anyone's money.
+
+Pricing any of this is connector config, not application code.
+
+## Discovery
+
+A broadcaster announces to the hub's relay. The announcement carries the station's address, its
+rungs and their prices, and an Arweave URL for clips stored via
+[store](https://github.com/toon-protocol/store). Reads are free, so a viber browses the
+**broadcaster page** in the client app — clips, an about, a viber count — and decides before
+spending anything. Nothing free is served from a station node, which is what keeps the only route to
+an origin a paid packet.
+
+## Vibing
+
+The client is a daemon built on
+[toon-client](https://github.com/toon-protocol/toon-client): it holds the keystore and the channel,
+pays per segment, and serves the result to an ordinary player over loopback. Payment is the daemon's
+job; playback is `mpv`'s.
 
 ## Context
 
-TOON Protocol is pay-to-use infrastructure over Interledger, split into
-per-team repos. Shared context, protocol docs, and the agent skills live in
+TOON Protocol is pay-to-use infrastructure over Interledger, split into per-team repos. Shared
+context, protocol docs, and the agent skills live in
 [toon-meta](https://github.com/toon-protocol/toon-meta) — start at
 [`context/context.md`](https://github.com/toon-protocol/toon-meta/blob/main/context/context.md).
 
-The two repos worth reading before this one:
-
-| Repo                                                        | Why                                                        |
-| ----------------------------------------------------------- | ---------------------------------------------------------- |
-| [connector](https://github.com/toon-protocol/connector)     | The paid reverse proxy every TOON app sits behind.         |
-| [relay](https://github.com/toon-protocol/relay)             | The reference for putting an ordinary app behind it.       |
-
-To *use* the network rather than run a node, start with the
-[toon-client rig](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md).
+| Repo                                                    | Why                                                      |
+| ------------------------------------------------------- | -------------------------------------------------------- |
+| [connector](https://github.com/toon-protocol/connector) | The paid reverse proxy every toon app sits behind.       |
+| [relay](https://github.com/toon-protocol/relay)         | The reference for putting an app behind it — and the hub's announcement surface. |
+| [toon-client](https://github.com/toon-protocol/toon-client) | The payer side, which the client daemon is built on.  |
