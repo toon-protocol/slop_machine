@@ -42,19 +42,25 @@
  *      nothing at its granted prefix is refused before the operator surface
  *      is touched at all.
  *   6. **The peering**, one `POST /peers` — see `../peering/peering.ts`.
- *   7. **The routes, written**, one `POST /routes/peers` each. Being peered
+ *   7. **The collateral, put behind it**, one `POST /channels/:id/fund` — see
+ *      `../peering/collateral.ts`. Establishing a peering *opens* a channel
+ *      and does not fund one, and a channel holding nothing carries nothing,
+ *      so this is what makes the fulfill mean *peered and payable*. Before
+ *      the routes and never after: a route toward an unfunded channel is an
+ *      address that is reachable, paid for, and answers `T00`.
+ *   8. **The routes, written**, one `POST /routes/peers` each. Being peered
  *      is not yet being reachable: a hub carries only what its routing table
  *      names.
- *   8. **The routes the station has stopped publishing, taken back out**, one
+ *   9. **The routes the station has stopped publishing, taken back out**, one
  *      `DELETE /routes/peers/:prefix` each and only ever beneath the prefix
- *      this caller was granted. A write is an upsert, so nothing about step 7
+ *      this caller was granted. A write is an upsert, so nothing about step 8
  *      removes a rung a broadcaster dropped, and a row left behind is an
  *      address the hub carries toward a node that no longer terminates it.
- *   9. **The slot, recorded durably, before the answer.** Gas is spent inside
+ *  10. **The slot, recorded durably, before the answer.** Gas is spent inside
  *      a paid request here, so a purchase whose answer arrived too late must
  *      be found already done when the broadcaster retries rather than paying
  *      for the same peering twice.
- *  10. **The answer**: the granted prefix, the routes written, and when the
+ *  11. **The answer**: the granted prefix, the routes written, and when the
  *      slot lapses.
  *
  * **Buying again is renewing, and there is no second call to learn.** A
@@ -62,9 +68,11 @@
  * the handle is read off the roster rather than derived again, so the prefix
  * a broadcaster printed on their page is the prefix they keep; the peering
  * write finds the established peering rather than opening a second channel;
- * the routes are rewritten by prefix rather than duplicated; the document is
- * read afresh, so a rung added since is routed and a rung dropped is taken
- * out; and the roster ends up holding **one** slot for that payer, never two.
+ * the funding **tops that channel back up to what the hub fronts rather than
+ * depositing it again**, which is usually nothing at all; the routes are
+ * rewritten by prefix rather than duplicated; the document is read afresh, so
+ * a rung added since is routed and a rung dropped is taken out; and the roster
+ * ends up holding **one** slot for that payer, never two.
  *
  * **A renewal adds a period to the slot rather than replacing it.** The new
  * lapse is measured from whichever is later — the lapse the broadcaster
@@ -99,9 +107,10 @@
  *     plainly so a broadcaster fixes their connector rather than retrying
  *     into the same charge;
  *   - a delivery the hub's own wiring did not pay for or under-charged for,
- *     an operator surface that would not take a write, and a route the hub's
- *     own config file already owns. All of them are about the **hub**, and
- *     the message names the hub operator.
+ *     an operator surface that would not take a write, a channel the hub
+ *     could not put its own collateral behind, and a route the hub's own
+ *     config file already owns. All of them are about the **hub**, and the
+ *     message names the hub operator.
  *
  * **And one refusal that the quote *could* have foreseen: the cap.** It is
  * the single deliberate exception, and ADR 0003's second amendment is where
@@ -114,11 +123,13 @@
  * Charging for that answer is not charging for nothing — the quote gave the
  * warning at a floor price, and the buyer went past it.
  *
- * **A renewal is never refused for the cap, at it or over it.** Renewing adds
- * no collateral: the channel is open, the routes are written, and the hub's
- * exposure is unchanged. Refusing one would take a paying broadcaster off the
- * air for being punctual, and would make a hub whose cap was lowered beneath
- * its own roster unable to keep any of the stations it is already carrying.
+ * **A renewal is never refused for the cap, at it or over it.** Renewing opens
+ * no channel: what the cap bounds is one funded channel per slot on the
+ * roster, and a renewal tops the channel that slot already has back up to the
+ * same figure rather than committing another one. Refusing one would take a
+ * paying broadcaster off the air for being punctual, and would make a hub
+ * whose cap was lowered beneath its own roster unable to keep any of the
+ * stations it is already carrying.
  *
  * The one case that stays unfair, and is not pretended away: two broadcasters
  * quoting the last free slot and both buying. One of them is refused, having
@@ -134,6 +145,7 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { ChannelFundingError, fundChannel } from '../peering/collateral.js';
 import { establishPeering, PeeringError } from '../peering/peering.js';
 import {
   deriveForwardedRoutes,
@@ -202,9 +214,10 @@ export const ROUTE_UNDER_CHARGES = 'route_under_charges';
  * `hasCapacity: false` is admitted anyway, and the number a hub operator set
  * is decoration.
  *
- * It is **never** a renewal's refusal — see {@link buyRoutes}. Renewing adds
- * no collateral, so the bound has nothing to say about it, and turning a
- * paying broadcaster away for being punctual would tear down a station the
+ * It is **never** a renewal's refusal — see {@link buyRoutes}. Renewing opens
+ * no channel, and tops up the one that slot already has rather than
+ * committing another, so the bound has nothing to say about it — and turning
+ * a paying broadcaster away for being punctual would tear down a station the
  * hub is already carrying.
  *
  * ADR 0003's second amendment records why charging for this one is not
@@ -256,6 +269,24 @@ export const ROUTES_NOT_WRITTEN = 'routes_not_written';
 
 /** The hub's operator surface would not take the write. */
 export const PEERING_NOT_ESTABLISHED = 'peering_not_established';
+
+/**
+ * The peering was established and the hub could not put its collateral behind
+ * the channel it opened.
+ *
+ * A separate code from {@link PEERING_NOT_ESTABLISHED} because the states are
+ * different and only one of them is worth a broadcaster's patience: there,
+ * nothing happened; here, the channel exists and is empty, so the station is
+ * peered and unpayable until the deposit lands. Both are about the **hub's**
+ * own node — its operator surface, its settlement backend, or its chain — and
+ * the message says so, because a broadcaster reading it must not go looking at
+ * their own connector for a deposit only the hub can make.
+ *
+ * A retry costs no second channel and no second deposit: the peering write
+ * finds what is there, and the funding reads what the channel holds before it
+ * adds anything.
+ */
+export const CHANNEL_NOT_FUNDED = 'channel_not_funded';
 
 /**
  * The peering was established and the hub could not write the slot down.
@@ -532,7 +563,23 @@ export function buyRoutes(deps: BuyDependencies): Hono {
       return refusePeering(c, error);
     }
 
-    // 7. The routes, written. Being peered is not yet being reachable: a hub
+    // 7. The collateral, put behind the channel that peering write opened.
+    //    BEFORE THE ROUTES AND NEVER AFTER: establishing a peering opens a
+    //    channel and does not fund one, and a route pointed at a channel
+    //    holding nothing is an address that is reachable, paid for, and
+    //    answers T00 — the hub's own connector refusing to sign a covering
+    //    claim. This is the step that makes the fulfill mean PEERED AND
+    //    PAYABLE. It reads the channel before it adds anything, so a retry
+    //    and a renewal deposit only what is missing, which is usually
+    //    nothing.
+    let funded;
+    try {
+      funded = await fundChannel(deps, { channelId: peering.channel.id });
+    } catch (error) {
+      return refuseFunding(c, peering.channel.id, error);
+    }
+
+    // 8. The routes, written. Being peered is not yet being reachable: a hub
     //    carries only what its routing table names, so this is the step that
     //    makes a viber's packet cross the hop — at every rung and at the
     //    station's own *now*.
@@ -546,7 +593,7 @@ export function buyRoutes(deps: BuyDependencies): Hono {
       return refuseRoutes(c, error);
     }
 
-    // 8. The rows the station has stopped publishing, taken back out — after
+    // 9. The rows the station has stopped publishing, taken back out — after
     //    the writes rather than before them, so a rung is never briefly
     //    unreachable in the middle of its own broadcaster's renewal. Only
     //    ever beneath the prefix this caller was granted: a hub's routing
@@ -562,7 +609,7 @@ export function buyRoutes(deps: BuyDependencies): Hono {
       return refuseRoutes(c, error);
     }
 
-    // 9. The slot, on disk, BEFORE the answer. This is what bounds the damage
+    // 10. The slot, on disk, BEFORE the answer. This is what bounds the damage
     //    when a chain is slow enough that the broadcaster's own deadline
     //    passes before the answer arrives: their retry derives the same
     //    handle, finds the same channel, and rewrites the same row, rather
@@ -613,10 +660,10 @@ export function buyRoutes(deps: BuyDependencies): Hono {
     }
 
     console.log(
-      `[slot-app] slot at ${prefix} ${held === undefined ? 'bought' : 'renewed'}, lapses at ${new Date(lapsesAt).toISOString()}; peering ${label} ${peering.channel.status} a ${peering.channel.chain} channel; ${String(written.length)} route(s): ${written.map((route) => `${route.prefix} at ${route.stationPrice.toString()}+${String(deps.policy.fee)}`).join(', ')}${retired.length === 0 ? '' : `; no longer published, removed: ${retired.join(', ')}`}`
+      `[slot-app] slot at ${prefix} ${held === undefined ? 'bought' : 'renewed'}, lapses at ${new Date(lapsesAt).toISOString()}; peering ${label} ${peering.channel.status} a ${peering.channel.chain} channel holding ${funded.held.toString()}${funded.deposited === 0n ? ' already' : `, ${funded.deposited.toString()} of it deposited now`}; ${String(written.length)} route(s): ${written.map((route) => `${route.prefix} at ${route.stationPrice.toString()}+${String(deps.policy.fee)}`).join(', ')}${retired.length === 0 ? '' : `; no longer published, removed: ${retired.join(', ')}`}`
     );
 
-    // 10. The answer.
+    // 11. The answer.
     const bought: BoughtSlot = {
       prefix,
       label,
@@ -728,6 +775,42 @@ function refusePeering(c: Context, error: unknown): Response {
     refusal(
       PEERING_NOT_ESTABLISHED,
       "this hub could not write the peering to its own connector, so nothing about your node is the thing to fix. The hub operator's own operator surface, its write-key allowlist, or its settlement chain is. No peering was established."
+    ),
+    503,
+    noStore()
+  );
+}
+
+/**
+ * What a channel the hub could not fund is answered with.
+ *
+ * Always a `503` naming the **hub's** own node, because that is the only
+ * thing it can ever be about: the station was not consulted, the request
+ * named nothing that reached the funding, and every way this fails is the hub
+ * operator's own operator surface, settlement backend or chain. A broadcaster
+ * reading this must not go looking at their own connector for a deposit only
+ * the hub can make.
+ *
+ * **The peering is left standing.** Nothing is rolled back: the channel is
+ * open and empty, so the station is peered and unpayable until the deposit
+ * lands — and a retry finds that same channel rather than opening a second
+ * one, and deposits the shortfall against whatever actually landed rather
+ * than the whole figure again. No slot is recorded, so the hub does not count
+ * this caller as admitted.
+ */
+function refuseFunding(
+  c: Context,
+  channelId: string,
+  error: unknown
+): Response {
+  const detail = error instanceof ChannelFundingError ? error.detail : '';
+  console.error(
+    `[slot-app] a purchase was peered and its channel could not be funded: ${error instanceof Error ? error.message : String(error)}${detail === '' ? '' : ` — ${detail}`}`
+  );
+  return c.json(
+    refusal(
+      CHANNEL_NOT_FUNDED,
+      `this hub established the peering and then could not put its own collateral behind the payment channel it opened (${channelId}), so your station is peered and cannot yet be paid to carry a packet. Nothing about your node is the thing to fix: the deposit is the hub's, and its own operator surface, settlement backend or chain is what failed. No slot was recorded. Retrying is safe and costs no second channel and no second deposit — a repeat finds the same channel, and the funding reads what it holds before adding anything.`
     ),
     503,
     noStore()

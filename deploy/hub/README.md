@@ -237,9 +237,23 @@ order matters:
 3. They **buy**, at `g.toon.slopmachine.slot.buy`, naming their station
    connector's own self-description URL. The hub reads it, learns which
    addresses that node terminates and what each costs, establishes the peering,
-   and writes one forwarded route per address at that price plus this hub's
+   **funds the payment channel that opened** with `HUB_PEERING_COLLATERAL`, and
+   writes one forwarded route per address at that price plus this hub's
    carriage — synchronously, before it answers. The fulfill means they are
-   peered.
+   peered **and payable**.
+
+   The deposit is a real commitment of your capital, and it is the figure
+   `HUB_SLOT_CAP` multiplies. It is made after the peering and before any route,
+   because a route pointed at an empty channel is an address that is reachable,
+   priced, paid for and dead — your own connector refuses to sign a covering
+   claim for it. It is a **top-up**: the app reads what the channel already
+   holds and deposits only the shortfall, so a broadcaster's retry costs you
+   nothing and a renewal every period costs you nothing.
+
+   **A lapse does not give it back.** Releasing a peering stops the carriage;
+   the deposit stays in the channel until it is closed and settled, and the app
+   makes neither of those writes. Reclaiming capital from a station that lapsed
+   is yours to do by hand, over your own operator surface.
 
 The order is why the quote exists: a broadcaster who bought first would have to
 buy again after configuring for the prefix they were granted.

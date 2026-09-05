@@ -18,11 +18,14 @@ Issues [#33](https://github.com/toon-protocol/slop_machine/issues/33),
 [#35](https://github.com/toon-protocol/slop_machine/issues/35),
 [#36](https://github.com/toon-protocol/slop_machine/issues/36),
 [#37](https://github.com/toon-protocol/slop_machine/issues/37),
-[#38](https://github.com/toon-protocol/slop_machine/issues/38) and
-[#39](https://github.com/toon-protocol/slop_machine/issues/39): the app comes up from its bundled
+[#38](https://github.com/toon-protocol/slop_machine/issues/38),
+[#39](https://github.com/toon-protocol/slop_machine/issues/39),
+[#52](https://github.com/toon-protocol/slop_machine/issues/52) and
+[#53](https://github.com/toon-protocol/slop_machine/issues/53): the app comes up from its bundled
 entrypoint on a configured port, holds the hub's two operator credentials, answers liveness from
-inside the node, **quotes a slot**, and **sells one — establishing the peering and writing one
-forwarded route per address the station sells, before it answers**. **Buying again is renewing**:
+inside the node, **quotes a slot**, and **sells one — establishing the peering, funding the payment
+channel it opened, and writing one forwarded route per address the station sells, before it
+answers**. The fulfill means peered **and payable**. **Buying again is renewing**:
 the same handle, one slot rather than two, the lapse extended, and the hub's routing table brought
 back into line with what the station publishes today. **A slot nobody renews lapses**, and the hub
 takes its routes and its peering back out on its own initiative. **At boot the app reconciles** its
@@ -158,9 +161,10 @@ touched**; check the stated `X-TOON-Amount` covers the configured slot price —
 connector stated, not validating a payment, so a route misconfigured to under-charge cannot sell
 slots; derive the handle; **read the station connector's own self-description** at `stationUrl` and
 derive one route per address it publishes; establish the peering with one signed `POST /peers`;
-write those routes with one signed `POST /routes/peers` each; **take back out** any row beneath that
-caller's granted prefix the station no longer publishes, with one signed
-`DELETE /routes/peers/:prefix` each; **record the slot durably**; answer.
+**fund the channel that write opened** with one signed `POST /channels/:id/fund`; write those routes
+with one signed `POST /routes/peers` each; **take back out** any row beneath that caller's granted
+prefix the station no longer publishes, with one signed `DELETE /routes/peers/:prefix` each;
+**record the slot durably**; answer.
 
 ### The routes, and where their prices come from
 
@@ -197,6 +201,38 @@ granted somebody else is not routed to — that address is not theirs to be poin
 publishing *nothing* beneath its grant is refused before the operator surface is touched at all,
 because the broadcaster has not yet written their granted prefix into their own `connector.toml`.
 
+### The collateral, and why the fulfill means *payable*
+
+Establishing a peering **opens** a payment channel; it does not fund one. A channel holding nothing
+carries nothing — the hub's own connector will not sign a covering claim against it and answers
+`T00`, naming its own internal state rather than the deposit nobody made. So the purchase makes a
+third signed write, `POST /channels/:id/fund`, **after the peering and before any route**: a route
+pointed at an empty channel is an address that is reachable, priced, paid for and dead.
+
+The amount is `TOON_PEERING_COLLATERAL`, the hub's own policy, and nothing a broadcaster sends
+reaches it.
+
+**The write is an increment, so it is made idempotent by reading first.** The app reads what its own
+side of the channel already holds over the bearer-gated `GET /channels` and deposits **only the
+shortfall**; a channel already holding what the hub fronts is left alone with no write at all. That
+is what makes a retried purchase deposit nothing, and what makes a **renewal a top-up** rather than
+a second deposit — a long-lived station stays payable without the hub's capital growing every
+period. A retry after a write whose outcome is unknown **re-reads rather than re-sends**, because
+re-sending an increment is how a hub deposits twice for one admission. This is the one write in this
+app where repeating it spends real money.
+
+**A funding that fails is `503 channel_not_funded`, and it names the hub's own node** — its operator
+surface, its settlement backend or its chain. It leaves the peering standing: a retry finds the same
+channel rather than opening a second one, and deposits the shortfall against whatever actually
+landed. No slot is recorded, so the hub does not count a caller it could not make payable as
+admitted.
+
+**A lapse does not bring that collateral back.** Releasing a peering stops the carriage; the deposit
+stays in the channel until somebody closes and settles it, and **nothing in this app does either**.
+A hub operator reclaims capital from a lapsed station by hand, over their own operator surface. See
+[ADR 0003's third amendment](../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md#amendment-2026-09-05-a-peering-that-opens-a-channel-does-not-fund-it)
+for why that asymmetry is deliberate.
+
 **The slot is on disk before the answer goes out.** Gas is spent inside a paid request here, so a
 purchase whose answer arrived too late has to be found *already done* on the retry rather than
 paying for the same peering twice. The peering write is retry-safe on the same reasoning: a repeat
@@ -223,15 +259,16 @@ Its refusals are the ones that cannot be moved to the quote, and each is a **pai
 | `502`  | `station_not_at_prefix`   | **the caller's own node**: it publishes nothing beneath the granted prefix |
 | `409`  | `route_owned_by_config`   | the hub's own config file already owns one of those rows               |
 | `503`  | `peering_not_established` | the hub's own operator surface                                         |
+| `503`  | `channel_not_funded`      | the hub's own node: the peering stands and its channel is empty, so you are peered and not yet payable |
 | `503`  | `routes_not_written`      | the hub's own operator surface: a route it would not write, would not remove, or a table it would not report |
 | `503`  | `slot_not_recorded`       | the hub's own data directory — you *are* peered; retrying is safe      |
 
 **A refusal never leaves a half-written slot.** The slot is recorded last and only once the peering
 and every route are in place, so a purchase that was refused is a purchase the hub does not count:
 the quote still says the caller holds nothing, and a restart finds nothing either. What can survive
-is the peering and any route written before the refusal — both keyed by the caller's own derived
-label, both rewritten to the same values by a retry rather than duplicated, and neither of them a
-slot. Undoing them would be worse than leaving them: a purchase by a broadcaster who already holds a
+is the peering, the deposit behind it, and any route written before the refusal — all keyed by the
+caller's own derived label, all rewritten (or, for the deposit, topped up to the same figure) by a
+retry rather than duplicated, and none of them a slot. Undoing them would be worse than leaving them: a purchase by a broadcaster who already holds a
 slot writes the same rows, and a rollback could not tell a row it had just created from one it had
 merely rewritten.
 
@@ -293,8 +330,9 @@ last dead station for ever.
 Per lapsed slot, in this order and no other:
 
 1. **every route out** — one signed `DELETE /routes/peers/:prefix` each;
-2. **then the peering released** — one signed `DELETE /peers/:id`, which is what brings the hub's
-   collateral back;
+2. **then the peering released** — one signed `DELETE /peers/:id`, which stops the carriage. It does
+   **not** bring the hub's collateral back: that deposit stays in the channel until somebody closes
+   and settles it, and nothing here does;
 3. **then the slot off the roster.**
 
 The first order is the connector's rule rather than a preference: it refuses to remove a runtime
@@ -307,8 +345,8 @@ satisfy the first while staying inside the second.
 
 The roster row goes **last** on purpose. A slot on the roster is the hub's claim that routes and a
 peering behind it may still exist, so a teardown that failed leaves the slot standing, says so, and
-the next sweep tries again — rather than leaving collateral committed toward a counterparty nothing
-in the hub remembers.
+the next sweep tries again — rather than leaving carriage running toward a counterparty nothing in
+the hub remembers.
 
 **A lapsed handle is still yours.** Coming back is a re-buy at the same address, not starting over
 at a new one — the handle is derived from your payer key, so it does not go anywhere.

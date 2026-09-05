@@ -260,7 +260,10 @@ async function tearDown(
 
   try {
     // 2. The peering, now that nothing forwards to it. This is the write that
-    //    brings the collateral back.
+    //    stops the carriage — and it is NOT the write that brings the
+    //    collateral back: the deposit stays in the channel until somebody
+    //    closes and settles it, which nothing in this app does. See ADR
+    //    0003's third amendment.
     await releasePeering(deps, { localLabel: label });
   } catch (error) {
     console.error(

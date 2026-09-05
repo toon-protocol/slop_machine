@@ -26,9 +26,12 @@
  *      is a promise the hub took money for; a row of it missing from the
  *      connector is a broadcaster who is paid up and unreachable. The peering
  *      is re-established first where it is gone (a route cannot forward to a
- *      peering the table does not hold), then each address the purchase
- *      granted that the table is missing, or holds pointing at the wrong
- *      peering, or holds at the wrong price.
+ *      peering the table does not hold) **and the hub's collateral put behind
+ *      the channel that write names** — a re-established peering may have
+ *      opened a fresh one, and a route pointed at an empty channel is an
+ *      address that is reachable, paid for and answers `T00` — then each
+ *      address the purchase granted that the table is missing, or holds
+ *      pointing at the wrong peering, or holds at the wrong price.
  *   4. **Take out what the roster does not hold.** A peering or a route the
  *      connector carries for a slot nobody holds is collateral committed and
  *      an address served toward a station that bought neither. Removed in the
@@ -78,6 +81,7 @@
  * @module
  */
 
+import { fundChannel } from '../peering/collateral.js';
 import { establishPeering, releasePeering } from '../peering/peering.js';
 import type { PeeringReadDependencies } from '../peering/peering.js';
 import { readCarriedPeerings } from '../peering/peering.js';
@@ -96,6 +100,16 @@ import type { GrantedRoute, Slot, SlotRoster } from '../slot/roster.js';
 
 /** What reconciling at boot needs. */
 export interface ReconcileDependencies extends PeeringReadDependencies {
+  /**
+   * The hub's peering policy — and, unlike the two writes it extends, **what
+   * the hub fronts per peering** as well.
+   *
+   * Establishing a peering and releasing one need neither the collateral nor
+   * a way to reach the channel behind it; a boot that re-establishes one does,
+   * because a route written back toward an empty channel is an address that is
+   * reachable, paid for and dead.
+   */
+  policy: PeeringReadDependencies['policy'] & { collateral: number };
   /** The roster, read back off the data directory a moment ago. */
   roster: SlotRoster;
   /** The hub's own ILP address — what a granted prefix is built beneath. */
@@ -272,13 +286,21 @@ async function restore(
     // write is an upsert: where the peering IS there and only its routes are
     // missing, this is not reached at all, so a healthy boot opens no channel
     // and spends no gas.
-    await establishPeering(deps, {
+    const peering = await establishPeering(deps, {
       localLabel: slot.label,
       stationUrl: slot.stationUrl,
       chain: slot.chain,
     });
+    // And the collateral behind it, before any route is written back — the
+    // buy's own rule, on the only other path in this app that establishes a
+    // peering. A re-established peering may have opened a fresh channel, and
+    // a route pointed at an empty one is an address that is reachable, paid
+    // for and answers `T00`. The deposit is a shortfall against what the
+    // channel already holds, so a peering that was re-established over the
+    // channel it always had is funded with nothing at all.
+    const funded = await fundChannel(deps, { channelId: peering.channel.id });
     console.log(
-      `[slot-app] the slot at ${grantedPrefix(deps.hubAddress, slot.label)} has time left on it and this hub was not peered with it; re-established`
+      `[slot-app] the slot at ${grantedPrefix(deps.hubAddress, slot.label)} has time left on it and this hub was not peered with it; re-established, channel holding ${funded.held.toString()}${funded.deposited === 0n ? ' already' : `, ${funded.deposited.toString()} of it deposited now`}`
     );
   }
 

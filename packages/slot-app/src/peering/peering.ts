@@ -31,6 +31,12 @@
  * took — `found` or `created` — so an unintended second channel is visible in
  * the hub's own output rather than on a block explorer later.
  *
+ * **Opening that channel is not funding it**, and this module deliberately
+ * does neither more nor less than the write above. Putting the hub's
+ * collateral into the channel this answer names is `./collateral.ts`'s job,
+ * one signed `POST /channels/:id/fund` immediately afterwards, and it is what
+ * makes an admitted broadcaster payable rather than merely peered.
+ *
  * **A transient failure is retried inside the request**, so a slow chain does
  * not cost a broadcaster a purchase. What is *not* retried is anything the
  * hub already knows the answer to: a refusal about the station's own URL is
@@ -44,10 +50,11 @@
  * is the signature and nothing else.
  *
  * **And one write that undoes it**, {@link releasePeering}: a signed
- * `DELETE /peers/:id`. Establishing a peering opens a channel the hub fronts
- * collateral toward, so releasing it is the act that brings that collateral
- * back — and the connector's own kill switch, since the carriage is
- * deregistered with the row rather than at the next restart. It is the
+ * `DELETE /peers/:id`. It is the connector's own kill switch, since the
+ * carriage is deregistered with the row rather than at the next restart —
+ * but it does **not** bring the collateral back, whatever this module used to
+ * say: the deposit stays in the channel until somebody closes and settles it,
+ * and nothing in this app does (ADR 0003's third amendment). It is the
  * *second* half of a teardown and never the first: the connector refuses to
  * remove a peering a runtime route still forwards to, with a `409`, so the
  * routes come out before this is ever called.
@@ -418,12 +425,18 @@ export async function establishPeering(
 /**
  * Release the peering at `localLabel` — one signed `DELETE /peers/:id`.
  *
- * **This is what brings the collateral back.** Establishing a peering opens a
- * payment channel the hub fronts collateral toward, so a peering nobody
- * releases is capital the hub has committed toward a counterparty that has
- * stopped being one. Removing the row is the act that ends that commitment,
- * and it is also the connector's own kill switch: `deregister` goes with the
- * row, so the carriage stops immediately rather than at the next restart.
+ * **It stops the carriage; it does not bring the collateral back.** This doc
+ * comment used to say that it did, and that was wrong — corrected by
+ * [ADR 0003's third amendment](../../../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md).
+ * Removing the row is the connector's own kill switch — `deregister` goes
+ * with the row, so the carriage stops immediately rather than at the next
+ * restart — and it ends the hub's obligation to forward anything to that
+ * counterparty. But the deposit `../collateral.ts` put into the channel
+ * behind the peering stays where it is: a channel's money comes back by being
+ * **closed and settled**, which is `POST /channels/:id/close` followed by
+ * `POST /channels/:id/settle` after a challenge window, and **nothing in this
+ * app makes either write**. A hub operator reclaiming capital from a lapsed
+ * station does it by hand, over their own operator surface.
  *
  * **Every route pointing at this peering has to be gone first.** The
  * connector refuses to remove a runtime peering a runtime route still

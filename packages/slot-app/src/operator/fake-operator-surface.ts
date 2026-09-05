@@ -55,6 +55,22 @@
  *     `204` on a row it held, `404` on one it never had, so a repeat is not a
  *     failure, and `409` on a prefix the config file owns.
  *
+ * And the two a **funded** peering needs, on the channel address — because
+ * opening a channel is not funding one, and a fake that answered `POST /peers`
+ * and stopped there would let an app that never deposits anything pass:
+ *
+ *   - **`GET /channels`** answers every channel this surface holds as
+ *     `connector_runtime::ChannelView` does — `{ id, counterparty, status,
+ *     deposited, own_deposited, redeemed }`, with `own_deposited` the side
+ *     `POST /channels/:id/fund` raises (connector issue #1118) — bearer-gated
+ *     like every other read.
+ *   - **`POST /channels/:id/fund`** takes an INCREMENT, `{ "amount": n }`,
+ *     exactly as `FundChannelRequest` does, and adds it to `own_deposited`.
+ *     Signature-gated like every other write. It is an increment on purpose
+ *     and the fake will happily be called twice: an app that re-sent its
+ *     deposit instead of re-reading would double the hub's exposure here and
+ *     a suite would see it.
+ *
  * And the verb a **lapse** needs, on the other address:
  *
  *   - **`GET /peers`** and **`GET /routes/peers`** answer what this hub is
@@ -141,6 +157,25 @@ export interface FakePeering {
   fee: number;
   max_packet_amount: number;
   channel: { id: string; status: string; chain: string };
+}
+
+/**
+ * One payment channel this surface holds, shaped as
+ * `connector_runtime::ChannelView`.
+ *
+ * Opened by `POST /peers` holding NOTHING, which is the fact this whole
+ * module exists to make visible: a peering is a relation and a channel is a
+ * pot of money, and establishing the first does not fill the second.
+ */
+export interface FakeChannel {
+  id: string;
+  counterparty: string;
+  status: string;
+  /** What the counterparty deposited on their own side. Never moved here. */
+  deposited: number;
+  /** What THIS node deposited — the side `POST /channels/:id/fund` raises. */
+  own_deposited: number;
+  redeemed: number;
 }
 
 /** One forwarded route this surface holds, as it would answer it. */
@@ -239,6 +274,15 @@ export interface FakeOperatorSurface {
    */
   routes(): FakeForwardedRoute[];
   /**
+   * Every payment channel it holds — one per peering it opened, each saying
+   * what this node has actually put into it.
+   *
+   * This is where "the fulfill means peered AND PAYABLE" is either true or
+   * not: a channel whose `own_deposited` is `0` is a station that is peered,
+   * routed, on the roster and unable to carry a single packet.
+   */
+  channels(): FakeChannel[];
+  /**
    * Make the next `count` **authenticated** writes fail transiently, as a
    * chain that timed out would — every write, or only those on `path`.
    *
@@ -249,6 +293,9 @@ export interface FakeOperatorSurface {
    *
    * `path` narrows it to one endpoint, which is how a suite exercises a hub
    * whose peering landed and whose routing table then would not take a row.
+   * A `path` ending in `/` matches every path beneath it, which is how an
+   * endpoint whose address carries an identifier — `/channels/<id>/fund` —
+   * is named by a suite that cannot know the identifier in advance.
    */
   failNextWrites(count: number, path?: string): void;
   /** Stop it. Idempotent. */
@@ -287,6 +334,7 @@ export async function startFakeOperatorSurface(
   const refused: RefusedWrite[] = [];
   const peerings = new Map<string, FakePeering>();
   const forwarded = new Map<string, FakeForwardedRoute>();
+  const channels = new Map<string, FakeChannel>();
   const configuredRoutes = options.configuredRoutes ?? [];
   const configuredPeerings = options.configuredPeerings ?? [];
   const stated = options.configOwns ?? (() => false);
@@ -310,9 +358,18 @@ export async function startFakeOperatorSurface(
    */
   function failing(path: string): boolean {
     if (failures <= 0) return false;
-    if (failuresOn !== undefined && failuresOn !== path) return false;
+    if (failuresOn !== undefined && !addresses(failuresOn, path)) return false;
     failures -= 1;
     return true;
+  }
+
+  /**
+   * Whether a suite's stated endpoint names this path: exactly, or — where it
+   * ends in `/` — as everything beneath it. The second form is for an address
+   * carrying an identifier the suite cannot know before the write is made.
+   */
+  function addresses(stated: string, path: string): boolean {
+    return stated.endsWith('/') ? path.startsWith(stated) : stated === path;
   }
 
   const surface = new Hono();
@@ -398,6 +455,19 @@ export async function startFakeOperatorSurface(
       },
     };
     peerings.set(peering.id, peering);
+    // Opened holding NOTHING. `POST /peers` opens a channel; funding it is a
+    // separate write, and a fake that quietly pre-funded here would hide the
+    // whole defect this endpoint pair exists to expose.
+    if (!channels.has(peering.channel.id)) {
+      channels.set(peering.channel.id, {
+        id: peering.channel.id,
+        counterparty: `0x${randomUUID().replaceAll('-', '')}`,
+        status: 'open',
+        deposited: 0,
+        own_deposited: 0,
+        redeemed: 0,
+      });
+    }
 
     return c.json({
       id: peering.id,
@@ -529,6 +599,79 @@ export async function startFakeOperatorSurface(
     ]);
   });
 
+  // `GET /channels`: what this node's channels hold. Bearer-gated, like every
+  // read, and shaped as `ChannelView` — both sides of a two-sided channel,
+  // because which one is "the deposit" depended on who was asking until
+  // connector issue #1118 named them apart.
+  surface.get('/channels', (c) => {
+    const presented = c.req.header('authorization');
+    if (presented !== `Bearer ${options.bearerToken}`) {
+      return c.text('missing or wrong bearer token', 401);
+    }
+    return c.json([...channels.values()]);
+  });
+
+  // `POST /channels/:id/fund`: a SELF-deposit of an INCREMENT (connector issue
+  // #1118 and `FundChannelRequest`). It adds; it does not set. That is the
+  // whole reason the app reads before it writes, and this fake is deliberately
+  // willing to be called twice so that an app which forgot would double the
+  // hub's own exposure here rather than on a chain.
+  surface.post('/channels/:id/fund', async (c) => {
+    const body = await c.req.text();
+    const headers = headersOf(c.req.raw);
+    const path = new URL(c.req.url).pathname;
+
+    const authenticated = authenticate({
+      method: 'POST',
+      path,
+      headers,
+      body,
+      allowlist,
+      spent,
+    });
+    if ('reason' in authenticated) {
+      refused.push({ method: 'POST', path, reason: authenticated.reason });
+      return c.json({ error: authenticated.reason }, 401);
+    }
+
+    accepted.push({
+      method: 'POST',
+      path,
+      keyid: authenticated.keyid,
+      body,
+      headers,
+      created: authenticated.created,
+    });
+
+    if (failing(path)) {
+      return c.text('the chain did not answer in time', 503);
+    }
+
+    let request: { amount?: unknown };
+    try {
+      request = JSON.parse(body) as typeof request;
+    } catch {
+      return c.text('not JSON', 400);
+    }
+    const amount = request.amount;
+    if (typeof amount !== 'number' || !Number.isSafeInteger(amount)) {
+      return c.text('an amount is a whole number of base units', 400);
+    }
+
+    const channel = channels.get(c.req.param('id'));
+    if (channel === undefined) {
+      return c.text(`no such channel '${c.req.param('id')}'`, 404);
+    }
+    // Terminal, and the real backend refuses it: a settled channel takes no
+    // further deposit.
+    if (channel.status === 'settled') {
+      return c.text(`channel '${channel.id}' is settled`, 400);
+    }
+
+    channel.own_deposited += amount;
+    return c.json(channel);
+  });
+
   surface.delete('/routes/peers/:prefix', async (c) => {
     // A DELETE carries no body, and the digest of no body is still covered —
     // `authenticate_write` binds the signature to the whole request rather
@@ -652,6 +795,7 @@ export async function startFakeOperatorSurface(
     refusals: () => [...refused],
     peerings: () => [...peerings.values()],
     routes: () => [...forwarded.values()],
+    channels: () => [...channels.values()].map((channel) => ({ ...channel })),
     failNextWrites(count, path) {
       failures = count;
       failuresOn = path;

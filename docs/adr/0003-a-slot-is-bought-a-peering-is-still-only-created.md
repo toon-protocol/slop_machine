@@ -1,6 +1,6 @@
 # A slot is bought; a peering is still only created
 
-**Status:** Accepted. **Amended twice, both on 2026-09-04.**
+**Status:** Accepted. **Amended three times: twice on 2026-09-04, once on 2026-09-05.**
 
 **First** ([#34](https://github.com/toon-protocol/slop_machine/issues/34)): the claim that a peering
 which cannot be established "rejects the packet, so no payment is taken" is withdrawn — an app that
@@ -12,6 +12,13 @@ rule that "a new refusal added at the buy is a new way to charge a broadcaster f
 **qualified, not withdrawn** — the slot cap is refused at the buy, because a buyer the quote already
 warned is not being charged for nothing, and because a cap that is only reported bounds nothing. See
 [the second amendment](#amendment-2026-09-04-the-cap-is-enforced-at-the-buy-because-a-warned-buyer-is-not-charged-for-nothing).
+
+**Third** ([#53](https://github.com/toon-protocol/slop_machine/issues/53)): establishing a peering
+**opens** a payment channel and does not fund one, so a fulfill that meant *you are peered* meant a
+station that could not be paid to carry a packet. The buy now funds the channel it opened; and the
+lapse's release of a peering **does not bring the hub's collateral back**, which this record and the
+code both used to say it did. See
+[the third amendment](#amendment-2026-09-05-a-peering-that-opens-a-channel-does-not-fund-it).
 
 Everything else stands: a slot is bought, a peering is still only created.
 
@@ -81,6 +88,13 @@ things. Auto-approval removes three of them outright:
   expiry instead, and lapses unrenewed slots itself.
 - **Establishing a peering opens a channel**, so the hub fronts collateral toward every broadcaster
   it admits. Hub capital grows linearly with the roster, and the carriage fee has to cover it.
+
+  > **Amended 2026-09-05 ([#53](https://github.com/toon-protocol/slop_machine/issues/53)).**
+  > "Fronts collateral" is what this bullet *intended* and was not what happened: opening a channel
+  > and funding one are two writes, and only the first was ever made. The buy makes the second now
+  > — `POST /channels/:id/fund`, after the peering and before any route — and the amount is the hub's
+  > own `TOON_PEERING_COLLATERAL`. See
+  > [the third amendment](#amendment-2026-09-05-a-peering-that-opens-a-channel-does-not-fund-it).
 - **Admission is a price, not a judgement.** That is the point — it makes onboarding self-service —
   but it means abuse bounds are the slot app's problem, since the connector no longer carries any.
 - **A refusal at a paid address is paid for** *(added by the first 2026-09-04 amendment)*. The connector
@@ -234,3 +248,83 @@ operator's own key. A refusal at a paid address is still paid for, every refusal
 to the quote is still moved there, there is still no refund path and none is wanted, and the set of
 refusals at the buy is still deliberately small — one longer than it was, and this is the argument
 for the one.
+
+## Amendment, 2026-09-05: a peering that opens a channel does not fund it
+
+**Cause.** [Issue #51](https://github.com/toon-protocol/slop_machine/issues/51) set out to run the
+whole product end to end for the first time — a viber's packet crossing a hub and paying a
+broadcaster — and doing that made visible a defect this record had helped hide. Both this ADR and
+the code beneath it spoke of a hub "fronting collateral" toward every broadcaster it admits, as
+though establishing a peering did it. Nothing did it.
+
+**What was claimed.** This record's Consequences said *"establishing a peering opens a channel, so
+the hub fronts collateral toward every broadcaster it admits"*, and its second amendment leaned on
+the same sentence to argue that the cap bounds a balance-sheet commitment. Beneath it,
+`packages/slot-app/src/peering/peering.ts` said of releasing a peering: *"this is what brings the
+collateral back."* Read together, the two describe a lifecycle in which admission commits capital
+and a lapse returns it. Neither half was true.
+
+**What is actually true.** `POST /peers` **opens** a channel (connector ADR 0058). Funding one is a
+separate operator write, `POST /channels/:id/fund` (ADR 0008's third write), and nothing in this
+repository made it. So a broadcaster who paid the slot price was peered, routed, on the roster,
+visible in the quote — and carried nothing: the hub's own connector refused to sign a covering claim
+for a packet it was about to forward and answered `T00`, *"channel … has 0 base units of headroom
+left"*. That failure names the hub's own internal state rather than the missing deposit, so the one
+person who could have fixed it learned nothing from it, and the station that paid learned only that
+the hub was broken.
+
+**What the design does now.** The buy funds the channel it opened, as a third signed operator write
+beside the peering and the routes, and **the fulfill means peered *and payable***.
+
+- **After the peering and before any route.** A route toward an unfunded channel is an address that
+  is reachable, priced, paid for and dead. The order is not a preference: it is the only order in
+  which the hub never advertises carriage it cannot perform.
+- **The write is an increment, so it is made idempotent by reading first.** The app reads what its
+  own side of the channel already holds and deposits only the shortfall. A channel already holding
+  what the policy fronts is left alone; a retried purchase deposits nothing and the hub's exposure
+  does not double; a renewal is a **top-up** rather than a second deposit, so a long-lived station
+  stays payable without the hub's capital growing every period. A retry after a write whose outcome
+  is unknown **re-reads rather than re-sends**. This is the one place in this repository where
+  repeating a write spends real money, and the fleet's only other caller of the same endpoint —
+  `connector/local/open-solana-channel.py` — solves it the same way and says so.
+- **The amount is the hub's own configuration**, `--peering-collateral`/`TOON_PEERING_COLLATERAL`
+  ([#52](https://github.com/toon-protocol/slop_machine/issues/52)), unreachable from any request.
+  A broadcaster does not choose how much capital a hub commits for them, any more than they choose
+  the carriage fee. With it, `TOON_SLOT_CAP` bounds an amount instead of an intention: the hub's
+  commitment is the cap times this figure.
+- **A funding failure is a paid refusal that names the hub's own node**, `503 channel_not_funded`,
+  distinct from `peering_not_established` because the states differ — there nothing happened, here
+  the channel exists and is empty. It **leaves the peering standing**: the retry finds that same
+  channel (`"status": "found"`) rather than opening a second one, and deposits the shortfall against
+  whatever actually landed. Rolling the peering back would spend gas to destroy the thing a retry
+  needs. No slot is recorded, so the hub does not count a caller it could not make payable as
+  admitted.
+- **The same rule on the only other path that establishes a peering.** Boot reconciliation
+  re-establishes a peering a hub has lost and then writes routes back; it funds the channel that
+  write names, before the routes, for the same reason and by the same shortfall.
+
+**And what still does not happen, said plainly: a lapse does not return the collateral.** Releasing
+a peering removes the row and stops the carriage — `deregister` goes with it, so it is the
+connector's own kill switch — and that is all it does. **The deposit stays in the channel.** A
+channel's money comes back by being **closed and settled** (`POST /channels/:id/close`, then
+`POST /channels/:id/settle` after the challenge window), and **nothing in this app makes either
+write**. A hub operator reclaiming capital from a station that lapsed does it by hand, over their
+own operator surface. Every doc comment claiming otherwise is corrected in the commit that made this
+amendment true.
+
+That asymmetry is deliberate rather than an oversight left standing. Closing a channel is an
+irreversible act against a counterparty's money as well as the hub's, on a challenge window measured
+in days, and a broadcaster who lapsed on a Friday and re-bought on a Monday would be a channel
+closed and reopened for nothing — two on-chain acts and a fresh challenge window, to reclaim capital
+the hub was about to commit again. A lapsed handle is still the same broadcaster's, because the
+handle is derived from their payer key, so a re-buy tops up the channel that is already there. What
+this costs a hub operator is capital that stays committed to stations that stopped broadcasting, and
+the honest position is that they reclaim it deliberately rather than that the app does it for them.
+
+**What does not change.** The decision itself, and all three of the earlier amendments. A slot is
+bought; a peering is still only created, by the hub's operator, through the operator surface, with
+the operator's own key. Funding the channel behind it is that same operator's own act, made with
+that same key, on the hub's own configured terms — it is not a thing a broadcaster bought, and it is
+not the connector deciding anything. A refusal at a paid address is still paid for, and
+`channel_not_funded` is a new one of those: it is not a refusal the quote could have foreseen, since
+it is discoverable only by the hub trying, and it is about the hub's own node and says so.

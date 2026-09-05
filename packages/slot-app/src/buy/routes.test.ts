@@ -419,12 +419,12 @@ describe('the routes a purchase writes', () => {
 
     await bought(app, payer, station);
 
-    // The peering and all five routes: six writes, one key, and the fake
-    // verified every signature against its allowlist before recording any of
-    // them. An audit log can tell what the app did from what an operator did
-    // by hand.
+    // The peering, the deposit behind it, and all five routes: seven writes,
+    // one key, and the fake verified every signature against its allowlist
+    // before recording any of them. An audit log can tell what the app did
+    // from what an operator did by hand.
     const keys = new Set(operator.writes().map((write) => write.keyid));
-    expect(operator.writes()).toHaveLength(6);
+    expect(operator.writes()).toHaveLength(7);
     expect(keys.size).toBe(1);
     expect(operator.refusals()).toEqual([]);
   });
