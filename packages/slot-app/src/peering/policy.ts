@@ -1,7 +1,7 @@
 /**
  * The hub's **peering** policy: where its operator surface is, what it
- * charges to carry a packet to a broadcaster it admitted, and how large a
- * packet it will carry.
+ * charges to carry a packet to a broadcaster it admitted, how large a packet
+ * it will carry, and how much capital it fronts behind each one.
  *
  * Kept apart from `../slot/policy.ts` on purpose. That module is the hub's
  * **admission** policy — what a *slot* costs, how long one lasts, how many
@@ -9,11 +9,11 @@
  * response to a purchase. A slot is not a peering (ADR 0003), and the two
  * policies do not share a module any more than they share a word.
  *
- * **A broadcaster does not choose how far the hub trusts them.** The fee and
- * the packet cap are the hub operator's own numbers about a counterparty, and
- * they are in the peering write precisely because no document a broadcaster
- * serves could supply them (connector ADR 0006). Nothing a caller sends
- * reaches either of them.
+ * **A broadcaster does not choose how far the hub trusts them.** The fee, the
+ * packet cap and the collateral are the hub operator's own numbers about a
+ * counterparty, and they are the hub's own precisely because no document a
+ * broadcaster serves could supply them (connector ADR 0006). Nothing a caller
+ * sends reaches any of them.
  *
  * @module
  */
@@ -27,12 +27,16 @@ export class PeeringPolicyError extends Error {
  * What the hub retains for carrying one packet to a broadcaster it peered
  * with, in the settlement token's smallest unit (env: `TOON_PEERING_FEE`).
  *
- * A placeholder like every other number in this repo. Carriage is where a hub
- * earns — the slot price exists to make admission self-service and to lapse
- * dead stations, not to be revenue — and it is what has to cover the
- * collateral every admission fronts.
+ * A placeholder like every other number in this repo, from
+ * [`docs/placeholder-numbers.md`](../../../../docs/placeholder-numbers.md).
+ * Carriage is where a hub earns — the slot price exists to make admission
+ * self-service and to lapse dead stations, not to be revenue — and it is what
+ * has to cover {@link DEFAULT_PEERING_COLLATERAL}, the capital every admission
+ * fronts. **The number here, the value in `deploy/hub/` and the figure in
+ * `docs/placeholder-numbers.md` are one placeholder in three places**, and
+ * they agree.
  */
-export const DEFAULT_PEERING_FEE = 10;
+export const DEFAULT_PEERING_FEE = 20;
 
 /**
  * The largest amount the hub will forward to a broadcaster in one packet
@@ -43,6 +47,25 @@ export const DEFAULT_PEERING_FEE = 10;
  * station whose top rung nobody can pay for.
  */
 export const DEFAULT_PEERING_MAX_PACKET_AMOUNT = 10_000_000;
+
+/**
+ * What the hub fronts into the payment channel behind one peering, in the
+ * settlement token's smallest unit (env: `TOON_PEERING_COLLATERAL`).
+ *
+ * **This is the number `TOON_SLOT_CAP` multiplies.** Establishing a peering
+ * *opens* a channel; it does not fund one, and an unfunded channel carries no
+ * packet at all — the hub's own connector refuses to sign a covering claim
+ * for a broadcaster it admitted and answers `T00`. So the hub's
+ * balance-sheet commitment is this figure times the cap, and until it was
+ * configuration the cap bounded an intention rather than an amount.
+ *
+ * A placeholder like every other number here, from
+ * [`docs/placeholder-numbers.md`](../../../../docs/placeholder-numbers.md):
+ * about $50 at USDC's six decimals, which is the one most likely to be wrong.
+ * A hub operator picks what their capital can carry, and their cap picks how
+ * many times they will carry it.
+ */
+export const DEFAULT_PEERING_COLLATERAL = 50_000_000;
 
 /**
  * Whether this hub will read a station connector over plaintext `http://`
@@ -82,6 +105,14 @@ export interface PeeringPolicy {
   /** The largest amount the hub will forward in one packet. */
   maxPacketAmount: number;
   /**
+   * What the hub fronts into the payment channel behind the peering.
+   *
+   * The hub's own capital, committed per counterparty — see
+   * {@link DEFAULT_PEERING_COLLATERAL} for why a peering that opens a channel
+   * and leaves it empty is a broadcaster who cannot be paid.
+   */
+  collateral: number;
+  /**
    * Whether a purchase may name a plaintext `http://` station connector.
    *
    * A hub with a public name says `false` and means it; a local topology and
@@ -91,11 +122,12 @@ export interface PeeringPolicy {
   allowPlaintextStationUrls: boolean;
 }
 
-/** The same four, as a caller may leave them for their defaults. */
+/** The same five, as a caller may leave them for their defaults. */
 export interface PeeringPolicyConfig {
   operatorUrl?: string | undefined;
   peeringFee?: number | string | undefined;
   peeringMaxPacketAmount?: number | string | undefined;
+  peeringCollateral?: number | string | undefined;
   allowPlaintextStationUrls?: boolean | string | undefined;
 }
 
@@ -158,6 +190,17 @@ export function resolvePeeringPolicy(
         min: 1,
       }
     ),
+    // Zero is refused rather than read as "fund it by hand later": a peering
+    // whose channel holds nothing is a broadcaster the hub admitted, routed,
+    // charged and cannot carry a single packet for, and the connector's own
+    // word for it names the hub's internal state rather than the missing
+    // deposit. A hub that means to front nothing is a hub admitting nobody,
+    // and TOON_SLOT_CAP already says that.
+    collateral: whole(config.peeringCollateral, DEFAULT_PEERING_COLLATERAL, {
+      what: 'peering collateral',
+      env: 'TOON_PEERING_COLLATERAL',
+      min: 1,
+    }),
     allowPlaintextStationUrls: flag(config.allowPlaintextStationUrls, {
       fallback: DEFAULT_ALLOW_PLAINTEXT_STATION_URLS,
       what: 'plaintext station URL policy',
@@ -209,8 +252,9 @@ function whole(
 /** The peering policy as one line an operator can check at boot. */
 export function describePeeringPolicy(policy: PeeringPolicy): string {
   return (
-    `peerings written at ${policy.operatorUrl} with fee ${String(policy.fee)} ` +
-    `and a packet cap of ${String(policy.maxPacketAmount)}, reading station ` +
+    `peerings written at ${policy.operatorUrl} with fee ${String(policy.fee)}, ` +
+    `a packet cap of ${String(policy.maxPacketAmount)} and ` +
+    `${String(policy.collateral)} fronted per broadcaster, reading station ` +
     `connectors over ${policy.allowPlaintextStationUrls ? 'https or plaintext http' : 'https only'}`
   );
 }

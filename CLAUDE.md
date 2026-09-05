@@ -470,10 +470,18 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 - **The hub's peering policy is configuration too**: `--operator-url`/`TOON_OPERATOR_URL` (the hub
   connector's own base URL, where the peering is written — **required, no default**, on the same
   terms as the credentials, because an app that cannot reach an operator surface can admit nobody),
-  `--peering-fee`/`TOON_PEERING_FEE` (default `10`) and
-  `--peering-max-packet-amount`/`TOON_PEERING_MAX_PACKET_AMOUNT` (default `10000000`). The last two
+  `--peering-fee`/`TOON_PEERING_FEE` (default `20`),
+  `--peering-max-packet-amount`/`TOON_PEERING_MAX_PACKET_AMOUNT` (default `10000000`) and
+  `--peering-collateral`/`TOON_PEERING_COLLATERAL` (default `50000000`). The last three
   are the hub's own terms about a counterparty and are unreachable from any request — a broadcaster
-  never chooses how far the hub trusts them. **The operator URL is configuration, not an injected
+  never chooses how far the hub trusts them, or how much capital a hub commits for them.
+  **The collateral is the figure `TOON_SLOT_CAP` multiplies**, which is what makes the cap bound an
+  amount rather than an intention: establishing a peering *opens* a payment channel and does not fund
+  one, so a hub's balance-sheet commitment is those two numbers together. There is deliberately no
+  value meaning "front nothing" — `0` is a `PeeringPolicyError` and a non-zero exit, because a
+  channel holding nothing carries nothing, and a hub that means to commit no capital sets its cap to
+  zero instead. The carriage fee is **one placeholder in three places** — the code default,
+  `deploy/hub/`'s `HUB_PEERING_FEE`, and `docs/placeholder-numbers.md` — and they agree. **The operator URL is configuration, not an injected
   port**: the suite points it at a fake operator surface
   (`packages/slot-app/src/operator/fake-operator-surface.ts`) that verifies the RFC 9421 signature
   and the `Content-Digest` for real against an allowlisted public key, refuses an unsigned write,

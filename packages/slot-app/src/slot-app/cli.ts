@@ -47,6 +47,7 @@ import {
 } from '../slot/policy.js';
 import {
   DEFAULT_ALLOW_PLAINTEXT_STATION_URLS,
+  DEFAULT_PEERING_COLLATERAL,
   DEFAULT_PEERING_FEE,
   DEFAULT_PEERING_MAX_PACKET_AMOUNT,
 } from '../peering/policy.js';
@@ -88,8 +89,9 @@ Options:
   --slot-cap <n>         How many slots may be held at once (default:
                          ${DEFAULT_SLOT_CAP}; env: TOON_SLOT_CAP). This is the
                          hub's collateral bound: every admission opens a
-                         channel the hub fronts collateral toward. 0 is a legal
-                         policy and means admitting nobody
+                         channel the hub fronts --peering-collateral into, so
+                         the commitment is the two numbers multiplied. 0 is a
+                         legal policy and means admitting nobody
   --lapse-sweep-seconds <n>
                          How often the hub walks its roster tearing down slots
                          nobody renewed (default: ${DEFAULT_LAPSE_SWEEP_SECONDS};
@@ -119,6 +121,17 @@ Options:
                          TOON_PEERING_MAX_PACKET_AMOUNT). It has to sit above
                          the most expensive thing a station sells, or the top
                          rung is a rung nobody can pay for
+  --peering-collateral <amount>
+                         What this hub fronts into the payment channel behind
+                         each peering (default: ${DEFAULT_PEERING_COLLATERAL};
+                         env: TOON_PEERING_COLLATERAL). The hub's own policy,
+                         on the same terms — a broadcaster never chooses how
+                         much capital a hub commits for them. THIS IS THE
+                         NUMBER --slot-cap MULTIPLIES: opening a channel is
+                         not funding one, so a hub that fronts nothing admits
+                         broadcasters its own connector cannot carry a packet
+                         for. There is no value that means "front nothing"; a
+                         hub admitting nobody sets --slot-cap 0
   --allow-plaintext-station-urls <true|false>
                          Whether a purchase may name a plaintext http://
                          station connector (default:
@@ -209,6 +222,7 @@ function configFromEnvironment(
       'operator-url': { type: 'string' },
       'peering-fee': { type: 'string' },
       'peering-max-packet-amount': { type: 'string' },
+      'peering-collateral': { type: 'string' },
       'allow-plaintext-station-urls': { type: 'string' },
       'operator-write-key-file': { type: 'string' },
       'operator-bearer-token-file': { type: 'string' },
@@ -296,6 +310,20 @@ function configFromEnvironment(
     config.peeringMaxPacketAmount = parseWhole(
       packetCap,
       '--peering-max-packet-amount',
+      1
+    );
+  }
+
+  // What the hub fronts behind each peering. At least 1: a channel holding
+  // nothing carries nothing, so a hub that fronted zero would admit
+  // broadcasters, route them, charge them, and answer every packet with its
+  // own connector's word for an empty channel.
+  const collateral =
+    values['peering-collateral'] ?? env['TOON_PEERING_COLLATERAL'];
+  if (collateral) {
+    config.peeringCollateral = parseWhole(
+      collateral,
+      '--peering-collateral',
       1
     );
   }

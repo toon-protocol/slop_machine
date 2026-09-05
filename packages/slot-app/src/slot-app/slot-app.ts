@@ -66,10 +66,11 @@
  *     on the resolved configuration. See `../slot/policy.ts`.
  *
  *   - the hub's **peering** policy — where its operator surface is, what it
- *     charges to carry a packet to a broadcaster, and how large a packet it
- *     will carry. The operator surface is **configuration**, never an
- *     injected port: the suite points it at a fake and the app's own API is
- *     the same either way. See `../peering/policy.ts`.
+ *     charges to carry a packet to a broadcaster, how large a packet it will
+ *     carry, and how much capital it fronts behind each one. The operator
+ *     surface is **configuration**, never an injected port: the suite points
+ *     it at a fake and the app's own API is the same either way. See
+ *     `../peering/policy.ts`.
  *
  *   - the roster, opened in the data directory and **read back at boot**, so a
  *     restarted hub still knows who it admitted and when each slot lapses.
@@ -246,6 +247,16 @@ export interface SlotAppConfig {
    */
   peeringMaxPacketAmount?: number | string | undefined;
   /**
+   * What the hub fronts into the payment channel behind each peering
+   * (default: `50000000`). The hub's own policy, on the same terms again — a
+   * broadcaster never chooses how much capital a hub commits for them.
+   *
+   * This is the figure `slotCap` multiplies: the roster is a balance-sheet
+   * commitment of this much per admission, and the cap is the only thing
+   * bounding it.
+   */
+  peeringCollateral?: number | string | undefined;
+  /**
    * Whether a purchase may name a plaintext `http://` station connector
    * (default: `false`).
    *
@@ -299,9 +310,10 @@ export interface ResolvedSlotAppConfig {
   lapseSweepSeconds: number;
   /**
    * The hub's peering policy — where its operator surface is, what it charges
-   * to carry a packet to a broadcaster, how large a packet it will carry, and
-   * whether it will read a station connector over plaintext. A URL, two
-   * numbers and a yes-or-no, none of it secret.
+   * to carry a packet to a broadcaster, how large a packet it will carry, how
+   * much capital it fronts behind each one, and whether it will read a station
+   * connector over plaintext. A URL, three numbers and a yes-or-no, none of it
+   * secret.
    */
   peering: PeeringPolicy;
   /** The path the operator write key was read from. Never its contents. */
