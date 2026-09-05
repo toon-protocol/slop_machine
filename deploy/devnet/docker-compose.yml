@@ -86,11 +86,20 @@ services:
   #
   # NO `--block-time`. A block per transaction means a transaction waits on
   # ITSELF rather than on a clock, so the run is bounded by the work it does
-  # and not by a mining interval. The image's entrypoint is `/bin/sh -c`, so
-  # the command is one string.
+  # and not by a mining interval — and the block height after a replay is then
+  # exactly the number of transactions it sent, which is how the driver checks
+  # this rather than trusting it.
+  #
+  # A LIST OF ONE STRING, and it has to be. This image's entrypoint is
+  # `/bin/sh -c`, so a plain string command — which compose splits on
+  # whitespace — would arrive as `sh -c anvil --host 0.0.0.0 …`, where
+  # everything after `anvil` becomes `$0`, `$1`, … and is silently DROPPED.
+  # anvil would then come up bound to loopback INSIDE the container, reachable
+  # by nothing, with none of the flags below in effect.
   chain:
     image: ghcr.io/foundry-rs/foundry:v1.4.0@sha256:f6a3fd201ae617fdc67bf7b3db9abdca7678e2589e15eda6bc84f88eb5239e04
-    command: 'anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10 --silent'
+    command:
+      - 'anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10'
     ports:
       # Loopback only, like everything else here. The driver deploys the
       # settlement contracts over this and reads balances back over it.
