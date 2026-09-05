@@ -196,6 +196,13 @@ services:
       TOON_OPERATOR_URL: http://hub-connector:3000
       TOON_PEERING_FEE: '20'
       TOON_PEERING_MAX_PACKET_AMOUNT: '10000000'
+      # WHAT THIS HUB FRONTS PER BROADCASTER. Establishing a peering opens a
+      # payment channel and does not fund one, and a channel holding nothing
+      # carries nothing — so the buy funds it as a third signed operator write,
+      # after the peering and before the routes. This is the number
+      # `TOON_SLOT_CAP` bounds, and the devnet asserts it ON CHAIN rather than
+      # in the purchase's answer.
+      TOON_PEERING_COLLATERAL: '50000000'
       # A laptop topology has no certificate anywhere, so the station connector
       # this hub is asked to read describes itself over http. The hub bundle's
       # own local overlay relaxes the same rule for the same reason; nothing on

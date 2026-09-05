@@ -28,6 +28,9 @@ import { createWriteSigner } from '../../packages/slot-app/src/operator/write-si
 import {
   anvilAccount,
   chainClients,
+  channelOnChain,
+  channelParticipant,
+  CHANNEL_OPEN,
   deploySettlementContracts,
   fundGas,
   mintToken,
@@ -54,6 +57,14 @@ import {
   readSelfDescription,
   type SelfDescription,
 } from './self-description.js';
+import {
+  basePriceOf,
+  readCarriedPeerings,
+  readCarriedRoutes,
+  slopeOf,
+  type CarriedPeering,
+  type CarriedRoute,
+} from './operator.js';
 import {
   down,
   logs,
@@ -203,12 +214,40 @@ const EXPECTED_SLOT_PRICE = 1_000_000n;
 /** The fixed segment duration the devnet configures its origin with. */
 const EXPECTED_SEGMENT_SECONDS = 2;
 
+// ── The purchase ─────────────────────────────────────────────────────────────
+
+/**
+ * The station's self-description URL **as the hub reaches it**.
+ *
+ * The purchase body carries one thing and this is it. It is the compose
+ * service and not the driver's loopback publish, because the hub GETs this URL
+ * from inside its own network — the fetch is the hub's, not the run's.
+ */
+const STATION_URL_FOR_THE_HUB = 'http://station-connector:3000/ilp';
+
+/** What the hub retains for carrying one packet, and what it fronts per broadcaster. */
+const EXPECTED_PEERING_FEE = 20n;
+const EXPECTED_PEERING_COLLATERAL = 50_000_000n;
+
+/**
+ * The refusal a station that is not at the prefix it was granted earns.
+ *
+ * It is a fact about the CALLER'S OWN NODE, discoverable only by going and
+ * looking — which happens inside the paid request — so it is one of the few
+ * refusals that cannot be moved to the cheap quote address. The run exercises
+ * it rather than avoiding it: a devnet that walked only the happy path would
+ * not be evidence about the path a broadcaster actually walks.
+ */
+const NOT_AT_PREFIX = 'station_not_at_prefix';
+
 /** The chain, as the document a node publishes names it. */
 const EXPECTED_SETTLEMENT_CHAIN = `evm:${String(EXPECTED_CHAIN_ID)}`;
 
 describe('the devnet', () => {
   let deployment: SettlementDeployment;
   let credentials: DevnetCredentials;
+  /** What each node's settlement key held once funded, before either spent any of it. */
+  const funded: Record<string, { gas: bigint; token: bigint }> = {};
   let chain: ChainSettings;
   let hub: SelfDescription;
   let stationAtPlaceholder: SelfDescription;
@@ -217,6 +256,11 @@ describe('the devnet', () => {
   let broadcasterKey: PayerKey;
   let broadcaster: Payer;
   let quote: Quote;
+  let refusedAtWrongPrefix: BuyAttempt;
+  let bought: BoughtSlot;
+  let paidForTheSlot: bigint;
+  let carriedRoutes: CarriedRoute[];
+  let carriedPeerings: CarriedPeering[];
   /** Set by the first failure, so a red run leaves the logs behind and a green one does not. */
   let failed = false;
 
@@ -245,10 +289,11 @@ describe('the devnet', () => {
     // Fund what a run generated. Nothing here has an account, a faucet or any
     // real money behind it: anvil funded account zero, and account zero funds
     // these.
-    for (const settlementAddress of [
-      credentials.hub.settlementAddress,
-      credentials.station.settlementAddress,
-    ]) {
+    const clients = await chainClients(CHAIN_RPC_URL);
+    for (const [node, settlementAddress] of [
+      ['hub', credentials.hub.settlementAddress],
+      ['station', credentials.station.settlementAddress],
+    ] as const) {
       await fundGas(CHAIN_RPC_URL, settlementAddress, GAS_PER_NODE);
       await mintToken(
         CHAIN_RPC_URL,
@@ -256,6 +301,22 @@ describe('the devnet', () => {
         settlementAddress,
         TOKEN_PER_NODE
       );
+      // Read back HERE, and remembered. Both nodes go on to SPEND from these
+      // keys — the hub's gas on opening a channel and its tokens on the
+      // collateral it fronts, the station's on redeeming what it was paid — so
+      // a balance read at the end of a run is a fact about that spending
+      // rather than about the funding. What "funded" claims is that the chain
+      // received it, which is what these two readings are.
+      funded[node] = {
+        gas: await clients.publicClient.getBalance({
+          address: settlementAddress,
+        }),
+        token: await tokenBalance(
+          CHAIN_RPC_URL,
+          deployment.token,
+          settlementAddress
+        ),
+      };
     }
 
     // Both configurations, rendered from the committed templates: the chain
@@ -309,9 +370,37 @@ describe('the devnet', () => {
     // the one the hub grants. Executing that order rather than describing it is
     // what makes the instruction testable.
     quote = await pullQuote(broadcaster);
+
+    // Before the station is reconfigured — a purchase by a broadcaster who
+    // bought before they configured. It is refused, it costs them the slot
+    // price, and it is the refusal the documented order exists to prevent.
+    refusedAtWrongPrefix = await attemptBuy(broadcaster);
+
     renderStationConnectorToml(chain, quote.prefix);
     await restart('station-connector');
     station = await readSelfDescription(`${STATION_EDGE_URL}/ilp`);
+
+    // And now the purchase that works. The fulfill means peered, funded and
+    // routed — all of it inside the request, before the answer.
+    const purchase = await attemptBuy(broadcaster);
+    if (purchase.status !== 200) {
+      throw new Error(
+        `the purchase was refused ${String(purchase.status)}: ${JSON.stringify(purchase.body)}`
+      );
+    }
+    bought = purchase.body as BoughtSlot;
+    paidForTheSlot = purchase.paid;
+
+    // What the hub's own connector holds, read over its operator surface —
+    // never what the answer said it wrote.
+    carriedRoutes = await readCarriedRoutes(
+      HUB_EDGE_URL,
+      credentials.hub.bearerToken
+    );
+    carriedPeerings = await readCarriedPeerings(
+      HUB_EDGE_URL,
+      credentials.hub.bearerToken
+    );
   }, 900_000);
 
   afterEach((context) => {
@@ -496,24 +585,21 @@ describe('the devnet', () => {
     ).toBe(credentials.hub.operatorKeyid);
   });
 
-  it('funds both settlement keys with gas and the token they will front', async () => {
-    // A hub fronts collateral toward every broadcaster it admits, and a
-    // station has to be able to redeem what it was paid. Neither key existed
-    // before this run, so neither had anything behind it.
-    const clients = await chainClients(CHAIN_RPC_URL);
-
-    for (const [node, settlementAddress] of [
-      ['hub', credentials.hub.settlementAddress],
-      ['station', credentials.station.settlementAddress],
-    ] as const) {
+  it('funds both settlement keys with gas and the token they will front', () => {
+    // A hub fronts collateral toward every broadcaster it admits, and a station
+    // has to be able to redeem what it was paid. Neither key existed before
+    // this run, so neither had anything behind it — and both balances are read
+    // off the chain the moment they are funded, because both nodes go on to
+    // spend from them and a reading taken later says nothing about the funding.
+    for (const node of ['hub', 'station'] as const) {
       expect(
-        await clients.publicClient.getBalance({ address: settlementAddress }),
-        `the ${node}'s settlement key ${settlementAddress} holds no gas, so it can open no channel and redeem nothing`
+        funded[node]?.gas,
+        `the ${node}'s settlement key received no gas, so it can open no channel and redeem nothing`
       ).toBe(GAS_PER_NODE);
 
       expect(
-        await tokenBalance(CHAIN_RPC_URL, deployment.token, settlementAddress),
-        `the ${node}'s settlement key holds none of the token it settles in`
+        funded[node]?.token,
+        `the ${node}'s settlement key received none of the token it settles in`
       ).toBe(TOKEN_PER_NODE);
     }
   });
@@ -827,6 +913,221 @@ describe('the devnet', () => {
       ).toBe(true);
     }
   });
+
+  // ── The buy ────────────────────────────────────────────────────────────────
+
+  it('refuses a purchase against a station that is not at the prefix it was granted', () => {
+    // The refusal the documented order exists to prevent, exercised rather
+    // than avoided. A station still publishing beneath an apex its hub never
+    // granted would be carried at prefixes it does not terminate, so every
+    // packet the hub forwarded would arrive somewhere that connector answers
+    // nothing — and the hub refuses rather than selling that.
+    //
+    // It is a fact about the CALLER'S OWN NODE and discoverable only by going
+    // and looking, which happens inside the paid request, so it is one of the
+    // few refusals that cannot be moved to the cheap quote address. It is
+    // named as such rather than disguised as the hub's own failure.
+    expect(
+      refusedAtWrongPrefix.status,
+      `a purchase against a station at the wrong prefix was answered ${String(refusedAtWrongPrefix.status)}: ${JSON.stringify(refusedAtWrongPrefix.body)}`
+    ).toBe(502);
+    expect(
+      (refusedAtWrongPrefix.body as { error?: string }).error,
+      `the refusal does not name what is wrong with the caller's node`
+    ).toBe(NOT_AT_PREFIX);
+
+    // And it was PAID FOR. A connector fulfils on any complete answer whatever
+    // its status, so an app in this repository cannot decline payment by
+    // refusing — which is the whole reason every foreseeable refusal lives at
+    // the quote instead.
+    expect(
+      refusedAtWrongPrefix.paid,
+      `the refusal cost ${String(refusedAtWrongPrefix.paid)} — a refusal at a paid address is paid for, and a devnet that showed otherwise would be evidence for something untrue`
+    ).toBe(EXPECTED_SLOT_PRICE);
+  });
+
+  it('sells a slot, and the answer names the prefix, the peering and the routes', () => {
+    expect(paidForTheSlot).toBe(EXPECTED_SLOT_PRICE);
+
+    // The prefix is the one the QUOTE named. Same payer, same handle, for
+    // ever: it is derived from the payer the hub's own connector verified, so
+    // a broadcaster who configured their station against the quote is
+    // configured against what they bought.
+    expect(
+      bought.prefix,
+      `the hub granted ${bought.prefix} and quoted ${quote.prefix}`
+    ).toBe(quote.prefix);
+    expect(bought.label).toBe(quote.label);
+    expect(bought.hubAddress).toBe(HUB_ADDRESS);
+
+    // The peering is named for what it is — never for the slot that was
+    // bought — and its local label is the handle the hub derived.
+    expect(bought.peering.localLabel).toBe(quote.label);
+    expect(
+      bought.peering.channel.status,
+      `a first purchase opens the channel rather than finding one`
+    ).toBe('created');
+    expect(bought.peering.channel.chain).toContain('evm');
+
+    // One route per address the station publishes, each beneath the granted
+    // prefix and nowhere else: the app can never point somebody else's address
+    // at a station.
+    expect(
+      bought.routes.map((route) => route.prefix).sort(),
+      `the hub wrote ${JSON.stringify(bought.routes.map((r) => r.prefix))}`
+    ).toEqual(station.ilpAddresses.slice().sort());
+
+    for (const route of bought.routes) {
+      expect(
+        route.prefix.startsWith(`${quote.prefix}.`),
+        `the hub wrote a route for ${route.prefix}, which is not beneath the prefix it granted`
+      ).toBe(true);
+    }
+  });
+
+  it("matches the hub's own routing table against what the purchase claimed", async () => {
+    // The buy's answer is the slot app's account of what it wrote; this is the
+    // connector's account of what it is carrying. Where they disagree, a
+    // broadcaster holds a fulfill that promised something nothing will honour.
+    const written = carriedRoutes.filter((route) => route.source === 'runtime');
+
+    expect(
+      written.map((route) => route.prefix).sort(),
+      `the hub's routing table carries ${JSON.stringify(written.map((r) => r.prefix))} at runtime, and the purchase answered ${JSON.stringify(bought.routes.map((r) => r.prefix))}`
+    ).toEqual(bought.routes.map((route) => route.prefix).sort());
+
+    for (const route of written) {
+      // Every row points at the peering the purchase created, by the label the
+      // hub derived — which is the key the connector's own referential rule is
+      // on, and therefore what a lapse would have to select by.
+      expect(
+        route.peerId,
+        `the row for ${route.prefix} forwards to "${route.peerId}", and the purchase's peering is "${bought.peering.localLabel}"`
+      ).toBe(bought.peering.localLabel);
+
+      const answered = bought.routes.find(
+        (candidate) => candidate.prefix === route.prefix
+      );
+      expect(
+        basePriceOf(route),
+        `the hub carries ${route.prefix} at ${String(basePriceOf(route))} and its answer said ${String(answered?.price)}`
+      ).toBe(BigInt(answered?.price ?? '0'));
+    }
+
+    // And the peering itself is there, at runtime, carrying the hub's own fee.
+    const peering = carriedPeerings.find(
+      (candidate) => candidate.id === bought.peering.localLabel
+    );
+    expect(
+      peering,
+      `the hub holds no peering called "${bought.peering.localLabel}", and its own routing table forwards to it`
+    ).toBeDefined();
+    expect(peering?.source).toBe('runtime');
+    expect(
+      BigInt(peering?.fee ?? 0),
+      `the peering retains ${String(peering?.fee)} per packet, and the hub's policy is ${String(EXPECTED_PEERING_FEE)}`
+    ).toBe(EXPECTED_PEERING_FEE);
+  });
+
+  it('funds the channel it opened, and the chain says so', async () => {
+    // THE ASSERTION THIS WHOLE EPIC EXISTS TO MAKE, and the one that would
+    // have caught the defect on the first pull. Establishing a peering OPENS a
+    // channel; it does not fund one. A hub that stopped there is peered,
+    // routed, on the roster, visible in the quote — and its own connector
+    // refuses to sign a covering claim for the first packet it tries to
+    // forward, answering T00 about its own internal state rather than about
+    // the missing deposit.
+    //
+    // Asserted on chain rather than in the buy's answer, because the answer is
+    // the hub's account of what it did and the chain is what happened.
+    const channelId = bought.peering.channel.id as `0x${string}`;
+
+    const state = await channelOnChain({
+      rpcUrl: CHAIN_RPC_URL,
+      tokenNetwork: deployment.tokenNetwork,
+      channelId,
+    });
+    expect(
+      state.state,
+      `the channel behind the peering is in state ${String(state.state)} on chain, and a channel that carries a packet is open`
+    ).toBe(CHANNEL_OPEN);
+
+    // Both participants are who they should be: the hub's settlement key and
+    // the station's. A channel is derived from its two participants, so this is
+    // also what makes the id itself checkable.
+    const parties = [state.participant1, state.participant2].map((address) =>
+      address.toLowerCase()
+    );
+    expect(parties).toContain(credentials.hub.settlementAddress.toLowerCase());
+    expect(parties).toContain(
+      credentials.station.settlementAddress.toLowerCase()
+    );
+
+    // And the hub's own side holds exactly what its collateral policy says it
+    // fronts per broadcaster — the number that makes TOON_SLOT_CAP bound a
+    // real commitment rather than an intention.
+    const hubSide = await channelParticipant({
+      rpcUrl: CHAIN_RPC_URL,
+      tokenNetwork: deployment.tokenNetwork,
+      channelId,
+      participant: credentials.hub.settlementAddress,
+    });
+    expect(
+      hubSide.deposit,
+      `the hub's side of the channel holds ${String(hubSide.deposit)} on chain, and its policy fronts ${String(EXPECTED_PEERING_COLLATERAL)} per broadcaster. A channel holding nothing is a station that is peered, routed, on the roster — and cannot carry a packet.`
+    ).toBe(EXPECTED_PEERING_COLLATERAL);
+  });
+
+  it("prices every route it carries above the station's own termination", () => {
+    // THE FEE ARITHMETIC NOTHING IN THE FLEET ENFORCES. A hub collects its
+    // route's price at its client edge, retains its flat carriage fee, and
+    // forwards the rest; the station's connector checks per packet that a
+    // peer-wire arrival covers its OWN termination price. So a hub route
+    // priced any lower forwards into an F03 — reachable, paid for, and dead —
+    // and no code anywhere checks it, because a connector cannot know what the
+    // next hop charges.
+    //
+    // "At every payload length the run touches" is a finite claim here for a
+    // stated reason: every station route publishes a slope of zero, so the
+    // station's price is the same at every length, and the hub carries no
+    // slope either. Both halves are asserted, because a slope on one side and
+    // not the other is exactly how this arithmetic would start being true only
+    // for small packets.
+    const published = new Map(
+      station.routes.map((route) => [route.prefix, route])
+    );
+
+    for (const carried of carriedRoutes.filter(
+      (route) => route.source === 'runtime'
+    )) {
+      const stationRoute = published.get(carried.prefix);
+      expect(
+        stationRoute,
+        `the hub carries ${carried.prefix}, and the station publishes no such address`
+      ).toBeDefined();
+
+      const hubPrice = basePriceOf(carried) ?? 0n;
+      const stationPrice = stationRoute?.price ?? 0n;
+
+      expect(
+        hubPrice,
+        `the hub carries ${carried.prefix} at ${String(hubPrice)}, and the station terminates it at ${String(stationPrice)} plus the hub's fee of ${String(EXPECTED_PEERING_FEE)}`
+      ).toBe(stationPrice + EXPECTED_PEERING_FEE);
+
+      expect(
+        hubPrice - EXPECTED_PEERING_FEE >= stationPrice,
+        `the hub forwards ${String(hubPrice - EXPECTED_PEERING_FEE)} toward ${carried.prefix}, and the station refuses anything under ${String(stationPrice)}`
+      ).toBe(true);
+
+      // No slope on either side, which is what makes the line above a claim
+      // about every payload length rather than about one.
+      expect(
+        slopeOf(carried),
+        `the hub carries ${carried.prefix} with a slope — a station price is flat per segment, so a slope on the hop makes the arithmetic above true only up to some size`
+      ).toBe(0n);
+      expect(stationRoute?.pricePerKib).toBe(0n);
+    }
+  });
 });
 
 /**
@@ -918,6 +1219,57 @@ async function pullQuote(payer: Payer): Promise<Quote> {
     slotPrice: BigInt(body.slotPrice),
     slotPeriodSeconds: body.slotPeriodSeconds,
     hasCapacity: body.hasCapacity,
+    paid: answer.claim?.amount ?? 0n,
+  };
+}
+
+/** A purchase's answer, whatever it was, and what the connector charged for it. */
+interface BuyAttempt {
+  status: number;
+  body: unknown;
+  paid: bigint;
+}
+
+/** The slot a broadcaster reads back once they are peered. */
+interface BoughtSlot {
+  prefix: string;
+  label: string;
+  hubAddress: string;
+  lapsesAt: number;
+  slotPeriodSeconds: number;
+  peering: {
+    localLabel: string;
+    channel: { id: string; status: string; chain: string };
+  };
+  routes: { prefix: string; price: string; pricePerKib?: string }[];
+}
+
+/**
+ * Buy a slot, naming the station's own self-description URL.
+ *
+ * The body carries exactly one thing and everything else is derived — the
+ * handle from the payer the hub's connector verified, the prices from the
+ * station's own document, the carriage terms from the hub's configuration.
+ *
+ * It never throws on a refusal: a refusal IS the answer, it is paid for like
+ * any other, and one of them is a thing this run is here to see.
+ */
+async function attemptBuy(payer: Payer): Promise<BuyAttempt> {
+  const answer = await payer.client.send(`${HUB_ADDRESS}.slot.buy`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: { stationUrl: STATION_URL_FOR_THE_HUB },
+  });
+
+  if (!answer.fulfilled) {
+    throw new Error(
+      `the hub never answered a purchase at all: ${answer.code} ${answer.message}. That is a packet that did not become an answer, which is a different thing from a refusal.`
+    );
+  }
+
+  return {
+    status: answer.status,
+    body: answer.json<unknown>(),
     paid: answer.claim?.amount ?? 0n,
   };
 }

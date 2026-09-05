@@ -59,6 +59,12 @@ function artifact(name: string): Artifact {
 export const MOCK_ERC20 = artifact('MockERC20');
 /** The registry every connector resolves its token network through at boot. */
 export const TOKEN_NETWORK_REGISTRY = artifact('TokenNetworkRegistry');
+/**
+ * The token network itself. Its bytecode is never deployed from here — the
+ * registry does that — but its ABI is how a run reads a channel: what each
+ * participant deposited, and what a claim against them has advanced to.
+ */
+export const TOKEN_NETWORK = artifact('TokenNetwork');
 
 /**
  * Anvil's published test mnemonic, and account zero derived from it.
@@ -332,3 +338,72 @@ export async function tokenBalance(
     args: [owner],
   })) as bigint;
 }
+
+/**
+ * What one participant's side of a channel holds, read off the chain.
+ *
+ * The three numbers a channel is actually about, and they are per PARTICIPANT
+ * rather than per channel: `deposit` is what that side put in — which for the
+ * hub's side of a peering is the collateral it fronted — and
+ * `transferredAmount` is what the counterparty's latest redeemed claim has
+ * moved. `nonce` is the on-chain watermark, which is not the connector's own.
+ *
+ * This is the assertion a devnet exists to make. A peering's channel that a
+ * buy reported opening, and that reports zero deposited here, is the defect
+ * this epic was written about: peered, routed, on the roster, and carrying
+ * nothing.
+ */
+export interface ChannelParticipant {
+  deposit: bigint;
+  nonce: bigint;
+  transferredAmount: bigint;
+}
+
+export async function channelParticipant(params: {
+  rpcUrl: string;
+  tokenNetwork: Address;
+  channelId: Hex;
+  participant: Address;
+}): Promise<ChannelParticipant> {
+  const clients = await chainClients(params.rpcUrl);
+  const [deposit, nonce, transferredAmount] =
+    (await clients.publicClient.readContract({
+      address: params.tokenNetwork,
+      abi: TOKEN_NETWORK.abi,
+      functionName: 'participants',
+      args: [params.channelId, params.participant],
+    })) as [bigint, bigint, bigint];
+
+  return { deposit, nonce, transferredAmount };
+}
+
+/** A channel's own state, as the token network holds it. */
+export interface ChannelOnChain {
+  /** `0` never opened, `1` open, and anything past that is closing or closed. */
+  state: number;
+  participant1: Address;
+  participant2: Address;
+}
+
+export async function channelOnChain(params: {
+  rpcUrl: string;
+  tokenNetwork: Address;
+  channelId: Hex;
+}): Promise<ChannelOnChain> {
+  const clients = await chainClients(params.rpcUrl);
+  const channel = (await clients.publicClient.readContract({
+    address: params.tokenNetwork,
+    abi: TOKEN_NETWORK.abi,
+    functionName: 'channels',
+    args: [params.channelId],
+  })) as [bigint, number, bigint, bigint, Address, Address];
+
+  return {
+    state: Number(channel[1]),
+    participant1: channel[4],
+    participant2: channel[5],
+  };
+}
+
+/** The state a channel that can carry a packet is in. */
+export const CHANNEL_OPEN = 1;

@@ -22,6 +22,12 @@ and no published port for [the bundle guard](../bundle.test.ts) to weigh.
 | --------------------------- | ------------------------------------------- | ----------------------------- |
 | `MockERC20.json`            | `MockERC20` — six decimals, ungated `mint`  | `test/mocks/MockERC20.sol`    |
 | `TokenNetworkRegistry.json` | `TokenNetworkRegistry`                      | `src/TokenNetworkRegistry.sol` |
+| `TokenNetwork.json`         | `TokenNetwork` — read, never deployed here  | `src/TokenNetwork.sol`        |
+
+`TokenNetwork`'s bytecode is never deployed from here — the registry does that, which is what makes
+its address deterministic too — so only its **abi** is used: to read what each participant of a
+channel deposited, and what a claim against them has advanced to. Those are the two numbers this
+devnet exists to assert.
 
 ## Why the addresses are asserted rather than read back
 
@@ -38,7 +44,7 @@ addresses. The deployment's own return value is what the rest of the run then us
 cd /path/to/connector/packages/contracts && forge build
 python3 - <<'PY'
 import json
-for n in ['MockERC20', 'TokenNetworkRegistry']:
+for n in ['MockERC20', 'TokenNetworkRegistry', 'TokenNetwork']:
     j = json.load(open(f'out/{n}.sol/{n}.json'))
     json.dump({'abi': j['abi'], 'bytecode': j['bytecode']['object']},
               open(f'/path/to/slop_machine/deploy/devnet/contracts/{n}.json', 'w'), indent=1)
