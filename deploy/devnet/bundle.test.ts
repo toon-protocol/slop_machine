@@ -270,7 +270,17 @@ const EXPECTED_EMPTY_INGEST_TLS = [
  */
 const TEMPLATES_DIR = `${DEVNET_DIR}/templates`;
 const EXPECTED_TEMPLATES: Record<string, string> = {
-  'hub-connector': 'http://hub-connector:3000/ilp',
+  // WHERE EACH NODE'S OWN CLIENTS REACH IT, and the two are deliberately
+  // different. A node cannot introspect this — from inside a container it sees
+  // 0.0.0.0 and a private network — so it is configuration, and what it has to
+  // name is the address the parties who pay THAT node can dial.
+  //
+  // A hub's payers are a broadcaster and a viber, and in this topology both are
+  // the driver, on the host, coming in through the loopback publish. A
+  // station's only client is the hub, which dials from inside the compose
+  // network. A viber never reaches a station directly; that is what the hub is
+  // for.
+  'hub-connector': 'http://127.0.0.1:3000/ilp',
   'station-connector': 'http://station-connector:3000/ilp',
 };
 
@@ -1097,12 +1107,12 @@ describe('devnet bundle', () => {
         `${path}: names an address literal — every chain value here is the run's to fill`
       ).not.toMatch(AN_ADDRESS_LITERAL);
 
-      // Each node names its own endpoint at its own compose service: a node
-      // cannot introspect that, and one that published the wrong one is a node
-      // the other half peers with and cannot reach.
+      // Each node names where ITS OWN CLIENTS reach it — see the constant
+      // above for why those are two different addresses here. A node that
+      // published the wrong one is a node its payers cannot dial.
       expect(
         contents,
-        `${path}: does not publish its endpoint at its own compose service`
+        `${path}: does not publish the endpoint its own clients reach it at`
       ).toContain(`http_endpoint = "${endpoint}"`);
 
       for (const line of EXPECTED_TEMPLATE_LINES) {

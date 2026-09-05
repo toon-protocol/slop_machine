@@ -49,9 +49,23 @@ key_file = "/app/data/signer.key"
 # never by this file.
 [node]
 addresses = ["{{HUB_ADDRESS}}.slot.quote", "{{HUB_ADDRESS}}.slot.buy"]
-# Named at the compose service, because that is what the other half of this
-# topology dials — a devnet node has no public name to publish.
-http_endpoint = "http://hub-connector:3000/ilp"
+
+# WHERE THIS HUB'S OWN CLIENTS REACH IT, which in this topology is NOT its
+# compose service — and the station's is, which is the whole difference.
+#
+# `http_endpoint` is a fact a node cannot introspect: from inside a container it
+# sees 0.0.0.0 and a private network. What it publishes has to be the address
+# the parties who pay IT can dial, and a hub's payers are a broadcaster and a
+# viber. Here both of those are the driver, on the host, reaching this node
+# through the loopback publish in `../docker-compose.yml` — which is the same
+# shape as on a real hub, where a viber is outside the hub's network too.
+#
+# The station is the mirror image: its only client is this hub, which dials it
+# from inside the compose network, so it publishes its compose service. Nothing
+# on that network ever dials this endpoint — the slot app reaches its own
+# connector through `TOON_OPERATOR_URL`, which is a different address for a
+# different job.
+http_endpoint = "http://127.0.0.1:3000/ilp"
 
 # ── The quote ────────────────────────────────────────────────────────────────
 # Its own route at its own floor price, exactly as the shipped hub bundle

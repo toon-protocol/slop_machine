@@ -60,6 +60,12 @@ addresses = [
   "{{STATION_APEX}}.audio",
   "{{STATION_APEX}}.480p",
 ]
+# WHERE THIS STATION'S OWN CLIENT REACHES IT, and it has exactly one: the hub
+# that carries for it, which dials from inside the compose network. A viber
+# never reaches a station directly — that is what the hub is for — so this is
+# the compose service, where the hub's own `http_endpoint` is the loopback
+# publish its payers are on. Both are the same rule: publish where the parties
+# who pay you can dial.
 http_endpoint = "http://station-connector:3000/ilp"
 
 # ── The station's *now* ──────────────────────────────────────────────────────

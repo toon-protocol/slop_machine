@@ -260,8 +260,8 @@ describe('the devnet', () => {
 
     // Both configurations, rendered from the committed templates: the chain
     // repointed at the compose service, the addresses this run's replay landed
-    // at, six decimals, plaintext peer endpoints allowed, and each node's own
-    // endpoint named at its compose service.
+    // at, six decimals, plaintext peer endpoints allowed, and each node
+    // publishing the endpoint its own clients reach it at.
     chain = {
       rpcUrl: CHAIN_URL_ON_THE_COMPOSE_NETWORK,
       registry: deployment.registry,
@@ -574,14 +574,21 @@ describe('the devnet', () => {
     }
   });
 
-  it('has each node publish an endpoint at its own compose service', () => {
+  it('has each node publish the endpoint its own clients reach it at', () => {
     // A node cannot introspect this: from inside a container it sees 0.0.0.0
-    // and a private network, never the name the other half of the topology
-    // dials it by. It is configuration, and a node that published the wrong
-    // one is a node the hub peers with and cannot reach.
-    expect(hub.httpEndpoint, `the hub publishes "${hub.httpEndpoint}"`).toBe(
-      'http://hub-connector:3000/ilp'
-    );
+    // and a private network. It is configuration, and what it has to name is
+    // the address the parties who pay THAT node can dial — which is why the two
+    // are different here.
+    //
+    // A hub's payers are a broadcaster and a viber, and in this topology both
+    // are the driver, on the host, coming in through the loopback publish; a
+    // station's only client is the hub, dialing from inside the compose
+    // network. A viber never reaches a station directly, which is exactly what
+    // the hub is for.
+    expect(
+      hub.httpEndpoint,
+      `the hub publishes "${hub.httpEndpoint}", which its own payers cannot dial`
+    ).toBe('http://127.0.0.1:3000/ilp');
     expect(
       stationAtPlaceholder.httpEndpoint,
       `the station publishes "${stationAtPlaceholder.httpEndpoint}"`
