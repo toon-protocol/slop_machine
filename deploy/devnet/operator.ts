@@ -1,6 +1,5 @@
 /**
- * Reading a hub's own tables over its operator surface — the read half, and
- * only the read half.
+ * Reading a node's own tables over its operator surface — and, once, writing.
  *
  * A run asserts what the hub **actually holds** rather than what a purchase
  * said it did. The two are different claims: the buy's answer is the slot
@@ -8,13 +7,25 @@
  * it is carrying. Where they disagree, a broadcaster has a fulfill that
  * promised something nothing will honour.
  *
- * **Reads only, and bearer-gated, which is the connector's own split.** Every
- * write to this surface needs an RFC 9421 signature from a key on the
- * allowlist, and the devnet signs none: the slot app is the only thing in this
- * topology that writes here, because writing here is what a purchase buys. A
- * run that wrote its own rows would be proving that a driver can edit a
+ * **Reads are bearer-gated and writes are signature-gated, which is the
+ * connector's own split.** The reads here are a hub operator's own: what its
+ * routing table holds, who it is peered with, what its channels hold. Nothing
+ * in a run writes to the HUB's surface — the slot app is the only thing in
+ * this topology that does, because writing there is what a purchase buys, and
+ * a run that wrote its own rows would be proving that a driver can edit a
  * routing table.
+ *
+ * The one write is to the STATION's own surface, and it is the broadcaster's:
+ * redeeming what their station was paid. It is signed with the seed a run
+ * keeps in memory, whose public half is the only line in that node's
+ * allowlist — because on a station the private half does not live on the box
+ * at all. The signature is made with the SLOT APP's own RFC 9421
+ * implementation, which is the fleet's only one in TypeScript and is held to
+ * the verifier it targets; a second implementation here would be a second
+ * thing to be wrong.
  */
+
+import { createWriteSigner } from '../../packages/slot-app/src/operator/write-signature.js';
 
 /** The whole exchange's budget for one read. A node that is up answers in milliseconds. */
 const FETCH_TIMEOUT_MS = 10_000;
@@ -142,4 +153,112 @@ export function slopeOf(route: CarriedRoute): bigint {
     return BigInt(route.price.per_kib);
   }
   return 0n;
+}
+
+/**
+ * What a claim this node accepted has advanced to.
+ *
+ * `cumulativeAmount` is the whole point and the thing that is easy to misread:
+ * a claim is CUMULATIVE, so this is everything that channel has ever carried,
+ * not what the last packet paid. The difference between two readings is what
+ * one packet moved.
+ */
+export interface AcceptedClaim {
+  channelId: string;
+  /** `inbound` for money coming to this node. */
+  direction: string;
+  nonce: number;
+  cumulativeAmount: bigint;
+  /** Which book it came out of — the peer semantics's, or the client edge's. */
+  book?: string;
+}
+
+/**
+ * Whether two spellings name the same channel.
+ *
+ * A channel id crosses this topology through several hands and does not arrive
+ * spelled the same way in all of them. The slot app's answer names it bare
+ * (`0x44a5…`); the connector's own claim book names it QUALIFIED BY CHAIN
+ * (`evm:0x44a5…`), because a node settles on more than one and an id is only
+ * unique within one; the token network knows it as `bytes32`.
+ *
+ * All three are the same channel, and the qualifier is the connector's
+ * business rather than something to assert about here. So a comparison takes
+ * the last `:`-separated field, drops the `0x`, and lower-cases — which is
+ * better than one that silently finds nothing, and that is exactly what it
+ * did: money had moved on chain and the claim behind it looked absent.
+ */
+export function sameChannel(one: string, other: string): boolean {
+  const bare = (id: string) =>
+    (id.trim().split(':').pop() ?? '').toLowerCase().replace(/^0x/, '');
+  return bare(one) === bare(other) && bare(one).length > 0;
+}
+
+/** Claims as a string, for a failure message. `cumulativeAmount` is a bigint. */
+export function describeClaims(claims: AcceptedClaim[]): string {
+  return JSON.stringify(
+    claims.map((claim) => ({
+      ...claim,
+      cumulativeAmount: claim.cumulativeAmount.toString(),
+    }))
+  );
+}
+
+/** Every claim this node has accepted, out of both of its books. */
+export async function readAcceptedClaims(
+  baseUrl: string,
+  bearerToken: string
+): Promise<AcceptedClaim[]> {
+  const rows = await read<Record<string, unknown>[]>(
+    baseUrl,
+    bearerToken,
+    '/claims'
+  );
+
+  return rows.map((row) => ({
+    channelId: String(row['channel_id'] ?? ''),
+    direction: String(row['direction'] ?? ''),
+    nonce: Number(row['nonce'] ?? 0),
+    cumulativeAmount: BigInt(String(row['cumulative_amount'] ?? '0')),
+    book: row['book'] === undefined ? undefined : String(row['book']),
+  }));
+}
+
+/**
+ * Redeem the latest claim this node accepted on one channel, ON CHAIN.
+ *
+ * The connector's own verb — `POST /channels/:id/redeem-latest` — so a run
+ * redeems the way a broadcaster does rather than reassembling a balance proof
+ * and calling the token network itself. Redemption does NOT require a closed
+ * channel: the money moves and the channel stays open, which is what makes
+ * "the broadcaster was paid" a thing a run can prove without time travel.
+ *
+ * A signed write, with no body. The signature is bound to the exact bytes
+ * being sent, so an empty body is signed as one.
+ */
+export async function redeemLatestClaim(options: {
+  baseUrl: string;
+  writeKey: string;
+  channelId: string;
+}): Promise<{ status: number; body: string }> {
+  const path = `/channels/${options.channelId}/redeem-latest`;
+  const body = '';
+  const signed = await createWriteSigner(options.writeKey).sign(
+    'POST',
+    path,
+    body
+  );
+
+  const response = await fetch(`${options.baseUrl}${path}`, {
+    method: 'POST',
+    headers: {
+      'content-digest': signed['content-digest'],
+      'signature-input': signed['signature-input'],
+      signature: signed.signature,
+    },
+    body,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  return { status: response.status, body: await response.text() };
 }

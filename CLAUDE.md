@@ -595,22 +595,35 @@ module cannot quietly become a fifth exemption by being new.
 
 ### The deploy bundles
 
-**Two node shapes ship from this repository, and they are siblings, not variants.**
-[`deploy/`](deploy/) runs a **station** node and [`deploy/hub/`](deploy/hub/) runs a **hub** node.
-Both take the fleet's house bundle shape, the same one `relay` and `store` ship: a
-`docker-compose.yml`, a bind-mounted `connector.toml`, a `Caddyfile`, a local overlay, a Watchtower
-overlay, and an `auto-apply.sh` + systemd pair that follows `main` on a box. `deploy/README.md`
-walks a broadcaster from DNS to `docker compose up -d` to OBS; `deploy/hub/README.md` walks a hub
-operator from DNS to `docker compose up -d`, including the step everything else depends on —
-putting the slot app's own public key on the connector's `write_keys` allowlist.
+**THREE bundles ship from this repository, and they are siblings, not variants.**
+[`deploy/`](deploy/) runs a **station** node, [`deploy/hub/`](deploy/hub/) runs a **hub** node, and
+[`deploy/devnet/`](deploy/devnet/) runs **both at once, on a local chain**. The first two take the
+fleet's house bundle shape, the same one `relay` and `store` ship: a `docker-compose.yml`, a
+bind-mounted `connector.toml`, a `Caddyfile`, a local overlay, a Watchtower overlay, and an
+`auto-apply.sh` + systemd pair that follows `main` on a box. `deploy/README.md` walks a broadcaster
+from DNS to `docker compose up -d` to OBS; `deploy/hub/README.md` walks a hub operator from DNS to
+`docker compose up -d`, including the step everything else depends on — putting the slot app's own
+public key on the connector's `write_keys` allowlist.
+
+**The devnet is nobody's box**, which is why its shape differs: no Caddy, no overlays, no systemd,
+one compose file, and every `connector.toml`, every key and the station's stream key **generated
+per run** into `deploy/devnet/run/`, which git ignores. Nothing in `deploy/` or `deploy/hub/` is
+edited or read to make it work — the station bundle's apex is frozen to the `demo` placeholder by
+its own guard and both bundles publish the same connector edge port, so a devnet assembled out of
+their local overlays would be fighting two guards to prove a third thing. The one thing it does not
+write for itself is the connector build: `DEVNET_CONNECTOR_IMAGE` is a required variable with no
+default, and the driver reads the pin of record out of `deploy/docker-compose.yml` and passes it
+in, so there is no third copy to drift. It is driven by `pnpm test:devnet` and by nothing else —
+see [the devnet](#the-devnet) below.
 
 Their **ports invariants are different numbers on purpose**, and the difference is the whole
 distinction between the two nodes:
 
-| Bundle        | Published ports                                                    | Why                                                                       |
-| ------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `deploy/`     | **three** — Caddy's 80 and 443, plus the origin's RTMPS ingest 1935 | stock Caddy does not speak RTMP, so a station fronts its own uplink        |
-| `deploy/hub/` | **two** — Caddy's 80 and 443, and nothing else                      | **a hub carries no vibes of its own**, so it has no uplink to front        |
+| Bundle           | Published ports                                                    | Why                                                                       |
+| ---------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `deploy/`        | **three** — Caddy's 80 and 443, plus the origin's RTMPS ingest 1935 | stock Caddy does not speak RTMP, so a station fronts its own uplink        |
+| `deploy/hub/`    | **two** — Caddy's 80 and 443, and nothing else                      | **a hub carries no vibes of its own**, so it has no uplink to front        |
+| `deploy/devnet/` | **none off-box** — three loopback publishes, and only for the driver | there is no public name and no certificate on a laptop, so nothing is fronted |
 
 **No RTMP port, service or path appears anywhere in the hub bundle**, and none may: a hub is never a
 station. In both bundles the connector's client edge is published on `127.0.0.1` only, and every app
@@ -641,16 +654,25 @@ station being *found* is what the announcement carries. This repo publishes no r
 pulls one.
 
 **Each bundle has its own guard, and they are siblings.**
-[`deploy/bundle.test.ts`](deploy/bundle.test.ts) guards the station's and
-[`deploy/hub/bundle.test.ts`](deploy/hub/bundle.test.ts) guards the hub's. Both read the **real**
-committed files rather than fixtures, check **every file set an operator is told to run** rather
+[`deploy/bundle.test.ts`](deploy/bundle.test.ts) guards the station's,
+[`deploy/hub/bundle.test.ts`](deploy/hub/bundle.test.ts) the hub's, and
+[`deploy/devnet/bundle.test.ts`](deploy/devnet/bundle.test.ts) the devnet's. All three read the
+**real** committed files rather than fixtures, check **every file set a bundle is run with** rather
 than only the base compose file, and keep **every expected value a literal in the test** — so a
 reverted fix fails the suite instead of quietly agreeing with itself. `vitest.config.ts`'s include
-list reaches `deploy/*.test.ts` **and** `deploy/hub/*.test.ts`, so both run in `pnpm test`. The two
-things a hub guard adds over a station's: it fails on **RTMP anywhere at all** — port, service,
-path, or a directive naming the protocol — because a hub carries no vibes of its own and has no
-uplink to front; and it boots the real slot app to check the declared `request` shapes against the
-surface actually served.
+list reaches `deploy/*.test.ts`, `deploy/hub/*.test.ts` and `deploy/devnet/bundle.test.ts`, so all
+three run in `pnpm test` with no Docker daemon; the devnet's is named by FILE rather than by glob
+because the devnet DRIVER lives in that same directory and does need one. The two things a hub
+guard adds over a station's: it fails on **RTMP anywhere at all** — port, service, path, or a
+directive naming the protocol — because a hub carries no vibes of its own and has no uplink to
+front; and it boots the real slot app to check the declared `request` shapes against the surface
+actually served. What the devnet's adds over both: the compose file's generated mounts and the
+driver's own manifest are held **to each other**, because a bind mount with no file behind it is
+created by the daemon as a *directory*; the only binary a run may execute is `docker`, structurally
+(only `compose.ts` may import `node:child_process`), which is what makes "no Foundry, no Rust, no
+submodules" a fact about the driver rather than about its current contents; and the payer is held
+to being a devnet-only development dependency at an exact version, in neither package's manifest
+and named by no file under `packages/`.
 
 **Connector configuration is bundle work, not application code.** `deploy/connector.toml` terminates
 **five routes** — one per rung at that rung's price, plus one for the station's *now* at its own low
@@ -690,11 +712,64 @@ and never in an image. `.dockerignore` excludes them from the **build context** 
 is otherwise one `COPY . .` away from a published image — and `pnpm test:image` proves it by building
 with dummy keys planted and looking inside the result.
 
+### The devnet
+
+[`deploy/devnet/`](deploy/devnet/) is the third bundle and the only place in this repository where
+both node shapes are described together: one compose project holding **a chain, a hub connector with
+its slot app, and a station connector with its origin**. It exists because both apps were finished
+and neither had ever been paid, and because that gap was hiding a defect — establishing a peering
+*opens* a payment channel and does not fund one, so a broadcaster who paid the slot price was peered,
+routed, on the roster, and carrying nothing. `pnpm test:devnet` is the thing that would have caught
+it on the first pull, and now does.
+
+**One command, and no way to run it by hand.** There is no `docker compose up -d` recipe: the chain
+has to be up and the settlement contracts deployed before either connector will boot — both are
+fail-closed on their settlement configuration — and every credential and both `connector.toml` files
+are generated per run. The prerequisite is **Docker and this repository's own toolchain, and nothing
+else**: no account, no faucet, no testnet, no real money, and no Foundry, Rust or submodules. anvil
+runs in a digest-pinned image, and the settlement contracts are **replayed with `viem`** from the
+trimmed `{abi, bytecode}` artifacts in [`deploy/devnet/contracts/`](deploy/devnet/contracts/) — the
+`swap` repo's approach, taken over a `forge script` (which needs a contracts tree and two submodules)
+and over a vendored `anvil --dump-state` snapshot (coupled to the anvil version, and its mock token
+has no `mint`, which a devnet that must fund a viber needs). The addresses are **asserted** against
+the deterministic ones the fleet commits, so a configuration copied from a sibling repo is either
+right here or loudly wrong.
+
+**What a run walks, in order:** the chain and the contracts; every credential and both configurations
+generated; both nodes up and each asserted to describe itself; a broadcaster's vibes going in over
+RTMP, pushed by the ffmpeg inside the origin's own image so no image is introduced to encode with;
+the documented broadcaster order **executed rather than described** — a paid quote, the station
+re-rendered at the granted prefix, a restart — with the purchase attempted *before* that too, so the
+`502 station_not_at_prefix` refusal is exercised and its cost is asserted; the buy, its answer
+compared against what the hub's own routing table actually holds; **the funded channel asserted on
+chain**; a viber's own channel, the station's *now* bought across the hop, and a segment at each of
+two rungs compared **byte for byte** against what the station holds; the fee arithmetic nobody's code
+enforces; and the money — the station's claim advanced by exactly its own price per pull, the
+difference from what the viber paid being exactly the hub's carriage, and the claim **redeemed on
+chain against a still-open channel**, with the token balance asserted to have moved.
+
+**The payer is [`toon-client`](https://github.com/toon-protocol/toon-client)**, pinned to an exact
+release and a **development dependency of the devnet only** — a dependency of neither package, in no
+published image, imported by nothing under `packages/`. Neither app here may hold payment code, which
+is exactly why the payer comes from outside; and the connector's own `send` verb cannot stand in,
+because it originates through a node's operator surface and bypasses the claim gate entirely. The
+invariant is unchanged: **no app in this repo contains payment code, and the devnet is not an app.**
+
+**No credential literal enters this repository, anvil's own included.** The chain's account zero is
+derived from the mnemonic anvil prints on every start; everything else is fresh material per run in
+`deploy/devnet/run/`. The one write a run signs is the broadcaster's own redemption, with the seed
+whose public half is the only line in the station's allowlist — signed by the **slot app's own** RFC
+9421 implementation, which is the fleet's only one in TypeScript, so a run never has a second
+implementation to be wrong.
+
+A failed run prints every node's logs before tearing anything down, and teardown removes containers,
+networks **and volumes**, so a second run starts where the first did.
+
 **CI and the published images.** `.github/workflows/ci.yml` is the gate — `pnpm lint`, `build`,
 `typecheck`, `format:check` and `test` on every PR and every push to main, plus **one image-build
 job per published image** (the origin's is where `pnpm test:image` also runs, because it is the job
-with a Docker daemon and the planted key material) and the fleet's shared no-op merge guard, all
-aggregated into one required `CI OK` check. An image-build job exists because its publish workflow
+with a Docker daemon and the planted key material), **a `devnet` job that runs `pnpm test:devnet`**,
+and the fleet's shared no-op merge guard, all aggregated into one required `CI OK` check. An image-build job exists because its publish workflow
 runs only on push to main: without it a Dockerfile that cannot build would be found after merge,
 with `:release` left pointing at the previous build. **A job added to that workflow must be added to
 `ci-ok`'s `needs:`** — the aggregate is the single required context, and a red non-required check is
@@ -717,12 +792,16 @@ reconciles at boot and shows the operator its roster; `deploy/hub/` deploys all 
 declared request shapes still, the way
 [`deploy/bundle.test.ts`](deploy/bundle.test.ts) holds the station's. **Epic
 [#32](https://github.com/toon-protocol/slop_machine/issues/32) is complete** — all nine of #33–#41
-are merged. Epic [#51](https://github.com/toon-protocol/slop_machine/issues/51) has since made the
-hub's collateral configuration ([#52](https://github.com/toon-protocol/slop_machine/issues/52)) and
+are merged. Epic [#51](https://github.com/toon-protocol/slop_machine/issues/51) then made the
+hub's collateral configuration ([#52](https://github.com/toon-protocol/slop_machine/issues/52)),
 made the buy **fund the channel it opened**
-([#53](https://github.com/toon-protocol/slop_machine/issues/53)), which is what the fulfill had
-always claimed and never done. There is no devnet node. Do not infer other commands from the sibling
-repos.
+([#53](https://github.com/toon-protocol/slop_machine/issues/53)) — which is what the fulfill had
+always claimed and never done — had the slot record that channel
+([#54](https://github.com/toon-protocol/slop_machine/issues/54)), and built **the devnet node**
+(#55–#61). **There is one now**, and it is what proved the rest: `pnpm test:devnet` brings a hub and
+a station up on a local chain and ends with a viber having paid for a broadcaster's vibes across the
+hop and the broadcaster having redeemed the money on chain. Do not infer other commands from the
+sibling repos.
 
 What does exist, all run from the repo root:
 
@@ -734,9 +813,18 @@ pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTM
                  # fresh ports against a temporary directory. Deliberately slow — real encoding
                  # is the point, because ADR 0001 is a claim about bytes. The include list is
                  # packages/*/src/**/*.test.ts, so a new package's suites are picked up with
-                 # no change here; it also covers deploy/*.test.ts and deploy/hub/*.test.ts,
-                 # so each bundle's guard runs beside the files it guards; smol-toml and yaml
-                 # are there to read them
+                 # no change here; it also covers deploy/*.test.ts, deploy/hub/*.test.ts and
+                 # deploy/devnet/bundle.test.ts, so each bundle's guard runs beside the files it
+                 # guards; smol-toml and yaml are there to read them
+pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/devnet/ — a chain,
+                 # a hub and a station — replays the settlement contracts onto anvil, generates
+                 # every credential and both connector.toml files, pushes real vibes in over RTMP,
+                 # and drives the whole documented path: quote, configure, restart, buy, the funded
+                 # channel asserted ON CHAIN, a viber paying for segments at two rungs, the fee
+                 # arithmetic, and the broadcaster redeeming on chain. Needs a Docker daemon and no
+                 # Foundry, Rust or submodules; tears everything down, volumes included, and dumps
+                 # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
+                 # still and runs in `pnpm test` with no daemon at all
 pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key material where
                  # deploy/README.md says to generate the real thing, then builds the build
                  # context and EVERY published image and proves none carries it. Needs a Docker
@@ -744,7 +832,7 @@ pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key 
                  # guard. An image this repo publishes belongs in its PUBLISHED_IMAGES list
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
-pnpm format      # prettier over packages/*/src/**/*.ts and deploy/**/*.ts — both bundles
+pnpm format      # prettier over packages/*/src/**/*.ts and deploy/**/*.ts — all three bundles
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 docker build -f packages/slot-app/Dockerfile -t ghcr.io/toon-protocol/slot-app:latest .
 ```

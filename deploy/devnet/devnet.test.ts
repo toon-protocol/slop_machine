@@ -60,9 +60,14 @@ import {
 } from './self-description.js';
 import {
   basePriceOf,
+  describeClaims,
+  readAcceptedClaims,
   readCarriedPeerings,
   readCarriedRoutes,
+  redeemLatestClaim,
+  sameChannel,
   slopeOf,
+  type AcceptedClaim,
   type CarriedPeering,
   type CarriedRoute,
 } from './operator.js';
@@ -261,6 +266,9 @@ const A_SEQUENCE_THE_STATION_DOES_NOT_HOLD = 999_999;
 /** MPEG-TS packets begin with this byte, every 188 of them. */
 const MPEG_TS_SYNC_BYTE = 0x47;
 
+/** A claim coming TO a node — money it was paid, rather than money it sent. */
+const INBOUND = 'inbound';
+
 // ── The purchase ─────────────────────────────────────────────────────────────
 
 /**
@@ -315,6 +323,24 @@ describe('the devnet', () => {
   let now: PaidPull;
   const segments: BoughtSegment[] = [];
   let missingSegment: PaidPull;
+  let stationClaims: AcceptedClaim[];
+  let stationBalanceBefore: bigint;
+  let stationBalanceAfter: bigint;
+  let redemption: { status: number; body: string };
+  let channelAfterRedemption: Awaited<ReturnType<typeof channelOnChain>>;
+
+  /**
+   * Every paid pull the viber made across the hop, in the order it made them.
+   *
+   * The *now*, both segments, and the miss — the miss included, because it
+   * crossed the hop and was answered like any other, and a connector fulfils
+   * on any complete answer whatever its status.
+   */
+  const everyPull = (): PaidPull[] => [
+    now,
+    ...segments.map((segment) => segment.answer),
+    missingSegment,
+  ];
   /** Set by the first failure, so a red run leaves the logs behind and a green one does not. */
   let failed = false;
 
@@ -510,6 +536,38 @@ describe('the devnet', () => {
       `${quote.prefix}.${FIRST_RUNG}`,
       `${String(A_SEQUENCE_THE_STATION_DOES_NOT_HOLD)}.ts`
     );
+
+    // ── The money ───────────────────────────────────────────────────────────
+    //
+    // What the STATION was paid, read off the broadcaster's own connector.
+    stationClaims = await readAcceptedClaims(
+      STATION_EDGE_URL,
+      credentials.station.bearerToken
+    );
+
+    // And then redeemed, on chain, against the channel the hub funded — which
+    // is what turns "a counter advanced" into "money moved". The station's
+    // balance is read either side of it.
+    stationBalanceBefore = await tokenBalance(
+      CHAIN_RPC_URL,
+      deployment.token,
+      credentials.station.settlementAddress
+    );
+    redemption = await redeemLatestClaim({
+      baseUrl: STATION_EDGE_URL,
+      writeKey: credentials.station.operatorWriteKey,
+      channelId: bought.peering.channel.id,
+    });
+    stationBalanceAfter = await tokenBalance(
+      CHAIN_RPC_URL,
+      deployment.token,
+      credentials.station.settlementAddress
+    );
+    channelAfterRedemption = await channelOnChain({
+      rpcUrl: CHAIN_RPC_URL,
+      tokenNetwork: deployment.tokenNetwork,
+      channelId: bought.peering.channel.id as `0x${string}`,
+    });
   }, 900_000);
 
   afterEach((context) => {
@@ -1400,6 +1458,127 @@ describe('the devnet', () => {
       missingSegment.body[0],
       `a segment the station does not hold came back beginning like an MPEG-TS stream`
     ).not.toBe(MPEG_TS_SYNC_BYTE);
+  });
+
+  // ── The money ──────────────────────────────────────────────────────────────
+
+  it("advances the station's claim by exactly its own price, per pull", () => {
+    // "The broadcaster was paid" has to mean something other than a counter
+    // somewhere. It means this: the claim the STATION holds against the hub's
+    // channel has advanced by exactly what the station charges, once per thing
+    // the viber pulled — including the miss, because a connector fulfils on any
+    // complete answer whatever its status, and a 404 is an answer.
+    //
+    // Which of the station's two claim books the row came out of is not
+    // asserted. The hub covers each forwarded packet as a payer, so the row
+    // arrives in the station's CLIENT-edge book rather than its peer book, and
+    // that is the connector's own business — what a broadcaster is owed does
+    // not depend on which ledger it was journaled to.
+    const inbound = stationClaims.filter(
+      (claim) =>
+        claim.direction === INBOUND &&
+        sameChannel(claim.channelId, bought.peering.channel.id)
+    );
+
+    expect(
+      inbound.length,
+      `the station holds ${String(inbound.length)} inbound claims on the channel the hub funded (${bought.peering.channel.id}); every claim it holds is ${describeClaims(stationClaims)}`
+    ).toBe(1);
+
+    // A claim is CUMULATIVE, so this is everything that channel has carried —
+    // which here is the whole of what the viber pulled and nothing else, since
+    // the broadcaster's own quote and buy terminated at the hub and never
+    // crossed this hop.
+    const received = inbound[0]?.cumulativeAmount ?? 0n;
+    const owed = everyPull().reduce(
+      (total, pull) => total + pull.paid - EXPECTED_PEERING_FEE,
+      0n
+    );
+
+    expect(
+      received,
+      `the station's claim stands at ${String(received)}, and the ${String(everyPull().length)} pulls that crossed the hop are worth ${String(owed)} at its own prices`
+    ).toBe(owed);
+
+    // Stated the other way round, as the sum of the station's OWN published
+    // prices, so the figure is not merely the hub's arithmetic restated.
+    expect(
+      received,
+      `the station's own prices for what the viber pulled do not add up to what it was paid`
+    ).toBe(
+      priceOf('now') -
+        EXPECTED_PEERING_FEE +
+        (priceOf(FIRST_RUNG) - EXPECTED_PEERING_FEE) * 2n +
+        (priceOf(SECOND_RUNG) - EXPECTED_PEERING_FEE)
+    );
+  });
+
+  it('leaves the hub exactly its carriage fee, per packet and no more', () => {
+    // THE FEE ARITHMETIC NOBODY'S CODE CHECKS, checked against money that
+    // actually moved rather than against two configured numbers. A hub is paid
+    // for carrying — never by holding anyone's money — and this is the whole
+    // of what it earned on this station: one flat fee per packet, the same
+    // figure whichever prefix it carried.
+    const paidByTheViber = everyPull().reduce(
+      (total, pull) => total + pull.paid,
+      0n
+    );
+    const received =
+      stationClaims.find(
+        (claim) =>
+          claim.direction === INBOUND &&
+          sameChannel(claim.channelId, bought.peering.channel.id)
+      )?.cumulativeAmount ?? 0n;
+
+    expect(
+      paidByTheViber - received,
+      `the viber paid ${String(paidByTheViber)}, the station was paid ${String(received)}, and the difference is what the hub retained for ${String(everyPull().length)} packets at a fee of ${String(EXPECTED_PEERING_FEE)}`
+    ).toBe(EXPECTED_PEERING_FEE * BigInt(everyPull().length));
+  });
+
+  it('redeems the station on chain, against a channel that stays open', async () => {
+    // A counter advancing is not money moving. This is the redemption — the
+    // connector's own `redeem-latest`, signed by the broadcaster with the seed
+    // that matches the only line in their own node's allowlist, because on a
+    // station the private half does not live on the box at all.
+    expect(
+      redemption.status,
+      `the station's own connector answered ${String(redemption.status)} to a signed redemption: ${redemption.body}`
+    ).toBe(200);
+
+    const received =
+      stationClaims.find(
+        (claim) =>
+          claim.direction === INBOUND &&
+          sameChannel(claim.channelId, bought.peering.channel.id)
+      )?.cumulativeAmount ?? 0n;
+
+    expect(
+      stationBalanceAfter - stationBalanceBefore,
+      `the broadcaster's settlement address went from ${String(stationBalanceBefore)} to ${String(stationBalanceAfter)}, and its claim stood at ${String(received)}. This is the difference between a counter having advanced and the broadcaster having been paid.`
+    ).toBe(received);
+
+    // NO TIME TRAVEL WAS NEEDED. Redemption does not require a closed channel,
+    // so the money moved while the station stayed reachable — which is what a
+    // broadcaster actually wants, and what a run that had to close a channel
+    // to prove this could not have shown.
+    expect(
+      channelAfterRedemption.state,
+      `the channel is in state ${String(channelAfterRedemption.state)} after the redemption, and it is supposed to still be open`
+    ).toBe(CHANNEL_OPEN);
+
+    // And what the hub fronted is still behind it, less what has been drawn
+    // down — the collateral is a commitment, not a payment.
+    const hubSide = await channelParticipant({
+      rpcUrl: CHAIN_RPC_URL,
+      tokenNetwork: deployment.tokenNetwork,
+      channelId: bought.peering.channel.id as `0x${string}`,
+      participant: credentials.hub.settlementAddress,
+    });
+    expect(
+      hubSide.deposit,
+      `the hub's deposit changed when the station redeemed, and a redemption draws against collateral rather than returning it`
+    ).toBe(EXPECTED_PEERING_COLLATERAL);
   });
 });
 
