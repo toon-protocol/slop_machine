@@ -30,6 +30,7 @@ import { resolve } from 'node:path';
 import {
   createPublicClient,
   createWalletClient,
+  getAddress,
   http,
   type Abi,
   type Address,
@@ -140,6 +141,16 @@ export interface SettlementDeployment {
   tokenNetwork: Address;
 }
 
+/**
+ * Wait for one transaction, and return the address it created, CHECKSUMMED.
+ *
+ * A receipt reports an address in lower case; the fleet writes its addresses in
+ * EIP-55 mixed case, which is what every `connector.toml` in every sibling repo
+ * carries, and therefore what a devnet compares itself against and renders into
+ * its own generated configuration. Normalising here means one form reaches
+ * everything downstream, rather than a comparison that turns out to be about
+ * casing.
+ */
 async function waitFor(
   clients: ChainClients,
   hash: Hex,
@@ -151,7 +162,10 @@ async function waitFor(
   if (receipt.status !== 'success') {
     throw new Error(`${what} reverted on the devnet chain (${hash})`);
   }
-  return receipt.contractAddress ?? undefined;
+  return receipt.contractAddress === null ||
+    receipt.contractAddress === undefined
+    ? undefined
+    : getAddress(receipt.contractAddress);
 }
 
 /**
@@ -212,12 +226,14 @@ export async function deploySettlementContracts(
     'createTokenNetwork'
   );
 
-  const tokenNetwork = (await clients.publicClient.readContract({
-    address: registry,
-    abi: TOKEN_NETWORK_REGISTRY.abi,
-    functionName: 'getTokenNetwork',
-    args: [token],
-  })) as Address;
+  const tokenNetwork = getAddress(
+    (await clients.publicClient.readContract({
+      address: registry,
+      abi: TOKEN_NETWORK_REGISTRY.abi,
+      functionName: 'getTokenNetwork',
+      args: [token],
+    })) as Address
+  );
 
   if (BigInt(tokenNetwork) === 0n) {
     throw new Error(
