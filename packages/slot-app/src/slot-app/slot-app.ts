@@ -78,8 +78,9 @@
  *   - **the lapse ticker** (#38), walking the roster on a configured interval
  *     and tearing down everything past its lapse time on the hub's own
  *     initiative, with no request needed to trigger it: every route out
- *     first, then the peering released — which is what brings the collateral
- *     behind a dead station back — and only then the slot off the roster. See
+ *     first, then the peering released — which stops the carriage toward a
+ *     dead station, though not the deposit behind it — and only then the slot
+ *     off the roster. See
  *     `../lapse/lapse.ts` for why that order is the connector's rule rather
  *     than a preference, and why the roster row goes last.
  *

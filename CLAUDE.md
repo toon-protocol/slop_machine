@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, routes, renews, lapses and reconciles
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles
 
 This repository is a pnpm workspace with two packages, one per toon app it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -31,7 +31,8 @@ use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoi
 tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
 to `main`. The slot app is the newer and by far the smaller of the two — see
 [the slot app](#the-slot-app) below for exactly what it does today, which is boot, quote a slot,
-and sell one — peering with the broadcaster's station, routing every address it sells, treating a
+and sell one — peering with the broadcaster's station, **funding the payment channel that peering
+opened**, routing every address it sells, treating a
 second purchase as a renewal of the first, **taking a slot nobody renewed back out on its own
 initiative**, and **making its own connector's routing table agree with its roster at boot** so a
 crash between two writes, or a hand-edit, is never a permanent disagreement.
@@ -302,19 +303,33 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   payment, so a route misconfigured to under-charge cannot sell slots); derive the handle from the
   payer, or read it off the roster where they already hold a slot; **read the station connector's
   own self-description** and derive one route per address it publishes; establish the peering with
-  one signed `POST /peers`; write those routes with one signed `POST /routes/peers` each; **take
+  one signed `POST /peers`; **fund the channel that write opened** with one signed
+  `POST /channels/:id/fund`, before any route points at it; write those routes with one signed
+  `POST /routes/peers` each; **take
   back out** any row beneath that caller's granted prefix the station no longer publishes, with one
   signed `DELETE /routes/peers/:prefix` each; **record the slot durably**; answer. The peering write carries the derived
   handle as the hub's **local label**, the station URL from the body, the hub's own `fee` and
   `max_packet_amount`, and `chain` from `X-TOON-Chain` — a broadcaster chooses none of them. It is
   **retry-safe**: a repeat against an established peering answers `"status": "found"` rather than
-  opening a second channel. **The slot is on disk before the answer goes out**, which is what makes
+  opening a second channel. **The fulfill means peered *and payable***: establishing a peering opens
+  a channel and does not fund one, so the buy makes the deposit too — `TOON_PEERING_COLLATERAL`, the
+  hub's own figure, **after the peering and before any route**, because a route toward an empty
+  channel is an address that is reachable, priced, paid for and answers `T00`. **That write is an
+  increment, so it is made idempotent by reading first**: the app reads what its own side of the
+  channel holds over the bearer-gated `GET /channels` and deposits only the shortfall, so a retry
+  deposits nothing, a renewal is a **top-up** rather than a second deposit, and a retry after a write
+  whose outcome is unknown re-reads rather than re-sends. It is the one write in this repo where
+  repeating it spends real money.
+  [ADR 0003's third amendment](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) is
+  the record. **The slot is on disk before the answer goes out**, which is what makes
   a purchase whose answer arrived too late findable by the retry instead of paid for twice. Its
   refusals are only the ones the quote cannot foresee, and every one is a **paid** answer: `403
   no_paid_termination` and `403 route_under_charges` (the hub's route), `400 no_station_url` (the
   caller's request), `502 station_unreadable` and `502 station_not_at_prefix` (**the caller's own
   node**, named as such), `409 route_owned_by_config` (a row the hub's own config file owns), `503
-  peering_not_established` and `503 routes_not_written` (the hub's own operator surface) and `503
+  peering_not_established`, `503 channel_not_funded` (the peering stands and its channel is empty, so
+  the broadcaster is peered and not yet payable — a retry costs no second channel and no second
+  deposit) and `503 routes_not_written` (the hub's own operator surface) and `503
   slot_not_recorded` (the hub's
   own data directory, after the peering already landed — said out loud rather than left as a bare
   `500`, because what the broadcaster needs to know is that they are peered and that a retry costs
@@ -344,7 +359,9 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 - **Buying again at `/buy` is renewing — there is no second call.** A purchase by a payer who
   already holds a slot walks exactly the same path: the handle is read off the roster rather than
   derived again, so the granted prefix and the handle are unchanged; the peering write finds the
-  established peering (`"status": "found"`) rather than opening a second channel; the routes are
+  established peering (`"status": "found"`) rather than opening a second channel; the funding tops
+  that channel back up to what the hub fronts rather than depositing it again, which is usually
+  nothing at all; the routes are
   upserted by prefix rather than duplicated; and the roster holds **one** slot for that payer,
   never two. **The lapse is extended, not reset**: `lapsesAt = max(now, the lapse already held) +
   TOON_SLOT_PERIOD_SECONDS`. Resetting to `now + period` would take back time the broadcaster had
@@ -406,7 +423,10 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   beneath the granted prefix**, or **forwarding to that slot's own peering label** — because the
   connector's referential rule is keyed on the label while the fence a grant provides is keyed on
   the prefix, and a teardown has to satisfy the first while staying inside the second. Releasing the
-  peering is what **brings the collateral back**. The roster row goes **last**: a slot on the roster
+  peering **stops the carriage and does not bring the collateral back** — the deposit stays in the
+  channel until somebody closes and settles it, and nothing in this app does either; a hub operator
+  reclaims it by hand ([ADR 0003's third
+  amendment](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md)). The roster row goes **last**: a slot on the roster
   is the hub's claim that routes and a peering behind it may still exist, so a teardown that failed
   leaves the slot standing, logs it, and the next sweep tries again — never a peering the hub has
   forgotten it is funding. The **first sweep is one interval after boot, never at boot**: tearing
@@ -432,7 +452,8 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   and therefore in the lapse's own order, because *downtime must not extend anybody's slot*;
   **write back** what a live slot bought and the connector is not carrying — the peering
   re-established first where it is gone, since a route cannot forward to a peering the table does
-  not hold, then every granted address the table is missing, points at the wrong peering, or holds
+  not hold, **and its channel funded on the buy's own terms** before any route points at it, then
+  every granted address the table is missing, points at the wrong peering, or holds
   at the wrong price; and **take back out** every row the roster does not hold, routes before the
   peering, through the same `withdrawForwardedRoutes` and `releasePeering` a lapse uses. It
   **never throws**: a hub whose own connector is still coming up boots anyway, says so, and
@@ -677,7 +698,8 @@ keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compo
 and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
 image. This repo publishes those two app images and no others — never a connector.
 
-**What is still design:** the slot app boots, quotes, sells a slot, peers, routes, renews, lapses,
+**What is still design:** the slot app boots, quotes, sells a slot, peers, **funds the channel that
+peering opened**, routes, renews, lapses,
 reconciles at boot and shows the operator its roster; `deploy/hub/` deploys all of it
 ([#40](https://github.com/toon-protocol/slop_machine/issues/40)); and
 [`deploy/hub/bundle.test.ts`](deploy/hub/bundle.test.ts)
@@ -685,7 +707,12 @@ reconciles at boot and shows the operator its roster; `deploy/hub/` deploys all 
 declared request shapes still, the way
 [`deploy/bundle.test.ts`](deploy/bundle.test.ts) holds the station's. **Epic
 [#32](https://github.com/toon-protocol/slop_machine/issues/32) is complete** — all nine of #33–#41
-are merged. There is no devnet node. Do not infer other commands from the sibling repos.
+are merged. Epic [#51](https://github.com/toon-protocol/slop_machine/issues/51) has since made the
+hub's collateral configuration ([#52](https://github.com/toon-protocol/slop_machine/issues/52)) and
+made the buy **fund the channel it opened**
+([#53](https://github.com/toon-protocol/slop_machine/issues/53)), which is what the fulfill had
+always claimed and never done. There is no devnet node. Do not infer other commands from the sibling
+repos.
 
 What does exist, all run from the repo root:
 
