@@ -57,6 +57,7 @@ interface BoughtBody {
   prefix: string;
   label: string;
   lapsesAt: number;
+  peering: { localLabel: string; channel: { id: string } };
   routes: { prefix: string; price: string }[];
 }
 
@@ -70,6 +71,8 @@ interface RosterBody {
     label: string;
     prefix: string;
     lapsesAt: number;
+    channelId: string | null;
+    collateral: string | null;
   }[];
   timestamp: number;
 }
@@ -85,6 +88,13 @@ const LADDER: readonly FakeStationRung[] = [
 
 /** What the hub retains for carrying one packet. */
 const CARRIAGE = 10;
+
+/**
+ * What the hub fronts into the channel behind each peering — stated here
+ * rather than left to the default, so the roster's own report of it is
+ * checked against a number this file chose.
+ */
+const COLLATERAL = 3_000_000;
 
 /** The apex the committed station bundle ships, before a hub grants a real one. */
 const PLACEHOLDER_APEX = 'g.toon.slopmachine.demo';
@@ -187,6 +197,7 @@ async function hub(
         dataDir,
         hubAddress: HUB_ADDRESS,
         peeringFee: CARRIAGE,
+        peeringCollateral: COLLATERAL,
         lapseSweepSeconds: NO_SWEEP_IN_TIME,
         operatorUrl: operator.url,
         // This suite is a local topology: the fake station connector serves its
@@ -414,7 +425,17 @@ describe('a slot that lapsed while the process was down', () => {
     ]);
     const answered = await roster(second);
     expect(answered.slots).toEqual([
-      { payer, label: slot.label, prefix: granted, lapsesAt: slot.lapsesAt },
+      {
+        payer,
+        label: slot.label,
+        prefix: granted,
+        lapsesAt: slot.lapsesAt,
+        // Untouched by the reconciliation, which writes no roster row: what
+        // the hub funded for this broadcaster is what it funded, and a boot
+        // that rewrote it would be a boot inventing a commitment.
+        channelId: slot.peering.channel.id,
+        collateral: String(COLLATERAL),
+      },
     ]);
   });
 });
@@ -741,6 +762,11 @@ describe('GET /roster', () => {
           label: slot.label,
           prefix: granted,
           lapsesAt: slot.lapsesAt,
+          // What this hub has committed for that broadcaster, read rather
+          // than computed. The channel is the one the purchase named, and
+          // the figure is the operator's own.
+          channelId: slot.peering.channel.id,
+          collateral: String(COLLATERAL),
         },
       ],
       timestamp: expect.any(Number),
@@ -759,7 +785,14 @@ describe('GET /roster', () => {
 
     const second = await one.boot();
     expect((await roster(second)).slots).toEqual([
-      { payer, label: slot.label, prefix: granted, lapsesAt: slot.lapsesAt },
+      {
+        payer,
+        label: slot.label,
+        prefix: granted,
+        lapsesAt: slot.lapsesAt,
+        channelId: slot.peering.channel.id,
+        collateral: String(COLLATERAL),
+      },
     ]);
   });
 

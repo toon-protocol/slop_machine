@@ -4,9 +4,21 @@
  * A **slot** is the routing-table entry a broadcaster bought. It is not a
  * **peering** — the peering is what the hub's operator key creates in
  * response to the purchase, and it is named for that wherever it appears
- * (ADR 0003). Nothing in this module mentions a peering, a peer, a channel or
- * a route: the roster records what was *bought*, and the connector's own
- * tables record what was *done about it*.
+ * (ADR 0003). Nothing in this module mentions a peering, a peer or a route:
+ * the roster records what was *bought*, and the connector's own tables record
+ * what was *done about it*.
+ *
+ * **The one exception is `channelId`, and it is an exception on purpose.**
+ * The hub's own money is in that channel — the collateral the buy deposits
+ * before it writes a route (ADR 0003's third amendment) — and a slot is the
+ * only durable record this hub has of which channel it funded for whom, and
+ * of how much. Without it nothing later can tell a channel this hub funded
+ * from one it did not, which is what a reclaim would have to act on and what a
+ * hub operator reading their own roster wants to know: the commitment
+ * `TOON_SLOT_CAP` bounds is a number they can read rather than one they have
+ * to compute. `packages/slot-app/src/slot-app/vocabulary.test.ts` names that
+ * one identifier and no other, so a second one has to be argued for rather
+ * than acquired.
  *
  * Five questions and two answers, which is the whole surface:
  *
@@ -32,8 +44,9 @@
  * and no test knows the file's name, its shape or that there is a file at
  * all, and every reader goes on asking the four questions above.
  *
- * **A slot also records the addresses it was granted at, and where they point
- * — and that is not the connector's table restated here.** The connector's
+ * **A slot also records the addresses it was granted at, where they point, and
+ * the channel the hub funded behind them — and that is not the connector's
+ * table restated here.** The connector's
  * table is what the hub is carrying *now*; this is what the broadcaster
  * *bought*, which is the only thing that can say whether what is being carried
  * is right. A hub that came back to find a row missing and had nothing to
@@ -117,6 +130,27 @@ export interface Slot {
    * broadcaster until the slot lapses.
    */
   routes?: GrantedRoute[];
+  /**
+   * The payment channel the hub funded for this broadcaster.
+   *
+   * Recorded because the hub's own capital is in it and nothing else in this
+   * app remembers which one. A lapse releases the peering and **leaves the
+   * deposit where it is** (ADR 0003's third amendment), so the only record of
+   * what a hub operator would have to close and settle to get that capital
+   * back is this one. Absent on a slot recorded before the buy funded
+   * anything; such a slot is left as it is until its next renewal.
+   */
+  channelId?: string;
+  /**
+   * What the hub's own side of that channel held when this slot was last
+   * written, in the settlement token's smallest unit.
+   *
+   * A decimal string for the same reason a granted price is: an amount is a
+   * `u128` of base units and a hub that round-tripped one through a double
+   * would report a commitment it does not have. Absent on the same terms as
+   * {@link Slot.channelId}, and written in the same act.
+   */
+  collateral?: string;
 }
 
 /** What a reader — and, from the buy onward, a writer — may ask the roster. */
@@ -322,8 +356,16 @@ function readSlots(path: string): Slot[] {
   }
 
   return record.slots.map((slot: unknown, index: number) => {
-    const { payer, label, lapsesAt, stationUrl, chain, routes } =
-      slot as Record<string, unknown>;
+    const {
+      payer,
+      label,
+      lapsesAt,
+      stationUrl,
+      chain,
+      routes,
+      channelId,
+      collateral,
+    } = slot as Record<string, unknown>;
     if (
       typeof payer !== 'string' ||
       typeof label !== 'string' ||
@@ -351,6 +393,16 @@ function readSlots(path: string): Slot[] {
       ...(routes === undefined
         ? {}
         : { routes: grantedRoutes(path, index, routes) }),
+      // And the two that say what the hub funded, on exactly the same terms:
+      // optional, because a slot recorded before the buy funded anything is
+      // still a slot somebody paid for, and validated where present, because
+      // half a record would be acted on rather than skipped.
+      ...(channelId === undefined
+        ? {}
+        : { channelId: text(path, index, 'channelId', channelId) }),
+      ...(collateral === undefined
+        ? {}
+        : { collateral: text(path, index, 'collateral', collateral) }),
     };
   });
 }

@@ -61,7 +61,9 @@ of this address to state one — and it answers `200 application/json`, `Cache-C
       "payer": "evm:0x…",
       "label": "9f2c1a4b7e05",
       "prefix": "g.toon.slopmachine.9f2c1a4b7e05",
-      "lapsesAt": 1764547200000
+      "lapsesAt": 1764547200000,
+      "channelId": "0x…",
+      "collateral": "50000000"
     }
   ],
   "timestamp": 1761955200000
@@ -72,6 +74,14 @@ Soonest to lapse first, because the row an operator came to look at is usually t
 It is a view of the **roster** — what the hub sold — and not of the connector's routing table, which
 is what the hub is carrying; the two are made to agree at boot, and where they disagree in between
 it is this record that says which of them is right.
+
+**`channelId` and `collateral` are the hub's own money**, read rather than computed: which payment
+channel this hub funded for that broadcaster and what was in it when the slot was last written, as a
+decimal string of base units. Summed across the rows, that is the commitment `TOON_SLOT_CAP` bounds
+— which an operator would otherwise get by multiplying two configured numbers together and hoping.
+It is also the identifier they would need to **close and settle** a channel behind a station that
+went away, since a lapse does not do it for them. Both are `null` on a slot recorded before the buy
+funded anything; such a slot is left as it is until its next renewal, which records them.
 
 ### `GET /quote`
 
