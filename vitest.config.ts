@@ -20,15 +20,22 @@ export default defineConfig({
     },
     // Every workspace package's own suites, plus the deploy guards — the
     // suites that read the real deploy artifacts (they are not app source, so
-    // each lives next to the files it guards, exactly as relay's does). TWO
-    // bundles ship from here, a station node's and a hub node's, so the
-    // pattern reaches one directory down as well: a guard that ran only
+    // each lives next to the files it guards, exactly as relay's does). THREE
+    // bundles ship from here, a station node's, a hub node's and the devnet's,
+    // so the pattern reaches one directory down as well: a guard that ran only
     // against `deploy/` would leave the hub bundle's ports and routes
     // unasserted (slop_machine#41).
+    //
+    // The devnet is named by FILE and not by glob, unlike its two siblings:
+    // `deploy/devnet/` holds the bundle's guard, which reads committed files
+    // and needs nothing, AND the devnet driver, which brings a chain and four
+    // containers up. Only the first belongs in a run that must work with no
+    // Docker daemon (slop_machine#55, #56).
     include: [
       'packages/*/src/**/*.test.ts',
       'deploy/*.test.ts',
       'deploy/hub/*.test.ts',
+      'deploy/devnet/bundle.test.ts',
     ],
     // deploy/image-secrets.test.ts is the one exception: it needs a Docker
     // daemon and builds real images, so it runs from vitest.image.config.ts
