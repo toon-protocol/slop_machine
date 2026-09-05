@@ -539,9 +539,9 @@ describe('the devnet', () => {
     // can discover — `GET /ilp` is how a stranger who has only heard of this
     // hub finds where to buy. One advertised but not terminated is a paid 404.
     expect(
-      hub.routes.map((route) => ({ prefix: route.prefix, price: route.price })),
+      pricedAddresses(hub),
       `the hub publishes ${JSON.stringify(hub.routes.map((r) => r.prefix))} — the quote and the buy, each beneath its own prefix and neither reachable at the other's price`
-    ).toEqual(EXPECTED_HUB_ROUTES);
+    ).toEqual(byPrefix(EXPECTED_HUB_ROUTES));
 
     expect(hub.ilpAddresses.slice().sort()).toEqual(
       EXPECTED_HUB_ROUTES.map((route) => route.prefix).sort()
@@ -555,16 +555,15 @@ describe('the devnet', () => {
     // walk rather than describe, and what makes the refusal at the buy
     // something it can exercise.
     expect(
-      station.routes.map((route) => ({
-        prefix: route.prefix,
-        price: route.price,
-      })),
+      pricedAddresses(station),
       `the station publishes ${JSON.stringify(station.routes.map((r) => r.prefix))}`
     ).toEqual(
-      EXPECTED_STATION_ROUTES.map((rung) => ({
-        prefix: `${PLACEHOLDER_STATION_APEX}.${rung.rung}`,
-        price: rung.price,
-      }))
+      byPrefix(
+        EXPECTED_STATION_ROUTES.map((rung) => ({
+          prefix: `${PLACEHOLDER_STATION_APEX}.${rung.rung}`,
+          price: rung.price,
+        }))
+      )
     );
 
     // Flat per segment, every one of them: a price is a schedule over the
@@ -584,3 +583,26 @@ describe('the devnet', () => {
     );
   });
 });
+
+/**
+ * The priced addresses a node publishes, BY PREFIX.
+ *
+ * A connector serialises its routes in its own order — sorted by prefix, not
+ * in the order the configuration lists them — and that is its business rather
+ * than a fact worth freezing here. What a run is entitled to assert is the SET
+ * of addresses and what each costs, which is what the hub reads to price its
+ * own routes and what a viber pays.
+ */
+function byPrefix(
+  routes: readonly { prefix: string; price: bigint }[]
+): { prefix: string; price: bigint }[] {
+  return [...routes]
+    .map((route) => ({ prefix: route.prefix, price: route.price }))
+    .sort((a, b) => a.prefix.localeCompare(b.prefix));
+}
+
+function pricedAddresses(
+  node: SelfDescription
+): { prefix: string; price: bigint }[] {
+  return byPrefix(node.routes);
+}

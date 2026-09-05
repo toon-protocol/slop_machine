@@ -60,7 +60,11 @@ export interface SelfDescription {
   edgeIdentity: { keyId: string; publicKey: string };
   /** What it settles in. A devnet node has exactly one entry, on the local chain. */
   settlements: PublishedSettlement[];
-  /** Every priced address it terminates, in the order it published them. */
+  /**
+   * Every priced address it terminates, as the node serialised them — which
+   * is by prefix rather than in configuration order, and is the node's own
+   * business. A reader compares the SET and the prices.
+   */
   routes: PublishedRoute[];
 }
 
