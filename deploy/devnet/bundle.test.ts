@@ -367,6 +367,17 @@ const A_SPAWNED_BINARY =
   /(?:execFile|execFileSync|spawn|spawnSync|execSync|exec)\(\s*'([^']+)'/g;
 
 /**
+ * And the one module that may reach for a child process at all.
+ *
+ * The literal check above only sees a call that names its binary inline, which
+ * is exactly what a module stops doing once it has a constant. So the fence
+ * that actually holds is structural: every process a run starts goes through
+ * one file, and that file starts `docker`.
+ */
+const SPAWNS_PROCESSES = 'node:child_process';
+const THE_ONE_MODULE_THAT_SPAWNS = `${DEVNET_DIR}/compose.ts`;
+
+/**
  * The guard itself, which asks git what this bundle commits and is therefore
  * the one file here that spawns something else. Reading the repository is not
  * the devnet running, and a guard that could not read the repository could not
@@ -1059,6 +1070,15 @@ describe('devnet bundle', () => {
           `${file}: spawns "${String(binary)}". The only binary a devnet run may execute is ${THE_ONLY_BINARY} — a forge, an anvil or a cast on the host is a fourth thing to install and a second way for two machines to disagree.`
         ).toBe(THE_ONLY_BINARY);
       }
+
+      // The structural half, and the one that keeps holding after a module
+      // moves its binary into a constant: everything a run starts goes through
+      // one file, and that file starts docker.
+      if (file === THE_ONE_MODULE_THAT_SPAWNS) continue;
+      expect(
+        readFile(file).includes(SPAWNS_PROCESSES),
+        `${file}: imports ${SPAWNS_PROCESSES}. Every process a devnet run starts goes through ${THE_ONE_MODULE_THAT_SPAWNS}, which starts ${THE_ONLY_BINARY} and nothing else — that is what makes "no Foundry, no Rust, no submodules" a fact about the driver rather than about its current contents.`
+      ).toBe(false);
     }
   });
 

@@ -84,6 +84,8 @@ import {
   segmentDigest,
   startBroadcasting,
   stationNow,
+  stopBroadcasting,
+  uplinkLogs,
   waitForVibes,
   type StationNow,
 } from './vibes.js';
@@ -297,6 +299,9 @@ describe('the devnet', () => {
   let hub: SelfDescription;
   let stationAtPlaceholder: SelfDescription;
   let station: SelfDescription;
+  /** The station's *now* the moment it first held a segment at every rung. */
+  let firstVibes: StationNow;
+  /** And where its live edge is by the time a viber goes looking. */
   let liveEdge: StationNow;
   let broadcasterKey: PayerKey;
   let broadcaster: Payer;
@@ -393,7 +398,7 @@ describe('the devnet', () => {
     // no ingest publishes a ladder it is holding nothing at, and a slot bought
     // for one would be a slot for an address that answers 404.
     await startBroadcasting(credentials.station.streamKey);
-    liveEdge = await waitForVibes({
+    firstVibes = await waitForVibes({
       rungs: LADDER,
       timeoutMs: FIRST_SEGMENT_TIMEOUT_MS,
     });
@@ -522,7 +527,15 @@ describe('the devnet', () => {
       console.log(
         `[devnet] the run failed; every node's logs follow\n${await logs()}`
       );
+      // The uplink is not part of the compose project, so its log is not in
+      // that one — and "the station held no vibes" is usually a question about
+      // exactly this container.
+      console.log(
+        `[devnet] the broadcaster's uplink said:\n${await uplinkLogs()}`
+      );
     }
+    // It is not part of the project either, so `down` does not reap it.
+    await stopBroadcasting();
     // Everything, volumes included, so a second run starts from the same place
     // as the first.
     await down();
@@ -903,17 +916,17 @@ describe('the devnet', () => {
     // station origin's own image — so the devnet introduces no image to encode
     // with, and the origin's own encoders are what cut what a viber will buy.
     expect(
-      liveEdge.live,
-      `the station's own *now* does not report an open publish, so nothing is being broadcast: ${JSON.stringify(liveEdge)}`
+      firstVibes.live,
+      `the station's own *now* does not report an open publish, so nothing is being broadcast: ${JSON.stringify(firstVibes)}`
     ).toBe(true);
 
     expect(
-      liveEdge.segmentSeconds,
-      `the station cuts ${String(liveEdge.segmentSeconds)}-second segments, and the devnet configures ${String(EXPECTED_SEGMENT_SECONDS)}`
+      firstVibes.segmentSeconds,
+      `the station cuts ${String(firstVibes.segmentSeconds)}-second segments, and the devnet configures ${String(EXPECTED_SEGMENT_SECONDS)}`
     ).toBe(EXPECTED_SEGMENT_SECONDS);
 
     for (const rung of LADDER) {
-      const held = liveEdge.rungs.find((entry) => entry.rung === rung);
+      const held = firstVibes.rungs.find((entry) => entry.rung === rung);
       expect(
         held?.sequence,
         `the station holds no segment at "${rung}" — a slot bought for a ladder holding nothing is a slot for an address that answers 404`

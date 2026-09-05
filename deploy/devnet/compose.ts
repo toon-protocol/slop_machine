@@ -168,24 +168,14 @@ export async function up(services: string[]): Promise<void> {
 }
 
 /**
- * Run a command inside one SERVICE's container.
+ * The one running container of one service, by the labels the daemon writes.
  *
- * Deliberately not `docker compose exec <service>`. A run also starts a
- * ONE-OFF container in this project — the broadcaster's uplink, which is the
- * origin's own image with ffmpeg as its entrypoint — and a service name then
- * names two containers. Asking compose to pick left the wrong one, and the
- * symptom was `connection refused` on a port that was demonstrably listening
- * in the other.
- *
- * So the container is found by the labels the daemon itself writes, including
- * the one that says which kind it is, and the command runs against exactly
- * that id.
+ * `docker compose exec <service>` would do for this, and does not: it resolves
+ * a service name to a container, and the answer has to stay unambiguous while
+ * a run also has containers of its own alongside the project's.
  */
-export async function execIn(
-  service: string,
-  command: string[]
-): Promise<string> {
-  const { stdout: found } = await docker(
+export async function containerIdOf(service: string): Promise<string> {
+  const { stdout } = await docker(
     [
       'ps',
       '--filter',
@@ -200,17 +190,96 @@ export async function execIn(
     { timeoutMs: 30_000 }
   );
 
-  const ids = found.split('\n').filter((id) => id.length > 0);
+  const ids = stdout.split('\n').filter((id) => id.length > 0);
   if (ids.length !== 1) {
     throw new DevnetComposeError(
-      `the devnet holds ${String(ids.length)} running containers for the service "${service}", and a command has to run in exactly one of them. A one-off container — the broadcaster's uplink — shares a service name with the origin, which is why this looks the container up by label rather than asking compose to choose.`
+      `the devnet holds ${String(ids.length)} running containers for the service "${service}", and a command has to run in exactly one of them.`
     );
   }
+  return String(ids[0]);
+}
 
-  const { stdout } = await docker(['exec', String(ids[0]), ...command], {
-    timeoutMs: 60_000,
-  });
+/** Run a command inside one service's container. */
+export async function execIn(
+  service: string,
+  command: string[]
+): Promise<string> {
+  const { stdout } = await docker(
+    ['exec', await containerIdOf(service), ...command],
+    { timeoutMs: 60_000 }
+  );
   return stdout;
+}
+
+/** One fact about a container, in the daemon's own template language. */
+export async function inspect(
+  container: string,
+  format: string
+): Promise<string> {
+  const { stdout } = await docker(['inspect', '--format', format, container], {
+    timeoutMs: 30_000,
+  });
+  return stdout.trim();
+}
+
+/**
+ * Start a container of this run's OWN — beside the compose project rather than
+ * inside it.
+ *
+ * The broadcaster's uplink is the one thing a run adds to the topology, and it
+ * belongs to no service. It was a `docker compose run` of the origin's service
+ * once, and that made a service name resolve to two containers: compose then
+ * reconciled the project back to one container per service and RESTARTED the
+ * origin underneath a live broadcast, which showed up as a station that had
+ * gone off the air for no reason anything in the run had done.
+ *
+ * So it is an ordinary container, on the project's own network, from the
+ * origin's own image — which is still what makes "the devnet introduces no
+ * image to encode with" true.
+ */
+export async function runBeside(options: {
+  name: string;
+  image: string;
+  network: string;
+  command: string[];
+}): Promise<void> {
+  await docker(
+    [
+      'run',
+      '--detach',
+      '--name',
+      options.name,
+      '--network',
+      options.network,
+      options.image,
+      ...options.command,
+    ],
+    { timeoutMs: 120_000 }
+  );
+}
+
+/** What a container of this run's own has said, for a failure that needs it. */
+export async function logsOf(container: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await docker(['logs', container], {
+      timeoutMs: 60_000,
+    });
+    return `${stdout}${stderr}`;
+  } catch (cause) {
+    return `the logs of ${container} could not be collected: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`;
+  }
+}
+
+/** Stop and remove a container of this run's own. Never throws: teardown is not a test. */
+export async function removeContainer(container: string): Promise<void> {
+  try {
+    await docker(['rm', '--force', container], { timeoutMs: 60_000 });
+  } catch {
+    // Already gone, or never started. Either way there is nothing to remove
+    // and nothing a failure here would tell anybody.
+  }
 }
 
 /**
