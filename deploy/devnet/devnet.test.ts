@@ -246,6 +246,8 @@ const EXPECTED_SETTLEMENT_CHAIN = `evm:${String(EXPECTED_CHAIN_ID)}`;
 describe('the devnet', () => {
   let deployment: SettlementDeployment;
   let credentials: DevnetCredentials;
+  /** What each node's settlement key held once funded, before either spent any of it. */
+  const funded: Record<string, { gas: bigint; token: bigint }> = {};
   let chain: ChainSettings;
   let hub: SelfDescription;
   let stationAtPlaceholder: SelfDescription;
@@ -287,10 +289,11 @@ describe('the devnet', () => {
     // Fund what a run generated. Nothing here has an account, a faucet or any
     // real money behind it: anvil funded account zero, and account zero funds
     // these.
-    for (const settlementAddress of [
-      credentials.hub.settlementAddress,
-      credentials.station.settlementAddress,
-    ]) {
+    const clients = await chainClients(CHAIN_RPC_URL);
+    for (const [node, settlementAddress] of [
+      ['hub', credentials.hub.settlementAddress],
+      ['station', credentials.station.settlementAddress],
+    ] as const) {
       await fundGas(CHAIN_RPC_URL, settlementAddress, GAS_PER_NODE);
       await mintToken(
         CHAIN_RPC_URL,
@@ -298,6 +301,22 @@ describe('the devnet', () => {
         settlementAddress,
         TOKEN_PER_NODE
       );
+      // Read back HERE, and remembered. Both nodes go on to SPEND from these
+      // keys — the hub's gas on opening a channel and its tokens on the
+      // collateral it fronts, the station's on redeeming what it was paid — so
+      // a balance read at the end of a run is a fact about that spending
+      // rather than about the funding. What "funded" claims is that the chain
+      // received it, which is what these two readings are.
+      funded[node] = {
+        gas: await clients.publicClient.getBalance({
+          address: settlementAddress,
+        }),
+        token: await tokenBalance(
+          CHAIN_RPC_URL,
+          deployment.token,
+          settlementAddress
+        ),
+      };
     }
 
     // Both configurations, rendered from the committed templates: the chain
@@ -566,24 +585,21 @@ describe('the devnet', () => {
     ).toBe(credentials.hub.operatorKeyid);
   });
 
-  it('funds both settlement keys with gas and the token they will front', async () => {
-    // A hub fronts collateral toward every broadcaster it admits, and a
-    // station has to be able to redeem what it was paid. Neither key existed
-    // before this run, so neither had anything behind it.
-    const clients = await chainClients(CHAIN_RPC_URL);
-
-    for (const [node, settlementAddress] of [
-      ['hub', credentials.hub.settlementAddress],
-      ['station', credentials.station.settlementAddress],
-    ] as const) {
+  it('funds both settlement keys with gas and the token they will front', () => {
+    // A hub fronts collateral toward every broadcaster it admits, and a station
+    // has to be able to redeem what it was paid. Neither key existed before
+    // this run, so neither had anything behind it — and both balances are read
+    // off the chain the moment they are funded, because both nodes go on to
+    // spend from them and a reading taken later says nothing about the funding.
+    for (const node of ['hub', 'station'] as const) {
       expect(
-        await clients.publicClient.getBalance({ address: settlementAddress }),
-        `the ${node}'s settlement key ${settlementAddress} holds no gas, so it can open no channel and redeem nothing`
+        funded[node]?.gas,
+        `the ${node}'s settlement key received no gas, so it can open no channel and redeem nothing`
       ).toBe(GAS_PER_NODE);
 
       expect(
-        await tokenBalance(CHAIN_RPC_URL, deployment.token, settlementAddress),
-        `the ${node}'s settlement key holds none of the token it settles in`
+        funded[node]?.token,
+        `the ${node}'s settlement key received none of the token it settles in`
       ).toBe(TOKEN_PER_NODE);
     }
   });
