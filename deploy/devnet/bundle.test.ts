@@ -256,6 +256,49 @@ const EXPECTED_EMPTY_INGEST_TLS = [
   'TOON_INGEST_TLS_KEY',
 ];
 
+// ── The settlement contracts ─────────────────────────────────────────────────
+
+/**
+ * The trimmed artifacts the chain replay deploys from, and the whole reason a
+ * run needs NO FOUNDRY, NO RUST AND NO SUBMODULES on the machine: a
+ * `forge script` in a container would need the contracts tree and two
+ * submodules, and a vendored `anvil --dump-state` snapshot would be coupled to
+ * the anvil version and would carry a mock token with no `mint` — which a
+ * devnet that has to fund a viber needs.
+ */
+const CONTRACTS_DIR = `${DEVNET_DIR}/contracts`;
+const EXPECTED_ARTIFACTS = ['MockERC20', 'TokenNetworkRegistry'];
+
+/**
+ * `{ abi, bytecode }` and nothing else. This is what makes the key-material
+ * exemption below sound rather than convenient: an artifact of exactly these
+ * two keys, with a bytecode that is one `0x` hex run and an abi that is a
+ * list, has nowhere in it for a credential to hide.
+ */
+const ARTIFACT_KEYS = ['abi', 'bytecode'];
+const COMPILED_BYTECODE = /^0x[0-9a-f]+$/i;
+
+/**
+ * The one binary a devnet run ever spawns.
+ *
+ * Docker and this repository's own toolchain are the whole prerequisite, which
+ * is exactly why the contracts are replayed with viem. A `forge`, an `anvil`
+ * or a `cast` on the host would be a fourth thing to install and a second way
+ * for two machines to disagree — anvil runs in the pinned image and nowhere
+ * else.
+ */
+const THE_ONLY_BINARY = 'docker';
+const A_SPAWNED_BINARY =
+  /(?:execFile|execFileSync|spawn|spawnSync|execSync|exec)\(\s*'([^']+)'/g;
+
+/**
+ * The guard itself, which asks git what this bundle commits and is therefore
+ * the one file here that spawns something else. Reading the repository is not
+ * the devnet running, and a guard that could not read the repository could not
+ * guard it.
+ */
+const THE_GUARD = `${DEVNET_DIR}/bundle.test.ts`;
+
 /**
  * A run of 64 hex characters: what `openssl rand -hex 32` writes, and the
  * shape of every credential this devnet generates. None of them may ever be
@@ -295,7 +338,7 @@ const EXPECTED_RESTART_POLICY = 'no';
 interface ComposeService {
   image?: string;
   build?: { context?: string; dockerfile?: string };
-  command?: string;
+  command?: string | string[];
   ports?: string[];
   expose?: (string | number)[];
   environment?: Record<string, string>;
@@ -391,11 +434,25 @@ function environmentOf(
   );
 }
 
+/**
+ * A service's command as one string, whichever form it is written in.
+ *
+ * The chain's is a LIST OF ONE STRING and has to be: the foundry image's
+ * entrypoint is `/bin/sh -c`, so a plain string — which compose splits on
+ * whitespace — would arrive as `sh -c anvil --host … `, where everything after
+ * the first word becomes `$0`, `$1`, … and is silently dropped.
+ */
+function commandOf(service: ComposeService | undefined): string {
+  const command = service?.command;
+  if (command === undefined) return '';
+  return Array.isArray(command) ? command.join(' ') : command;
+}
+
 /** Everything one service DOES, as one string: its command, ports, mounts and environment. */
 function whatServiceDoes(service: ComposeService): string {
   return JSON.stringify({
     image: service.image,
-    command: service.command,
+    command: commandOf(service),
     ports: service.ports,
     expose: service.expose,
     environment: service.environment,
@@ -642,7 +699,20 @@ describe('devnet bundle', () => {
   });
 
   it('runs the chain on a known id, with funded accounts and no block time', () => {
-    const command = servicesOf(COMPOSE_PATH)[CHAIN_SERVICE]?.command ?? '';
+    const declared = servicesOf(COMPOSE_PATH)[CHAIN_SERVICE]?.command;
+    const command = commandOf(servicesOf(COMPOSE_PATH)[CHAIN_SERVICE]);
+
+    // A LIST OF ONE STRING, and it has to be. The foundry image's entrypoint is
+    // `/bin/sh -c`, so a plain string — which compose splits on whitespace —
+    // arrives as `sh -c anvil --host 0.0.0.0 …`, where everything after `anvil`
+    // becomes `$0`, `$1`, … and is SILENTLY DROPPED. anvil would then come up
+    // bound to loopback inside the container, reachable by nothing, with none
+    // of the flags below in effect — and the failure would look like a
+    // networking problem rather than like a quoting one.
+    expect(
+      Array.isArray(declared) ? declared.length : declared,
+      `${COMPOSE_PATH} ${CHAIN_SERVICE}: the command must be a list of ONE string. This image's entrypoint is \`/bin/sh -c\`, so a plain string is split and every flag after the first word is dropped.`
+    ).toBe(1);
 
     // The id and the account count are what make the settlement contracts land
     // at the deterministic addresses the rest of the fleet commits — so a
@@ -825,6 +895,15 @@ describe('devnet bundle', () => {
     // stripped here by that literal rather than by a pattern, so a SECOND
     // 64-hex run cannot arrive disguised as a digest.
     for (const file of committedDevnetFiles()) {
+      // The trimmed artifacts are compiled bytecode — hex from end to end, and
+      // by definition full of 64-hex runs. They are skipped BECAUSE the check
+      // above proves what they are: an object of exactly `{ abi, bytecode }`,
+      // whose bytecode is one hex run, has nowhere in it for a credential to
+      // hide. Skipping them without that check would be a hole.
+      if (file.startsWith(`${CONTRACTS_DIR}/`) && file.endsWith('.json')) {
+        continue;
+      }
+
       const withoutTheDigest = readFile(file)
         .split(EXPECTED_CHAIN_IMAGE)
         .join('');
@@ -833,6 +912,62 @@ describe('devnet bundle', () => {
         found,
         `${file}: contains a 64-hex run ("${String(found?.[0]).slice(0, 8)}…") — that is the shape of every credential a devnet run generates, and none of them is committable. They are generated into ./run/, which git ignores.`
       ).toBeNull();
+    }
+  });
+
+  // ── The settlement contracts ───────────────────────────────────────────────
+
+  it('vendors the settlement contracts as trimmed artifacts, and nothing else', () => {
+    // `{ abi, bytecode }` only — the `metadata`, `ast` and `deployedBytecode`
+    // sections of a forge artifact are dropped. The trimming is what lets the
+    // key-material check below skip these files honestly: an object of exactly
+    // these two keys has nowhere in it for a credential to hide.
+    const vendored = committedDevnetFiles()
+      .filter((file) => file.startsWith(`${CONTRACTS_DIR}/`))
+      .filter((file) => file.endsWith('.json'));
+
+    expect(
+      vendored
+        .map((file) => file.split('/').pop()?.replace('.json', ''))
+        .sort(),
+      `${CONTRACTS_DIR}: expected the artifacts ${JSON.stringify(EXPECTED_ARTIFACTS)} — the mock token the devnet settles in, and the registry every connector resolves its token network through`
+    ).toEqual([...EXPECTED_ARTIFACTS].sort());
+
+    for (const file of vendored) {
+      const artifact = JSON.parse(readFile(file)) as Record<string, unknown>;
+
+      expect(
+        Object.keys(artifact).sort(),
+        `${file}: carries ${JSON.stringify(Object.keys(artifact))}. A trimmed artifact is exactly ${JSON.stringify(ARTIFACT_KEYS)}, and everything else a forge build writes is dropped.`
+      ).toEqual([...ARTIFACT_KEYS].sort());
+
+      expect(
+        Array.isArray(artifact['abi']),
+        `${file}: its abi is not a list`
+      ).toBe(true);
+      expect(
+        String(artifact['bytecode']),
+        `${file}: its bytecode is not one hex run — which is what makes this file's exemption from the key-material check safe`
+      ).toMatch(COMPILED_BYTECODE);
+    }
+  });
+
+  it('spawns nothing but Docker, so a run needs no Foundry, Rust or submodules', () => {
+    // The prerequisite for a devnet run is Docker and this repository's own
+    // toolchain, and that is a claim about what the driver EXECUTES. anvil runs
+    // in the pinned image; the contracts are replayed with viem from the
+    // artifacts above; nothing here shells out to a toolchain a reader would
+    // have to install first.
+    for (const file of committedDevnetFiles()) {
+      if (!file.endsWith('.ts')) continue;
+      if (file === THE_GUARD) continue;
+
+      for (const [, binary] of readFile(file).matchAll(A_SPAWNED_BINARY)) {
+        expect(
+          binary,
+          `${file}: spawns "${String(binary)}". The only binary a devnet run may execute is ${THE_ONLY_BINARY} — a forge, an anvil or a cast on the host is a fourth thing to install and a second way for two machines to disagree.`
+        ).toBe(THE_ONLY_BINARY);
+      }
     }
   });
 

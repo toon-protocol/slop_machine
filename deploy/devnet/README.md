@@ -65,6 +65,19 @@ There is deliberately no `docker compose up -d` recipe. The chain has to be up a
 contracts deployed before either connector will boot — both are fail-closed on their settlement
 configuration — and every credential and both `connector.toml` files are generated per run.
 
+A run brings the chain up from the digest-pinned image, replays the connector's own deploy script
+onto it with `viem` from the trimmed artifacts in [`contracts/`](contracts/) — the mock token at six
+decimals, the registry, and a token network created through it — and **asserts the addresses**
+against the deterministic ones the rest of the fleet commits, so a configuration copied from a
+sibling repo is either right here or loudly wrong. Then it tears everything down, volumes included,
+so a second run starts where the first did. A failure prints every node's logs first, so a red CI
+job is diagnosable without re-running it locally.
+
+The prerequisite is **Docker and this repository's own toolchain, and nothing else** — no account,
+no faucet, no testnet, no real money, and no Foundry, Rust or submodules. anvil runs in the pinned
+image; the only binary a run ever executes on the host is `docker`. With no daemon answering, the
+run refuses in one sentence that says so rather than failing somewhere further in.
+
 [`bundle.test.ts`](bundle.test.ts) is this bundle's guard, the sibling of
 [`../bundle.test.ts`](../bundle.test.ts) and [`../hub/bundle.test.ts`](../hub/bundle.test.ts). It
 reads the real committed files, keeps every expected value as a literal declared in the test, needs
