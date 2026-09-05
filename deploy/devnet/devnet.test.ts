@@ -470,8 +470,12 @@ describe('the devnet', () => {
       // Both nodes are EVM-only. There is no Solana validator in this
       // topology, so a `[settlement.solana]` table would be a node refusing to
       // start on a chain it cannot reach.
+      //
+      // Read from the DIRECTIVES, because both templates say in their own
+      // comments that they carry no such table — a check against the whole
+      // file would fail on a configuration that was exactly right.
       expect(
-        rendered.includes('[settlement.solana]'),
+        directivesOf(rendered).includes('[settlement.solana]'),
         `the ${node} declares a Solana settlement, and nothing in this topology answers one`
       ).toBe(false);
 
@@ -630,4 +634,18 @@ function pricedAddresses(
   node: SelfDescription
 ): { prefix: string; price: bigint }[] {
   return byPrefix(node.routes);
+}
+
+/**
+ * A rendered configuration with its comments removed.
+ *
+ * Both templates explain at length what they must NOT contain — no second
+ * settlement chain, no committed address — so a check for a forbidden string
+ * has to read what the file does rather than what it says about itself.
+ */
+function directivesOf(toml: string): string {
+  return toml
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
 }

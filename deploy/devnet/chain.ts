@@ -120,7 +120,16 @@ export async function chainClients(rpcUrl: string): Promise<ChainClients> {
   return {
     rpcUrl,
     chainId,
-    publicClient: createPublicClient({ chain, transport: http(rpcUrl) }),
+    // `cacheTime: 0`, deliberately. viem caches a block number for its polling
+    // interval by default, which is exactly right for an app watching a public
+    // chain and exactly wrong for a driver that sends a transaction and then
+    // asks what happened: the answer would be the height from before it, and
+    // the assertion would be about a cache rather than about the chain.
+    publicClient: createPublicClient({
+      chain,
+      transport: http(rpcUrl),
+      cacheTime: 0,
+    }),
     walletClient: createWalletClient({
       chain,
       account: deployer,
