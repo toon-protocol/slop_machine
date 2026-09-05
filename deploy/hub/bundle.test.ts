@@ -554,6 +554,34 @@ function readConnectorToml(): ConnectorToml {
   return parse(readFile(CONNECTOR_TOML_PATH)) as unknown as ConnectorToml;
 }
 
+/**
+ * Every `reverse_proxy` in the Caddyfile, with the site block that holds it.
+ *
+ * Parsed structurally rather than grepped: a substring search would pass on a
+ * file that had grown a THIRD site block, and the whole invariant is that
+ * there are exactly two public paths onto a hub. A site block opens with a
+ * line ending in `{`; the global options block at the top opens the same way
+ * and holds no `reverse_proxy`, so it contributes nothing.
+ */
+function caddyReverseProxies(): { host: string; upstream: string }[] {
+  const found: { host: string; upstream: string }[] = [];
+  let host = '';
+
+  for (const line of directivesOf(CADDYFILE_PATH).split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.endsWith('{')) {
+      host = trimmed.slice(0, -1).trim();
+      continue;
+    }
+    const [directive, upstream] = trimmed.split(/\s+/);
+    if (directive === 'reverse_proxy' && upstream !== undefined) {
+      found.push({ host, upstream });
+    }
+  }
+
+  return found;
+}
+
 /** The path half of a handler URL — everything after the `host:port`. */
 function pathOf(handlerUrl: string): string {
   return new URL(handlerUrl).pathname;
@@ -1297,16 +1325,10 @@ describe('hub bundle', () => {
     // from it, so the check reads the DIRECTIVES only.
     const directives = directivesOf(CADDYFILE_PATH);
 
-    for (const { host, upstream } of EXPECTED_CADDY_UPSTREAMS) {
-      expect(
-        directives,
-        `${CADDYFILE_PATH}: expected ${host} to reverse_proxy ${upstream}`
-      ).toMatch(
-        new RegExp(
-          `${host.replace(/[$.{}]/g, '\\$&')}\\s*\\{[^}]*reverse_proxy\\s+${upstream.replace(/[.]/g, '\\.')}`
-        )
-      );
-    }
+    expect(
+      caddyReverseProxies(),
+      `${CADDYFILE_PATH}: expected exactly ${JSON.stringify(EXPECTED_CADDY_UPSTREAMS)}. Caddy fronts the connector's client edge and the relay's free reads — being FOUND is free, being REACHABLE is the slot — and nothing else has a public path.`
+    ).toEqual(EXPECTED_CADDY_UPSTREAMS);
 
     // A Caddy route to either payment-oblivious surface is the same free door
     // as a `ports:` entry, reached through the front instead of around it. On
