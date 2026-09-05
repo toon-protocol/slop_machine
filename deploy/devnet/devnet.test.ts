@@ -72,11 +72,21 @@ const EXPECTED_CHAIN_ID = 31337;
 const EXPECTED_FUNDED_ACCOUNTS = 10;
 
 /**
- * How many transactions the replay sends: the mock token, the registry, and
- * the `createTokenNetwork` call. One block each, because the chain has NO
- * block time — which is what makes the height an assertion rather than a race.
+ * How long the chain is watched doing nothing, to prove no clock is mining.
+ *
+ * Anvil's shortest meaningful `--block-time` is one second, so a window
+ * comfortably past that is what tells "no block time" apart from "a block time
+ * that has not fired yet".
  */
-const REPLAY_TRANSACTIONS = 3;
+const IDLE_OBSERVATION_MS = 2_500;
+
+/**
+ * A `{{PLACEHOLDER}}` nobody filled — the renderer's own shape, which is not
+ * merely "two braces": both templates explain in their own headers that
+ * `config.ts` fills every `{{…}}` below, and a check that matched prose would
+ * fail on a file that had rendered perfectly.
+ */
+const AN_UNFILLED_PLACEHOLDER = /\{\{[A-Z_]+\}\}/;
 
 /**
  * The deterministic addresses the rest of the fleet commits — the connector's
@@ -266,16 +276,31 @@ describe('the devnet', () => {
   });
 
   it('mines per transaction, so nothing in a run ever waits on a clock', async () => {
-    // The chain runs with no `--block-time`, which means a transaction waits on
-    // ITSELF. Asserted rather than trusted: with one block per transaction and
-    // nothing else touching this chain, the height after the replay IS the
-    // number of transactions the replay sent.
+    // The chain runs with NO `--block-time`, and that is two claims rather than
+    // one: a clock mines nothing, and a transaction mines itself. Both are
+    // checked, because either alone would pass on a chain doing the other — and
+    // both are checked against the height before and after a transaction of the
+    // run's own, rather than against a count of the ones setup happened to
+    // send, which is a number every later slice of this epic changes.
     const clients = await chainClients(CHAIN_RPC_URL);
+    const idle = await clients.publicClient.getBlockNumber();
+
+    await new Promise((slept) => setTimeout(slept, IDLE_OBSERVATION_MS));
 
     expect(
       await clients.publicClient.getBlockNumber(),
-      `the devnet chain is ${String(await clients.publicClient.getBlockNumber())} blocks in after ${String(REPLAY_TRANSACTIONS)} transactions — one block per transaction is what "no block time" means, and a mining interval would make every run's duration a function of a clock`
-    ).toBe(BigInt(REPLAY_TRANSACTIONS));
+      `the devnet chain mined a block while nothing was happening — with a block time, every run's duration becomes a function of a clock rather than of the work it does`
+    ).toBe(idle);
+
+    // And one transaction is one block. Zero value to the account that sends
+    // it: the cheapest transaction there is, and the run wants nothing from it
+    // but the block.
+    await fundGas(CHAIN_RPC_URL, anvilAccount(0).address, 0n);
+
+    expect(
+      await clients.publicClient.getBlockNumber(),
+      `one transaction did not produce exactly one block — a transaction is supposed to wait on itself here`
+    ).toBe(idle + 1n);
   });
 
   it('is answered by the anvil in the digest-pinned image', async () => {
@@ -421,7 +446,7 @@ describe('the devnet', () => {
       expect(
         rendered,
         `the ${node}'s rendered configuration still holds an unfilled placeholder`
-      ).not.toMatch(/\{\{/);
+      ).not.toMatch(AN_UNFILLED_PLACEHOLDER);
       // The chain repointed at the compose SERVICE, never at the driver's
       // loopback publish: a container reaching its own host's 127.0.0.1
       // reaches itself.
