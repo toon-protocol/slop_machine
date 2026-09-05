@@ -159,3 +159,33 @@ export async function waitForVibes(options: {
     await new Promise((waited) => setTimeout(waited, 1_000));
   }
 }
+
+/**
+ * The SHA-256 of a segment the station holds, computed inside the origin's own
+ * container.
+ *
+ * This is what makes "byte-for-byte" a claim rather than a hope. A run cannot
+ * carry the file out — the segment port is published on no interface, which is
+ * the whole point of it — so the comparison is made against a digest of what
+ * is on the station's disk, taken from the station's own side.
+ *
+ * `sha256sum` is busybox's, which ships in the origin's alpine base; its output
+ * is the digest, two spaces, and the path.
+ */
+export async function segmentDigest(
+  rung: string,
+  sequence: number
+): Promise<string> {
+  const said = await execIn(ORIGIN_SERVICE, [
+    'sha256sum',
+    `/data/segments/${rung}/${String(sequence)}.ts`,
+  ]);
+  const digest = said.trim().split(/\s+/)[0] ?? '';
+
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    throw new Error(
+      `the station holds no readable segment ${String(sequence)} at rung "${rung}" — its own disk answered ${JSON.stringify(said)}`
+    );
+  }
+  return digest;
+}
