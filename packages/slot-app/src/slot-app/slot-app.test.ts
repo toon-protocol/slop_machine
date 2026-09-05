@@ -17,6 +17,9 @@
  *   - the two unpriced addresses — liveness, and the hub operator's roster —
  *     require no payment header, read none, and echo none, and stay that way
  *     now that a paid address exists beside them;
+ *   - the hub's peering policy is ordinary configuration and reads back off
+ *     the app, including what it fronts per broadcaster, and a figure that is
+ *     not a whole positive number is a refusal to start;
  *   - both operator credentials are named by path, both are required, and the
  *     refusal says which one is wrong;
  *   - neither credential value reaches a log line, an error message, or the
@@ -276,6 +279,7 @@ describe('the hub operator surface', () => {
       operatorUrl: 'http://connector:3000/',
       peeringFee: 25,
       peeringMaxPacketAmount: 12_345,
+      peeringCollateral: 7_000_000,
     });
 
     // Ordinary configuration, all of it readable back and none of it secret —
@@ -284,12 +288,76 @@ describe('the hub operator surface', () => {
       operatorUrl: 'http://connector:3000',
       fee: 25,
       maxPacketAmount: 12_345,
+      collateral: 7_000_000,
       // Unset above, so this is the DEFAULT, written out here rather than
       // read back off the app: a hub reads a station connector over https
       // only unless its operator said otherwise, and a default that flipped
       // would fail here instead of on a live box.
       allowPlaintextStationUrls: false,
     });
+  });
+});
+
+describe('what the hub fronts per broadcaster', () => {
+  it('takes the operator\u2019s own figure, and defaults where they set none', async () => {
+    const configured = await boot({ peeringCollateral: 12_500_000 });
+    expect(configured.config.peering.collateral).toBe(12_500_000);
+
+    // Written out here rather than imported, so that a default which moved
+    // fails this file instead of quietly agreeing with itself. It is the
+    // placeholder in `docs/placeholder-numbers.md`, and it is what a hub that
+    // configured nothing commits per admission.
+    const defaulted = await boot();
+    expect(defaulted.config.peering.collateral).toBe(50_000_000);
+  });
+
+  it('reads a string the way an environment variable arrives', async () => {
+    // Flags and environment variables are both text by the time they reach
+    // the app; a figure that only worked as a number would work in the suite
+    // and nowhere a hub actually runs.
+    const app = await boot({ peeringCollateral: '9000000' });
+    expect(app.config.peering.collateral).toBe(9_000_000);
+  });
+
+  it('refuses to start on a figure that is not a whole positive number', async () => {
+    for (const peeringCollateral of [
+      -1,
+      0,
+      1.5,
+      'fifty',
+      '50_000_000',
+      Number.MAX_SAFE_INTEGER + 2,
+    ]) {
+      const error = await refusal({ peeringCollateral });
+
+      // Named in the same vocabulary as every other policy refusal, and
+      // naming the setting an operator would go and fix. A hub with a typo
+      // here must look broken rather than look fine: it would admit
+      // broadcasters, route them, charge them, and carry none of them.
+      expect(error.name).toBe('PeeringPolicyError');
+      expect(error.message).toContain('TOON_PEERING_COLLATERAL');
+    }
+  });
+
+  it('says what it fronts in the line an operator reads at boot', async () => {
+    const logs = await logsDuring(() =>
+      boot({
+        peeringFee: 20,
+        peeringMaxPacketAmount: 10_000_000,
+        peeringCollateral: 50_000_000,
+      })
+    );
+
+    // The three numbers a hub operator checks together, in one line: what a
+    // packet earns, what a packet may cost, and what the hub has committed
+    // per broadcaster to make either of them possible.
+    const line = logs
+      .split('\n')
+      .find((written) => written.includes('peering policy:'));
+    expect(line).toBeDefined();
+    expect(line).toContain('20');
+    expect(line).toContain('10000000');
+    expect(line).toContain('50000000');
   });
 });
 

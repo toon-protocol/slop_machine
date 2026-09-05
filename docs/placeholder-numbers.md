@@ -124,6 +124,14 @@ connector prefixes** and always must, or one is reachable at the other's price.
 At fifteen segments a minute that is roughly $0.018/hour per viber, or a few percent of what the
 viber pays the station.
 
+**One number in three places, and they agree**: the slot app's own `DEFAULT_PEERING_FEE`, the
+`HUB_PEERING_FEE` a hub bundle ships, and this line. A fee that differed between them would be a
+hub charging what its operator never read about, so changing it is one commit touching all three.
+
+```
+HUB_PEERING_FEE=20        # --peering-fee / TOON_PEERING_FEE
+```
+
 ## Hub collateral
 
 - **Per broadcaster:** `50000000` (about $50) in the channel the hub opens toward them.
@@ -132,3 +140,17 @@ viber pays the station.
 This is the number most likely to be wrong. Hub capital grows linearly with the roster, and the
 right value depends on settlement frequency against per-station throughput — neither of which is
 known until something runs.
+
+**It is the figure the cap multiplies**, which is what makes `TOON_SLOT_CAP` bound an amount rather
+than an intention: a hundred slots at `50000000` is about $5,000 committed. Resolved the way every
+other policy number here is — flags over environment over defaults — and validated fail-closed at
+boot, because a hub that fronted a typo would admit broadcasters it cannot carry:
+
+```
+HUB_PEERING_COLLATERAL=50000000   # --peering-collateral / TOON_PEERING_COLLATERAL
+```
+
+There is deliberately **no value meaning "front nothing"**, and `0` is refused at boot. Establishing
+a peering *opens* a payment channel; it does not fund one, and a channel holding nothing carries
+nothing — the hub's own connector refuses to sign a covering claim for it. A hub that means to
+commit no capital is a hub admitting nobody, and `TOON_SLOT_CAP=0` already says that.

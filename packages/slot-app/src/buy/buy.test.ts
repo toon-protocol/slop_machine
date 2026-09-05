@@ -401,6 +401,7 @@ describe('buying a slot', () => {
     const { app, operator } = await boot({
       peeringFee: 7,
       peeringMaxPacketAmount: 500,
+      peeringCollateral: 4_000_000,
     });
 
     await bought(app, paid(evmPayer()), {
@@ -410,6 +411,7 @@ describe('buying a slot', () => {
       label: 'vanity',
       fee: 0,
       max_packet_amount: 999_999_999,
+      collateral: 999_999_999,
       chain: 'evm',
       lapsesAt: Number.MAX_SAFE_INTEGER,
     });
@@ -418,6 +420,9 @@ describe('buying a slot', () => {
     expect(written['fee']).toBe(7);
     expect(written['max_packet_amount']).toBe(500);
     expect(written['id']).not.toBe('vanity');
+    // How much capital the hub commits for this broadcaster is the hub's, and
+    // a purchase that asked for two hundred times it changed nothing.
+    expect(app.config.peering.collateral).toBe(4_000_000);
   });
 });
 

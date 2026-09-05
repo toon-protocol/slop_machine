@@ -145,9 +145,9 @@ application/json`, `Cache-Control: no-store`:
     "channel": { "id": "0x…", "status": "created", "chain": "evm" }
   },
   "routes": [
-    { "prefix": "g.toon.slopmachine.7a1c93f0be42.now", "price": "60" },
-    { "prefix": "g.toon.slopmachine.7a1c93f0be42.audio", "price": "210" },
-    { "prefix": "g.toon.slopmachine.7a1c93f0be42.480p", "price": "1010" }
+    { "prefix": "g.toon.slopmachine.7a1c93f0be42.now", "price": "70" },
+    { "prefix": "g.toon.slopmachine.7a1c93f0be42.audio", "price": "220" },
+    { "prefix": "g.toon.slopmachine.7a1c93f0be42.480p", "price": "1020" }
   ]
 }
 ```
@@ -430,8 +430,9 @@ Flags over environment over defaults, exactly as the station origin resolves its
 | `--slot-cap`                     | `TOON_SLOT_CAP`                    | `100`                |
 | `--lapse-sweep-seconds`          | `TOON_LAPSE_SWEEP_SECONDS`         | `60`                 |
 | `--operator-url`                 | `TOON_OPERATOR_URL`                | none                 |
-| `--peering-fee`                  | `TOON_PEERING_FEE`                 | `10`                 |
+| `--peering-fee`                  | `TOON_PEERING_FEE`                 | `20`                 |
 | `--peering-max-packet-amount`    | `TOON_PEERING_MAX_PACKET_AMOUNT`   | `10000000`           |
+| `--peering-collateral`           | `TOON_PEERING_COLLATERAL`          | `50000000`           |
 | `--operator-write-key-file`      | `TOON_OPERATOR_WRITE_KEY_FILE`     | none                 |
 | `--operator-bearer-token-file`   | `TOON_OPERATOR_BEARER_TOKEN_FILE`  | none                 |
 
@@ -459,10 +460,20 @@ on the compose network, e.g. `http://connector:3000`. It is **configuration, not
 the suite points it at a fake operator surface that verifies signatures for real, and the app's own
 API is the same either way.
 
-**`--peering-fee` and `--peering-max-packet-amount` are the hub's own terms about a counterparty**,
-and are configuration precisely because no document a broadcaster serves could supply them. A
-broadcaster never chooses how far the hub trusts them. Carriage is where a hub earns; the slot price
-is not.
+**`--peering-fee`, `--peering-max-packet-amount` and `--peering-collateral` are the hub's own terms
+about a counterparty**, and are configuration precisely because no document a broadcaster serves
+could supply them. A broadcaster never chooses how far the hub trusts them, and never chooses how
+much capital a hub commits for them. Carriage is where a hub earns; the slot price is not.
+
+**`--peering-collateral` is what the hub fronts into the payment channel behind each peering, and it
+is the figure `--slot-cap` multiplies.** Establishing a peering *opens* a channel; it does not fund
+one, so the hub's balance-sheet commitment is these two numbers together — a hundred slots at
+`50000000` is about $5,000 committed — and until this was configuration the cap bounded an intention
+rather than an amount. There is deliberately **no value meaning "front nothing"**: `0` is a
+`PeeringPolicyError` and a non-zero exit, because a channel holding nothing carries nothing and a
+hub that fronted zero would admit broadcasters, route them, charge them, and answer every one of
+their packets with its own connector's word for an empty channel. A hub that means to commit no
+capital sets `--slot-cap 0`.
 
 **`--slot-price` is not payment code.** It is the number the app *reports* at the quote so a
 broadcaster learns what a slot costs before buying one, and (from the buy onward) the floor the app
@@ -471,7 +482,8 @@ slots below policy. Charging is the connector's job and pricing a route is conne
 so this number and the hub's `connector.toml` buy route are **one pair**, to change in one commit.
 
 Every one of them is validated **fail-closed at boot**: a price, period or cap nobody could have
-meant is a `SlotPolicyError` and a non-zero exit, not a degraded run.
+meant is a `SlotPolicyError` and a non-zero exit, and a fee, packet cap or collateral nobody could
+have meant is a `PeeringPolicyError` and the same exit — never a degraded run.
 
 ## Programmatically
 
