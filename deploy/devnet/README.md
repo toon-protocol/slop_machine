@@ -86,6 +86,18 @@ The station is rendered first at a **placeholder apex it was never granted**, wh
 broadcaster's node is in before they pull a quote — and what makes the documented order (quote,
 configure, restart) something a run walks rather than describes.
 
+Then a broadcaster's vibes go in — a generated test pattern pushed into the station's ingest over
+RTMP by **the ffmpeg inside the origin's own image**, so the devnet introduces no image to encode
+with — and the run walks the order [`../README.md`](../README.md) gives a broadcaster, rather than
+describing it: **quote, configure, restart.** A payer opens and funds one channel with the hub,
+pulls a paid quote, reads the prefix the hub would grant, re-renders the station's configuration
+at it, restarts the node, and re-reads what the station now publishes.
+
+The payer is [`toon-client`](https://github.com/toon-protocol/toon-client), the fleet's own client
+side, pinned to an exact release and a **development dependency of the devnet only** — a dependency
+of neither package, in no published image, imported by nothing under `packages/`. Neither app in
+this repository may hold payment code, which is exactly why the payer comes from outside it.
+
 The prerequisite is **Docker and this repository's own toolchain, and nothing else** — no account,
 no faucet, no testnet, no real money, and no Foundry, Rust or submodules. anvil runs in the pinned
 image; the only binary a run ever executes on the host is `docker`. With no daemon answering, the

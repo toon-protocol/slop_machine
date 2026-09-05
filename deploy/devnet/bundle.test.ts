@@ -270,7 +270,17 @@ const EXPECTED_EMPTY_INGEST_TLS = [
  */
 const TEMPLATES_DIR = `${DEVNET_DIR}/templates`;
 const EXPECTED_TEMPLATES: Record<string, string> = {
-  'hub-connector': 'http://hub-connector:3000/ilp',
+  // WHERE EACH NODE'S OWN CLIENTS REACH IT, and the two are deliberately
+  // different. A node cannot introspect this — from inside a container it sees
+  // 0.0.0.0 and a private network — so it is configuration, and what it has to
+  // name is the address the parties who pay THAT node can dial.
+  //
+  // A hub's payers are a broadcaster and a viber, and in this topology both are
+  // the driver, on the host, coming in through the loopback publish. A
+  // station's only client is the hub, which dials from inside the compose
+  // network. A viber never reaches a station directly; that is what the hub is
+  // for.
+  'hub-connector': 'http://127.0.0.1:3000/ilp',
   'station-connector': 'http://station-connector:3000/ilp',
 };
 
@@ -290,6 +300,28 @@ const A_SECOND_CHAIN = '[settlement.solana]';
 
 /** An address literal. A template that carried one would be pinned to a chain it did not deploy. */
 const AN_ADDRESS_LITERAL = /"0x[0-9a-fA-F]{40}"/;
+
+// ── The payer ────────────────────────────────────────────────────────────────
+
+/**
+ * `toon-client`, the fleet's own client side and the devnet's payer.
+ *
+ * Neither app in this repository may hold payment code, which is exactly why a
+ * devnet needs a payer from outside it — and why that payer must stay outside
+ * it. It is a DEVELOPMENT dependency of the workspace root, pinned to an exact
+ * release: a dependency of neither package, in no published image, and imported
+ * by nothing under `packages/`. The invariant is unchanged; the devnet is not
+ * an app.
+ */
+const PAYER_PACKAGE = '@toon-protocol/client';
+/** Exact, with no range operator: a payer that moved underneath a run is a run that proves nothing. */
+const AN_EXACT_VERSION = /^\d+\.\d+\.\d+$/;
+
+const ROOT_PACKAGE_JSON = 'package.json';
+const PACKAGE_MANIFESTS = [
+  'packages/station-origin/package.json',
+  'packages/slot-app/package.json',
+];
 
 // ── The settlement contracts ─────────────────────────────────────────────────
 
@@ -1075,12 +1107,12 @@ describe('devnet bundle', () => {
         `${path}: names an address literal — every chain value here is the run's to fill`
       ).not.toMatch(AN_ADDRESS_LITERAL);
 
-      // Each node names its own endpoint at its own compose service: a node
-      // cannot introspect that, and one that published the wrong one is a node
-      // the other half peers with and cannot reach.
+      // Each node names where ITS OWN CLIENTS reach it — see the constant
+      // above for why those are two different addresses here. A node that
+      // published the wrong one is a node its payers cannot dial.
       expect(
         contents,
-        `${path}: does not publish its endpoint at its own compose service`
+        `${path}: does not publish the endpoint its own clients reach it at`
       ).toContain(`http_endpoint = "${endpoint}"`);
 
       for (const line of EXPECTED_TEMPLATE_LINES) {
@@ -1095,6 +1127,69 @@ describe('devnet bundle', () => {
       expect(
         directivesOf(path).includes(A_SECOND_CHAIN),
         `${path}: declares ${A_SECOND_CHAIN}, and nothing in this topology answers one`
+      ).toBe(false);
+    }
+  });
+
+  // ── The payer ──────────────────────────────────────────────────────────────
+
+  it('keeps the payer a devnet-only development dependency, pinned exactly', () => {
+    // The whole reason a devnet needs a payer from outside this repository is
+    // that NO APP IN IT CONTAINS PAYMENT CODE. A payer that crept into either
+    // package's dependencies — or into a published image — would make that
+    // sentence false while every other gate stayed green.
+    const root = JSON.parse(readFile(ROOT_PACKAGE_JSON)) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    const pinned = root.devDependencies?.[PAYER_PACKAGE];
+    expect(
+      pinned,
+      `${ROOT_PACKAGE_JSON}: ${PAYER_PACKAGE} belongs in devDependencies — it is the devnet's payer and nothing else in this repository uses it`
+    ).toBeDefined();
+    expect(
+      pinned,
+      `${ROOT_PACKAGE_JSON}: ${PAYER_PACKAGE} is pinned as "${String(pinned)}". Pin an exact release: a payer that moved underneath a run is a run that proves nothing about the version anybody has.`
+    ).toMatch(AN_EXACT_VERSION);
+    expect(
+      Object.keys(root.dependencies ?? {}),
+      `${ROOT_PACKAGE_JSON}: the payer is not a runtime dependency of this workspace`
+    ).not.toContain(PAYER_PACKAGE);
+
+    for (const manifest of PACKAGE_MANIFESTS) {
+      const declared = JSON.parse(readFile(manifest)) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      for (const [kind, deps] of [
+        ['dependencies', declared.dependencies],
+        ['devDependencies', declared.devDependencies],
+      ] as const) {
+        expect(
+          Object.keys(deps ?? {}),
+          `${manifest}: declares ${PAYER_PACKAGE} in ${kind}. Neither app in this repository contains payment code, and a dependency on the payer is how that stops being true.`
+        ).not.toContain(PAYER_PACKAGE);
+      }
+    }
+  });
+
+  it('lets nothing under packages/ import the payer', () => {
+    // The manifest check above is about what is INSTALLED; this is about what
+    // is written. An import from an app's own source would reach the payer
+    // through the workspace root's node_modules and typecheck perfectly, right
+    // up until the image that has no such directory.
+    const sources = execFileSync('git', ['ls-files', '--', 'packages'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    })
+      .split('\n')
+      .filter((file) => file.endsWith('.ts'));
+
+    for (const file of sources) {
+      expect(
+        readFile(file).includes(PAYER_PACKAGE),
+        `${file}: names ${PAYER_PACKAGE}. No app in this repository contains payment code, and the payer is the devnet's alone.`
       ).toBe(false);
     }
   });
