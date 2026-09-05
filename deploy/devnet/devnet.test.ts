@@ -1468,6 +1468,12 @@ describe('the devnet', () => {
     // channel has advanced by exactly what the station charges, once per thing
     // the viber pulled — including the miss, because a connector fulfils on any
     // complete answer whatever its status, and a 404 is an answer.
+    //
+    // Which of the station's two claim books the row came out of is not
+    // asserted. The hub covers each forwarded packet as a payer, so the row
+    // arrives in the station's CLIENT-edge book rather than its peer book, and
+    // that is the connector's own business — what a broadcaster is owed does
+    // not depend on which ledger it was journaled to.
     const inbound = stationClaims.filter(
       (claim) =>
         claim.direction === INBOUND &&

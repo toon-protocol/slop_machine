@@ -176,16 +176,22 @@ export interface AcceptedClaim {
 /**
  * Whether two spellings name the same channel.
  *
- * A channel id crosses this topology as a string through several hands — the
- * slot app's answer, the connector's own tables, the token network's `bytes32`
- * — and the `0x` prefix and the letter case are not agreed across all of them.
- * Normalising once here is better than a comparison that silently finds
- * nothing, which is what it did: the money had moved and the claim behind it
- * looked absent.
+ * A channel id crosses this topology through several hands and does not arrive
+ * spelled the same way in all of them. The slot app's answer names it bare
+ * (`0x44a5…`); the connector's own claim book names it QUALIFIED BY CHAIN
+ * (`evm:0x44a5…`), because a node settles on more than one and an id is only
+ * unique within one; the token network knows it as `bytes32`.
+ *
+ * All three are the same channel, and the qualifier is the connector's
+ * business rather than something to assert about here. So a comparison takes
+ * the last `:`-separated field, drops the `0x`, and lower-cases — which is
+ * better than one that silently finds nothing, and that is exactly what it
+ * did: money had moved on chain and the claim behind it looked absent.
  */
 export function sameChannel(one: string, other: string): boolean {
-  const bare = (id: string) => id.trim().toLowerCase().replace(/^0x/, '');
-  return bare(one) === bare(other);
+  const bare = (id: string) =>
+    (id.trim().split(':').pop() ?? '').toLowerCase().replace(/^0x/, '');
+  return bare(one) === bare(other) && bare(one).length > 0;
 }
 
 /** Claims as a string, for a failure message. `cumulativeAmount` is a bigint. */
