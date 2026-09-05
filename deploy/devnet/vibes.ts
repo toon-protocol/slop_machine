@@ -18,7 +18,7 @@
  * the wire in clear, which is why the shipped station bundle mounts one.
  */
 
-import { compose } from './compose.js';
+import { compose, execIn } from './compose.js';
 
 /** The origin's own service, whose image carries the encoder. */
 const ORIGIN_SERVICE = 'station-origin';
@@ -116,15 +116,12 @@ export interface StationNow {
  * paying for the answer and without it being the thing under test.
  */
 export async function stationNow(): Promise<StationNow> {
-  const { stdout } = await compose([
-    'exec',
-    '-T',
-    ORIGIN_SERVICE,
+  const answer = await execIn(ORIGIN_SERVICE, [
     'wget',
     '-qO-',
     'http://127.0.0.1:3100/now',
   ]);
-  return JSON.parse(stdout) as StationNow;
+  return JSON.parse(answer) as StationNow;
 }
 
 /**

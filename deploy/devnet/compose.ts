@@ -41,6 +41,17 @@ const PIN_OF_RECORD = resolve(REPO_ROOT, 'deploy/docker-compose.yml');
 /** The variable the devnet's compose file requires, and this module supplies. */
 const CONNECTOR_IMAGE_VAR = 'DEVNET_CONNECTOR_IMAGE';
 
+/**
+ * The compose project, as the daemon labels every container in it.
+ *
+ * It is the same literal `docker-compose.yml` declares as its `name:`, and the
+ * bundle guard freezes that. It is needed here because a run puts TWO kinds of
+ * container into this project — the five services, and the one-off the
+ * broadcaster's uplink runs as — and telling them apart is what `execIn` is
+ * for.
+ */
+const PROJECT = 'slopmachine-devnet';
+
 /** A `docker` that answered nothing, said as the one sentence that explains the run. */
 export class DevnetDockerError extends Error {
   override readonly name = 'DevnetDockerError';
@@ -154,6 +165,52 @@ export async function compose(
  */
 export async function up(services: string[]): Promise<void> {
   await compose(['up', '-d', '--wait', ...services]);
+}
+
+/**
+ * Run a command inside one SERVICE's container.
+ *
+ * Deliberately not `docker compose exec <service>`. A run also starts a
+ * ONE-OFF container in this project — the broadcaster's uplink, which is the
+ * origin's own image with ffmpeg as its entrypoint — and a service name then
+ * names two containers. Asking compose to pick left the wrong one, and the
+ * symptom was `connection refused` on a port that was demonstrably listening
+ * in the other.
+ *
+ * So the container is found by the labels the daemon itself writes, including
+ * the one that says which kind it is, and the command runs against exactly
+ * that id.
+ */
+export async function execIn(
+  service: string,
+  command: string[]
+): Promise<string> {
+  const { stdout: found } = await docker(
+    [
+      'ps',
+      '--filter',
+      `label=com.docker.compose.project=${PROJECT}`,
+      '--filter',
+      `label=com.docker.compose.service=${service}`,
+      '--filter',
+      'label=com.docker.compose.oneoff=False',
+      '--format',
+      '{{.ID}}',
+    ],
+    { timeoutMs: 30_000 }
+  );
+
+  const ids = found.split('\n').filter((id) => id.length > 0);
+  if (ids.length !== 1) {
+    throw new DevnetComposeError(
+      `the devnet holds ${String(ids.length)} running containers for the service "${service}", and a command has to run in exactly one of them. A one-off container — the broadcaster's uplink — shares a service name with the origin, which is why this looks the container up by label rather than asking compose to choose.`
+    );
+  }
+
+  const { stdout } = await docker(['exec', String(ids[0]), ...command], {
+    timeoutMs: 60_000,
+  });
+  return stdout;
 }
 
 /**
