@@ -16,13 +16,15 @@ proven the request paid. Pricing a route is connector configuration. See the rep
 Issues [#33](https://github.com/toon-protocol/slop_machine/issues/33),
 [#34](https://github.com/toon-protocol/slop_machine/issues/34),
 [#35](https://github.com/toon-protocol/slop_machine/issues/35),
-[#36](https://github.com/toon-protocol/slop_machine/issues/36) and
-[#37](https://github.com/toon-protocol/slop_machine/issues/37): the app comes up from its bundled
+[#36](https://github.com/toon-protocol/slop_machine/issues/36),
+[#37](https://github.com/toon-protocol/slop_machine/issues/37) and
+[#38](https://github.com/toon-protocol/slop_machine/issues/38): the app comes up from its bundled
 entrypoint on a configured port, holds the hub's two operator credentials, answers liveness from
 inside the node, **quotes a slot**, and **sells one — establishing the peering and writing one
 forwarded route per address the station sells, before it answers**. **Buying again is renewing**:
 the same handle, one slot rather than two, the lapse extended, and the hub's routing table brought
-back into line with what the station publishes today.
+back into line with what the station publishes today. **A slot nobody renews lapses**, and the hub
+takes its routes and its peering back out on its own initiative.
 
 | Surface       | Port             | Paid                | What it is                                         |
 | ------------- | ---------------- | ------------------- | -------------------------------------------------- |
@@ -230,7 +232,7 @@ path above and ends up with **one** slot, not two:
 your self-description, so a rung you added since is routed — and **a rung you dropped is taken back
 out**, because a route write is an upsert and rewriting the survivors removes nothing.
 
-That removal is the one destructive write this app makes against a hub's routing table, and it is
+Removing a row is a destructive write against a table every broadcaster on the hub shares, and it is
 fenced twice. The candidates are read off the hub's own bearer-gated `GET /routes/peers` and
 filtered to **runtime** rows **at or beneath your own granted prefix** — a config row is the hub
 operator's and the connector refuses it `409` — and the only function that issues the `DELETE`
@@ -243,11 +245,45 @@ middle of its own broadcaster's renewal.
 A renewal the hub could not finish is a `503 routes_not_written` that leaves you holding the slot
 and the lapse you already had — never a shortened one — and retrying is safe.
 
-The lapse ([#38](https://github.com/toon-protocol/slop_machine/issues/38)) and the boot
-reconciliation ([#39](https://github.com/toon-protocol/slop_machine/issues/39)) are next, under the
-spec in [#32](https://github.com/toon-protocol/slop_machine/issues/32). Nothing walks the roster on
-a timer yet, so a slot past its lapse time keeps its routes and its peering until somebody buys
-again.
+### A slot nobody renews lapses
+
+Stop renewing and the hub takes it back out **by itself**. A ticker walks the roster every
+`TOON_LAPSE_SWEEP_SECONDS` (default `60`) and tears down everything past its lapse time; no request
+triggers it, because a teardown that waited for somebody else to buy would leave a hub carrying its
+last dead station for ever.
+
+Per lapsed slot, in this order and no other:
+
+1. **every route out** — one signed `DELETE /routes/peers/:prefix` each;
+2. **then the peering released** — one signed `DELETE /peers/:id`, which is what brings the hub's
+   collateral back;
+3. **then the slot off the roster.**
+
+The first order is the connector's rule rather than a preference: it refuses to remove a runtime
+peering while a runtime route still forwards to it (`PeerRouteTableError::PeerInUse`, a `409`), so
+the other way round is a teardown that stops half-way through and leaves a hub carrying priced
+addresses toward a station it no longer peers with. The rows taken out are every runtime row **at or
+beneath the granted prefix** *or* **forwarding to that slot's own peering label** — the connector's
+rule is keyed on the label, the fence a grant gives is keyed on the prefix, and a teardown has to
+satisfy the first while staying inside the second.
+
+The roster row goes **last** on purpose. A slot on the roster is the hub's claim that routes and a
+peering behind it may still exist, so a teardown that failed leaves the slot standing, says so, and
+the next sweep tries again — rather than leaving collateral committed toward a counterparty nothing
+in the hub remembers.
+
+**A lapsed handle is still yours.** Coming back is a re-buy at the same address, not starting over
+at a new one — the handle is derived from your payer key, so it does not go anywhere.
+
+The slot period and the sweep interval are both ordinary configuration, in **seconds**, which is
+what makes a lapse testable in real time rather than against a fake clock — the same precedent
+`--ingest-idle-seconds` set on the station side. There is deliberately no value that turns the sweep
+off: a hub that never reclaims a dead station's peering only ever commits more collateral.
+
+The **first sweep is one interval after boot, never at boot.** Tearing down what lapsed while the
+process was down needs the connector's own tables read first, and that is the boot reconciliation
+([#39](https://github.com/toon-protocol/slop_machine/issues/39)), which is next under the spec in
+[#32](https://github.com/toon-protocol/slop_machine/issues/32).
 
 ## The two operator credentials
 
@@ -306,6 +342,7 @@ Flags over environment over defaults, exactly as the station origin resolves its
 | `--slot-price`                   | `TOON_SLOT_PRICE`                  | `1000000`            |
 | `--slot-period-seconds`          | `TOON_SLOT_PERIOD_SECONDS`         | `2592000` (30 days)  |
 | `--slot-cap`                     | `TOON_SLOT_CAP`                    | `100`                |
+| `--lapse-sweep-seconds`          | `TOON_LAPSE_SWEEP_SECONDS`         | `60`                 |
 | `--operator-url`                 | `TOON_OPERATOR_URL`                | none                 |
 | `--peering-fee`                  | `TOON_PEERING_FEE`                 | `10`                 |
 | `--peering-max-packet-amount`    | `TOON_PEERING_MAX_PACKET_AMOUNT`   | `10000000`           |
@@ -316,12 +353,17 @@ Port `0` binds an ephemeral port, which is how the suite boots apps side by side
 configuration and not a constant for that reason — and because a hub operator moving it must not
 need a code change.
 
-**The last four before the credentials are the hub's admission policy**, and they are configuration
-for the same reason: admission here is a price rather than a judgement, so those numbers *are* the
-policy and changing one must never be a code change. `--slot-cap` of `0` is a legal setting and
-means the hub is admitting nobody. `--slot-period-seconds` is in seconds because that is what makes
-a lapse testable without a fake clock — the suite sets it to a second or two, exactly as the station
-origin's `--ingest-idle-seconds` made a time rule ordinary configuration.
+**`--hub-address`, `--slot-price`, `--slot-period-seconds` and `--slot-cap` are the hub's admission
+policy**, and they are configuration for the same reason: admission here is a price rather than a
+judgement, so those numbers *are* the policy and changing one must never be a code change.
+`--slot-cap` of `0` is a legal setting and means the hub is admitting nobody. `--slot-period-seconds` is in seconds because that is what makes a lapse testable without
+a fake clock — the suite sets it to a second or two, exactly as the station origin's
+`--ingest-idle-seconds` made a time rule ordinary configuration.
+
+**`--lapse-sweep-seconds` is how often the roster is walked for lapsed slots** — the *granularity*
+of the lapse, not its length. Seconds for the same reason the period is. There is deliberately no
+value that turns the sweep off: `0` is refused at boot, because a hub that never reclaims a dead
+station's peering only ever commits more collateral.
 
 **`--operator-url` is required and has no default**, on exactly the terms the two credentials are:
 an app that cannot reach an operator surface can admit nobody. In a hub bundle it is the connector

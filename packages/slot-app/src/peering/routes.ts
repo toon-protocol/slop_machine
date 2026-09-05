@@ -53,23 +53,33 @@
  * reads what the hub's own table currently holds and removes what the
  * document no longer names, with one `DELETE /routes/peers/:prefix` each.
  *
- * **That removal is the one destructive write this app makes, and it is
- * fenced twice.** A hub's routing table is shared by every broadcaster it
- * admitted, and a runtime row is upserted by prefix rather than protected by
- * an owner — only a *config* row is protected, by the connector's own `409`.
- * So the fence is this module's to hold:
+ * **Removing a row is a destructive write against a table every broadcaster
+ * shares, and it is fenced twice.** A runtime row is upserted by prefix
+ * rather than protected by an owner — only a *config* row is protected, by
+ * the connector's own `409`. So the fence is this module's to hold:
  *
  *   1. the candidates are read from the hub's own table and filtered to rows
- *      **at or beneath the caller's granted prefix**, which is an address
- *      space no other caller can ever hold — a handle is derived from a
- *      verified payer and lengthened until it is free, so two grants never
- *      nest;
+ *      the caller can be **proven** to own — see {@link RouteOwnership} —
+ *      which is an address space and a peering label no other caller can ever
+ *      hold, because a handle is derived from a verified payer and lengthened
+ *      until it is free, so two grants never nest;
  *   2. and {@link removeOne}, the only function that issues the `DELETE`,
- *      re-checks that fence itself against the grant it was given and refuses
- *      rather than sending anything it cannot prove is beneath it.
+ *      re-checks that same proof itself and refuses rather than sending
+ *      anything it cannot establish is the caller's.
  *
  * A row the config file owns is never a candidate — the read says which rows
  * are the operator's own — and the connector would refuse it anyway.
+ *
+ * **And when the slot behind them lapses, every row goes**, not just the
+ * stale ones: {@link withdrawForwardedRoutes}. That is the first half of a
+ * teardown and the reason the halves are in this order — the connector
+ * refuses to remove a peering a runtime route still forwards to
+ * (`PeerRouteTableError::PeerInUse`, a `409`), so releasing the peering first
+ * is a teardown that stops half-way through. The candidates there are the
+ * union of both ownership proofs {@link RouteOwnership} names, because the
+ * referential rule is keyed on the **peering label** while the fence a
+ * broadcaster's grant provides is keyed on the **prefix**, and a teardown has
+ * to satisfy the first while staying inside the second.
  *
  * **The read is bearer-gated, and the removal is signature-gated**, which is
  * the connector's own split: writes are RFC 9421 signatures and never a
@@ -220,7 +230,13 @@ export interface ForwardedRouteDependencies extends PeeringDependencies {
 export interface CarriedRoute {
   /** The ILP prefix that row carries. */
   prefix: string;
-  /** The peering it points at — the operator surface's `peer_id`. */
+  /**
+   * The peering it points at — the operator surface's `peer_id`.
+   *
+   * This is what the connector's own referential rule is keyed on, so it is
+   * what a teardown selects by: every row naming a peering's label has to be
+   * gone before that peering can be released.
+   */
   peerId: string;
   /**
    * `runtime` for a row written over the operator surface, `config` for one
@@ -230,6 +246,35 @@ export interface CarriedRoute {
    * app may take back out and one it may never touch.
    */
   source: string;
+}
+
+/**
+ * What proves a row is this caller's to remove.
+ *
+ * Two independent proofs, and either is enough:
+ *
+ *   - the row's prefix is **at or beneath the granted prefix**, which is an
+ *     address space no other caller can hold — a handle is derived from a
+ *     verified payer and lengthened until it is free, so two grants never
+ *     nest;
+ *   - or the row **forwards to this caller's own peering label**, which is
+ *     the same derived label and equally nobody else's.
+ *
+ * The second exists because the connector's referential rule is keyed on the
+ * label rather than on the prefix: a peering cannot be removed while any
+ * runtime route still forwards to it. A teardown that could only remove rows
+ * beneath the grant would be refused `409` by a row pointing at the peering
+ * from anywhere else — a hand-written one, say — and would stop half-way
+ * through, which is exactly the failure the ordering exists to avoid.
+ */
+export interface RouteOwnership {
+  /** The prefix the hub granted this caller. */
+  grantedPrefix: string;
+  /**
+   * This caller's own peering label, where the caller has one to offer.
+   * `undefined` narrows the proof to the prefix alone.
+   */
+  localLabel?: string | undefined;
 }
 
 /** What taking the stale rows back out needs. */
@@ -455,7 +500,50 @@ export async function retireForwardedRoutes(
 
   const removed: string[] = [];
   for (const carried of stale) {
-    await removeOne(deps, request.grantedPrefix, carried.prefix);
+    await removeOne(deps, { grantedPrefix: request.grantedPrefix }, carried);
+    removed.push(carried.prefix);
+  }
+  return removed;
+}
+
+/**
+ * Take **every** row this caller has out — the whole routing table entry, not
+ * the stale part of it.
+ *
+ * This is the first half of a teardown and its whole reason for existing is
+ * the order: the connector refuses to remove a peering a runtime route still
+ * forwards to (`PeerRouteTableError::PeerInUse`, a `409`), so a teardown that
+ * released the peering first would be refused and would stop half-way
+ * through, leaving a hub carrying priced addresses toward a station it no
+ * longer peers with.
+ *
+ * Candidates are every **runtime** row that is provably this caller's by
+ * either proof {@link RouteOwnership} names — beneath the grant, or pointing
+ * at their peering label. The union is deliberate: the prefix half is what
+ * makes the removal complete from the broadcaster's point of view, and the
+ * label half is what makes it complete from the *connector's*, which is the
+ * one that decides whether the peering can then go.
+ *
+ * A row the operator's own configuration file owns is never a candidate and
+ * never removed — it is not this app's, the connector would refuse it, and a
+ * config row cannot hold a runtime peering in use anyway.
+ *
+ * @returns the prefixes removed, in the order they were removed.
+ * @throws ForwardedRouteError where the hub's own surface would not answer
+ * the read or take a removal. Nothing is released after that: a teardown that
+ * could not finish its first half must not start its second.
+ */
+export async function withdrawForwardedRoutes(
+  deps: ForwardedRouteDependencies,
+  owner: RouteOwnership
+): Promise<string[]> {
+  const mine = (await readCarriedRoutes(deps)).filter(
+    (carried) => carried.source === 'runtime' && proven(owner, carried)
+  );
+
+  const removed: string[] = [];
+  for (const carried of mine) {
+    await removeOne(deps, owner, carried);
     removed.push(carried.prefix);
   }
   return removed;
@@ -584,16 +672,19 @@ function readRows(said: string): CarriedRoute[] {
  * caller already filtered — but this is the only function in the app that
  * issues a destructive write against a hub's routing table, and a fence that
  * lives only in the caller is a fence one refactor away from not existing.
+ * It re-checks the same {@link proven} rule its callers filtered by, so the
+ * two can never drift into disagreeing.
  */
 async function removeOne(
   deps: ForwardedRouteDependencies,
-  grantedPrefix: string,
-  prefix: string
+  owner: RouteOwnership,
+  carried: CarriedRoute
 ): Promise<void> {
-  if (!ILP_ADDRESS.test(prefix) || !beneath(prefix, grantedPrefix)) {
+  const prefix = carried.prefix;
+  if (!ILP_ADDRESS.test(prefix) || !proven(owner, carried)) {
     throw new ForwardedRouteError(
       'hub',
-      `this hub will not remove ${prefix}: it is not an address beneath ${grantedPrefix}`,
+      `this hub will not remove ${prefix}: it is neither an address beneath ${owner.grantedPrefix} nor a row forwarding to ${owner.localLabel ?? '(no label offered)'}`,
       prefix
     );
   }
@@ -697,6 +788,21 @@ function priceJson(route: ForwardedRoute): string {
 /** Whether `prefix` is the granted prefix or an address beneath it. */
 function beneath(prefix: string, granted: string): boolean {
   return prefix === granted || prefix.startsWith(`${granted}.`);
+}
+
+/**
+ * Whether this row is provably the owner's, by either of the two proofs
+ * {@link RouteOwnership} names. One function so that the filter a caller
+ * applies and the fence {@link removeOne} re-checks are the same rule rather
+ * than two spellings of it that can drift apart.
+ */
+function proven(owner: RouteOwnership, carried: CarriedRoute): boolean {
+  if (beneath(carried.prefix, owner.grantedPrefix)) return true;
+  return (
+    owner.localLabel !== undefined &&
+    owner.localLabel !== '' &&
+    carried.peerId === owner.localLabel
+  );
 }
 
 function sleep(ms: number): Promise<void> {

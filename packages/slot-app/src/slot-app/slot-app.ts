@@ -68,9 +68,19 @@
  *   - the roster, opened in the data directory and **read back at boot**, so a
  *     restarted hub still knows who it admitted and when each slot lapses.
  *
- * The lapse ticker (#38) and the boot reconciliation (#39) are deliberately
- * not here yet: nothing walks the roster on a timer, so a slot past its lapse
- * time still holds its routes and its peering until somebody buys again.
+ *   - **the lapse ticker** (#38), walking the roster on a configured interval
+ *     and tearing down everything past its lapse time on the hub's own
+ *     initiative, with no request needed to trigger it: every route out
+ *     first, then the peering released — which is what brings the collateral
+ *     behind a dead station back — and only then the slot off the roster. See
+ *     `../lapse/lapse.ts` for why that order is the connector's rule rather
+ *     than a preference, and why the roster row goes last.
+ *
+ * The boot reconciliation (#39) is deliberately not here yet: the first sweep
+ * happens one interval after boot rather than at it, so a slot that lapsed
+ * while the process was down keeps its routes and its peering until that
+ * first tick, and nothing yet checks the connector's own tables against the
+ * roster.
  *
  * The app port, the data directory and every number in the hub's admission
  * policy are configuration rather than constants: the suite boots real
@@ -85,6 +95,11 @@ import { resolve } from 'node:path';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 import { BUY_ROUTE_PREFIX, buyRoutes } from '../buy/buy.js';
+import {
+  describeLapseSweep,
+  resolveLapseSweepSeconds,
+  startLapseTicker,
+} from '../lapse/lapse.js';
 import { resolveOperatorCredentials } from '../operator/credentials.js';
 import { createWriteSigner } from '../operator/write-signature.js';
 import {
@@ -178,6 +193,15 @@ export interface SlotAppConfig {
    * policy and means the hub is admitting nobody.
    */
   slotCap?: number | string | undefined;
+  /**
+   * How often the hub walks its roster looking for lapsed slots, in seconds
+   * (default: 60).
+   *
+   * The granularity of the lapse, not its length. Seconds for the same reason
+   * the period is: it is what makes a lapse testable in real time rather than
+   * against a fake clock.
+   */
+  lapseSweepSeconds?: number | string | undefined;
 
   /**
    * Base URL of the hub connector's **operator surface** — where the peering
@@ -236,6 +260,11 @@ export interface ResolvedSlotAppConfig {
    * configuration, all of it readable back, none of it secret.
    */
   policy: SlotPolicy;
+  /**
+   * How often the hub walks its roster tearing down lapsed slots, in seconds.
+   * Ordinary configuration, readable back like every other number here.
+   */
+  lapseSweepSeconds: number;
   /**
    * The hub's peering policy — where its operator surface is, what it charges
    * to carry a packet to a broadcaster, and how large a packet it will carry.
@@ -307,6 +336,9 @@ function livenessResponse(): LivenessResponse {
  * must not admit broadcasters on a number nobody chose.
  * @throws PeeringPolicyError if no operator surface is configured, or the
  * terms the hub peers on cannot be read.
+ * @throws LapseError if the sweep interval is not a whole number of seconds.
+ * There is no value that disables the sweep: a hub that never reclaims
+ * anything is the bug the ticker exists to close.
  * @throws SlotRosterError if the data directory holds something this app
  * cannot read as a roster. A hub that started from an empty roster would
  * re-admit everybody it already holds.
@@ -358,6 +390,12 @@ export async function startSlotApp(
   // did not come up.
   const policy = resolveSlotPolicy(config);
 
+  // How often the roster is walked for lapsed slots. Checked here with
+  // everything else, because a hub whose sweep interval is nonsense is a hub
+  // that would either never reclaim its collateral or spend all day asking
+  // its own connector about a roster nothing has changed.
+  const lapseSweepSeconds = resolveLapseSweepSeconds(config.lapseSweepSeconds);
+
   // And its peering policy — where the operator surface is, and the terms the
   // hub peers on. The operator URL is required and has no default: an app
   // that cannot reach an operator surface can admit nobody.
@@ -401,6 +439,21 @@ export async function startSlotApp(
     })
   );
 
+  // The lapse ticker. Started before the port binds, because taking a dead
+  // station's routes and peering back out is not a favour the hub does for
+  // whoever happens to call next — it is the hub's own initiative, and the
+  // process either does it or it does not. The first sweep is one interval
+  // from now: tearing down what was already lapsed at boot is a different job
+  // with different rules and belongs to the boot reconciliation (#39).
+  const ticker = startLapseTicker({
+    roster,
+    hubAddress: policy.hubAddress,
+    sweepSeconds: lapseSweepSeconds,
+    policy: peering,
+    signer,
+    bearerToken,
+  });
+
   const { server, port } = await listen(app.fetch, host, requestedPort);
 
   const resolvedConfig: ResolvedSlotAppConfig = {
@@ -408,6 +461,7 @@ export async function startSlotApp(
     host,
     dataDir,
     policy,
+    lapseSweepSeconds,
     peering,
     // The paths, never the contents. This record is what a caller reads back
     // and what a log line may safely repeat.
@@ -422,6 +476,7 @@ export async function startSlotApp(
     `[slot-app] operator credentials mounted at ${resolvedConfig.operatorWriteKeyFile} (write key) and ${resolvedConfig.operatorBearerTokenFile} (bearer token) — neither value is ever logged`
   );
   console.log(`[slot-app] admission policy: ${describeSlotPolicy(policy)}`);
+  console.log(`[slot-app] ${describeLapseSweep(lapseSweepSeconds)}`);
   // The keyid is the PUBLIC half of the write key: the value a hub operator
   // has to have on their connector's write_keys allowlist, and the one thing
   // about that credential it is useful to print. The seed never is.
@@ -438,6 +493,10 @@ export async function startSlotApp(
     async stop() {
       if (!running) return;
       running = false;
+      // The ticker first, so nothing starts a teardown against a hub that is
+      // on its way down — and so a suite is never left holding an open
+      // handle for a sweep that will never matter.
+      ticker.stop();
       await new Promise<void>((resolveStop, rejectStop) => {
         server.close((err) => (err ? rejectStop(err) : resolveStop()));
       });

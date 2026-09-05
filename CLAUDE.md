@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, routes and renews
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, routes, renews and lapses
 
 This repository is a pnpm workspace with two packages, one per toon app it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -31,8 +31,9 @@ use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoi
 tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
 to `main`. The slot app is the newer and by far the smaller of the two — see
 [the slot app](#the-slot-app) below for exactly what it does today, which is boot, quote a slot,
-and sell one — peering with the broadcaster's station, routing every address it sells, and treating
-a second purchase as a renewal of the first.
+and sell one — peering with the broadcaster's station, routing every address it sells, treating a
+second purchase as a renewal of the first, and **taking a slot nobody renewed back out on its own
+initiative**.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
@@ -241,9 +242,10 @@ operator key creates the **peering** and writes the routes that make their stati
 [#33](https://github.com/toon-protocol/slop_machine/issues/33),
 [#34](https://github.com/toon-protocol/slop_machine/issues/34),
 [#35](https://github.com/toon-protocol/slop_machine/issues/35),
-[#36](https://github.com/toon-protocol/slop_machine/issues/36) and
-[#37](https://github.com/toon-protocol/slop_machine/issues/37) are what exists, and they are **the
-boot, the quote, the buy, the routes and the renewal**.
+[#36](https://github.com/toon-protocol/slop_machine/issues/36),
+[#37](https://github.com/toon-protocol/slop_machine/issues/37) and
+[#38](https://github.com/toon-protocol/slop_machine/issues/38) are what exists, and they are **the
+boot, the quote, the buy, the routes, the renewal and the lapse**.
 
 It takes the origin's shape rather than inventing one: it exports
 `startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
@@ -323,8 +325,8 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 - **A renewal re-reads the station's self-description, so the hub's table matches what the station
   sells today.** A rung added since is routed; **a rung dropped is removed**, with a signed
   `DELETE /routes/peers/:prefix`, because a write is an upsert and nothing about rewriting the
-  survivors takes the leavers out. That removal is **the one destructive write this app makes** and
-  it is fenced twice: the candidates are read off the hub's own `GET /routes/peers` (bearer-gated,
+  survivors takes the leavers out. Removing a routing-table row is a **destructive write against a
+  table every broadcaster shares** — the other one is the lapse's — and it is fenced twice: the candidates are read off the hub's own `GET /routes/peers` (bearer-gated,
   `source: "runtime"` only — a config row is the operator's and the connector answers `409`) and
   filtered to rows **at or beneath the caller's granted prefix**, and the only function that issues
   the `DELETE` re-checks that fence itself. A `404` is a success: the row is already gone, which is
@@ -363,6 +365,24 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   allowlist and the one thing about that credential the app prints at boot. A file that is not a
   seed is a **refusal to start**, because finding out at the first purchase costs a broadcaster the
   slot price. `credentials.ts` still only reads and trims; decoding belongs to the code that signs.
+- **A slot nobody renewed lapses, and the hub takes it back out itself.** A ticker walks the roster
+  every `TOON_LAPSE_SWEEP_SECONDS` and tears down everything past its lapse time, **with no request
+  needed to trigger it** — a teardown that only happened when somebody else bought would leave a hub
+  carrying its last dead station for ever. Per lapsed slot, in this order and no other: **every
+  route out first** (one signed `DELETE /routes/peers/:prefix` each), **then the peering released**
+  (one signed `DELETE /peers/:id`), **then the slot off the roster**. The first ordering is the
+  connector's rule, not a preference — it refuses to remove a runtime peering while a runtime route
+  still forwards to it (`PeerRouteTableError::PeerInUse`, a `409`), so the other order is a teardown
+  that stops half-way through. The rows selected are the union of both ownership proofs: **at or
+  beneath the granted prefix**, or **forwarding to that slot's own peering label** — because the
+  connector's referential rule is keyed on the label while the fence a grant provides is keyed on
+  the prefix, and a teardown has to satisfy the first while staying inside the second. Releasing the
+  peering is what **brings the collateral back**. The roster row goes **last**: a slot on the roster
+  is the hub's claim that routes and a peering behind it may still exist, so a teardown that failed
+  leaves the slot standing, logs it, and the next sweep tries again — never a peering the hub has
+  forgotten it is funding. The **first sweep is one interval after boot, never at boot**: tearing
+  down what lapsed while the process was down needs the connector's own tables read first, and that
+  is #39's job.
 - **The roster is durable and read back at boot.** It lives in `TOON_DATA_DIR`, is written whole
   through a temporary file that is flushed and renamed over, and `record` returns only once the
   slot is on disk. A roster the app cannot read is a `SlotRosterError` and a non-zero exit, never a
@@ -379,6 +399,10 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   setting and means the hub is admitting nobody. The period is in **seconds** because that is what
   makes a lapse testable without a fake clock, the same way `--ingest-idle-seconds` is. Every one is
   validated fail-closed at boot — a `SlotPolicyError` and a non-zero exit, never a degraded run.
+  `--lapse-sweep-seconds`/`TOON_LAPSE_SWEEP_SECONDS` (default `60`) is how often the roster is
+  walked for lapsed slots — the *granularity* of the lapse, not its length. There is deliberately no
+  value that turns the sweep off, and `0` is a `LapseError` and a non-zero exit: a hub that never
+  reclaims a dead station's peering only ever commits more collateral.
   **`--slot-price` is not payment code**: it is what the quote *reports* so a broadcaster learns the
   cost before buying, and it is the floor the buy will check the connector's own stated
   `X-TOON-Amount` against. Charging is the connector's job, so `TOON_SLOT_PRICE` and the hub's
@@ -417,18 +441,27 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 below just because it is the app that reaches back into a connector's operator surface: no claim
 validation, no settlement key, no payment-header parsing, no pricing logic.
 
-The lapse ticker (#38), the boot reconciliation against the connector's own tables (#39) and the
-hub deploy bundle (#40) **do not exist**. Nothing walks the roster on a timer, so a slot past its
-lapse time keeps its routes and its peering until somebody buys again — and a lapsed slot is
-re-buyable at the same handle, which is the only part of lapsing that works today. There is no
-`deploy/hub/`.
+The boot reconciliation against the connector's own tables (#39) and the hub deploy bundle (#40)
+**do not exist**. Nothing checks the connector's peers and routes against the roster, so a crash
+between two writes, or a hand-edit, leaves the two disagreeing until something rewrites the row —
+and because the first sweep is one interval after boot rather than at it, a slot that lapsed while
+the process was down keeps its routes and its peering until that tick. There is no `deploy/hub/`.
+
+**A known gap the signer inherits, and #39 will meet head-on.** `write-signature.ts` guarantees a
+fresh signature per attempt by remembering, *in that process*, which bases it has signed in which
+second. A restarted app does not remember what its predecessor signed, so an identical write
+repeated inside one second of a restart is refused by the connector as a replay. Nothing in the buy
+or the lapse hits it today (both wait out a second on retry, and a fresh boot rarely repeats a write
+that fast), but boot reconciliation repeats exactly the writes the previous process may have just
+made.
 
 **Vocabulary is enforced by a test, not only by prose.**
 `packages/slot-app/src/slot-app/vocabulary.test.ts` reads the package's own source: `src/slot/` and
 `src/quote/` name no peer and no channel in code, `src/peering/` names no slot and no roster, and
 **nothing anywhere fuses the two words** into a `slotPeering`, a `peer_slot` or a `slot-peering`.
-`src/buy/` and `src/slot-app/` are the only modules exempt from the first two rules, because being
-the join between a slot and a peering is what they are for.
+`src/buy/`, `src/lapse/` and `src/slot-app/` are the only modules exempt from the first two rules,
+because being the join between a slot and a peering is what they are for: the buy makes them, the
+lapse ends one and releases the other, and the app wires both up.
 
 ### The deploy bundle
 
@@ -490,10 +523,10 @@ keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compo
 and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
 image. This repo publishes those two app images and no others — never a connector.
 
-**What is still design:** the slot app boots, quotes, sells a slot, peers, routes and renews, but
-the lapse ticker, the boot reconciliation and the unpriced `/roster`
+**What is still design:** the slot app boots, quotes, sells a slot, peers, routes, renews and lapses,
+but the boot reconciliation and the unpriced `/roster`
 ([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s remaining slices,
-[#38](https://github.com/toon-protocol/slop_machine/issues/38) onward) are not written yet, there
+[#39](https://github.com/toon-protocol/slop_machine/issues/39) onward) are not written yet, there
 is no hub deploy bundle, and there is no devnet node. Do not infer other commands from the sibling
 repos.
 

@@ -24,10 +24,12 @@
  * the third: a module may *explain* the distinction at length, and does, but
  * a fused word is wrong wherever it is written.
  *
- * `src/buy/` and `src/slot-app/` are exempt from the first two rules and only
- * they are: the buy is the one place where a slot is bought and a peering is
- * created in the same breath, and the app is where both are wired up. Being
- * the join is exactly why they are held to rule three like everything else.
+ * `src/buy/`, `src/lapse/` and `src/slot-app/` are exempt from the first two
+ * rules and only they are — the three places where a slot and a peering meet
+ * in one breath. The buy is where a slot is bought and a peering created; the
+ * lapse is where a slot ends and the peering behind it is released; the app is
+ * where both are wired up. Being the join is exactly why all three are held to
+ * rule three like everything else.
  */
 
 import { describe, it, expect } from 'vitest';

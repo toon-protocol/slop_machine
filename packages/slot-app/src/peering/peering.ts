@@ -37,6 +37,15 @@
  * about the caller's node and will say the same thing however many times it
  * is asked, and retrying it only burns the packet's deadline.
  *
+ * **And one write that undoes it**, {@link releasePeering}: a signed
+ * `DELETE /peers/:id`. Establishing a peering opens a channel the hub fronts
+ * collateral toward, so releasing it is the act that brings that collateral
+ * back — and the connector's own kill switch, since the carriage is
+ * deregistered with the row rather than at the next restart. It is the
+ * *second* half of a teardown and never the first: the connector refuses to
+ * remove a peering a runtime route still forwards to, with a `409`, so the
+ * routes come out before this is ever called.
+ *
  * @module
  */
 
@@ -44,6 +53,15 @@ import type { WriteSigner } from '../operator/write-signature.js';
 
 /** Where on the operator surface a peering is established. */
 const PEERS_WRITE_PATH = '/peers';
+
+/**
+ * A local label, as the operator surface will accept one in a path.
+ *
+ * Checked before a label is ever put in a URL. A label carrying a `/` or a
+ * `..` would be a `DELETE` aimed at a path nobody named, and the label read
+ * back off a durable record is not this module's to assume well-formed.
+ */
+const LOCAL_LABEL = /^[a-zA-Z0-9_~-]+$/;
 
 /** How many times one peering write is attempted before it is given up on. */
 const WRITE_ATTEMPTS = 3;
@@ -250,6 +268,118 @@ export async function establishPeering(
  * of the answer is the connector's own view of its table and is not
  * re-modelled here.
  */
+/**
+ * Release the peering at `localLabel` — one signed `DELETE /peers/:id`.
+ *
+ * **This is what brings the collateral back.** Establishing a peering opens a
+ * payment channel the hub fronts collateral toward, so a peering nobody
+ * releases is capital the hub has committed toward a counterparty that has
+ * stopped being one. Removing the row is the act that ends that commitment,
+ * and it is also the connector's own kill switch: `deregister` goes with the
+ * row, so the carriage stops immediately rather than at the next restart.
+ *
+ * **Every route pointing at this peering has to be gone first.** The
+ * connector refuses to remove a runtime peering a runtime route still
+ * forwards to — `PeerRouteTableError::PeerInUse`, answered `409` — which is
+ * the orphaned-row shape its load-time `UnknownPeerId` check exists to
+ * prevent, enforced at mutation time instead. So this is the *second* half of
+ * a teardown and never the first, and the `409` it can answer is the fact
+ * that somebody got the order wrong rather than a transient failure to retry.
+ *
+ * A `404` is a success. The row is already gone, which is the state this was
+ * asking for, and a sweep that finds its predecessor's work done has not
+ * failed.
+ *
+ * Retried on the same terms every other write here is: a hub connector
+ * restarting is transient, and a fresh signature is produced per attempt
+ * because an accepted signature is spent.
+ *
+ * @throws PeeringError with `failure: 'hub'` — every way this can fail is
+ * about the hub's own surface, its own table, or its own ordering. Nothing
+ * about the counterparty's node can refuse a removal.
+ */
+export async function releasePeering(
+  deps: PeeringDependencies,
+  request: { localLabel: string }
+): Promise<void> {
+  if (!LOCAL_LABEL.test(request.localLabel)) {
+    throw new PeeringError(
+      'hub',
+      `this hub will not release ${request.localLabel}: it is not a label it could have written`
+    );
+  }
+
+  const { policy, signer } = deps;
+  const target = new URL(
+    `${policy.operatorUrl}${PEERS_WRITE_PATH}/${encodeURIComponent(request.localLabel)}`
+  );
+  // A DELETE carries no body, and the digest of no body is still what binds
+  // the signature to the request the verifier reconstructs.
+  const body = '';
+
+  let lastError: PeeringError | undefined;
+
+  for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 500);
+    }
+
+    const signature = await signer.sign('DELETE', target.pathname, body);
+
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        method: 'DELETE',
+        headers: {
+          'signature-input': signature['signature-input'],
+          signature: signature.signature,
+          'content-digest': signature['content-digest'],
+        },
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = new PeeringError(
+        'hub',
+        "the hub's own operator surface could not be reached",
+        error instanceof Error ? error.message : String(error)
+      );
+      continue;
+    }
+
+    const said = await response.text();
+
+    // Gone, or already gone. Both are the state this was asking for.
+    if (response.ok || response.status === 404) return;
+
+    if (response.status < 500) {
+      // 409 is the referential rule: a route still forwards here, or the
+      // config file owns the row. 401 is the write-key allowlist. None of
+      // them says anything different for being asked again, and a 409 in
+      // particular means the routes were not taken out first — which is a
+      // fault in the caller's ordering, not in the surface.
+      throw new PeeringError(
+        'hub',
+        `the hub's operator surface refused to release the peering ${request.localLabel} with ${String(response.status)}`,
+        said.trim()
+      );
+    }
+
+    lastError = new PeeringError(
+      'hub',
+      `the hub's operator surface answered ${String(response.status)} releasing ${request.localLabel}`,
+      said.trim()
+    );
+  }
+
+  throw (
+    lastError ??
+    new PeeringError(
+      'hub',
+      `the peering ${request.localLabel} was never released`
+    )
+  );
+}
+
 function read(localLabel: string, said: string): EstablishedPeering {
   let answered: unknown;
   try {
