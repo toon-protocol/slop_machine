@@ -1,11 +1,19 @@
 # A slot is bought; a peering is still only created
 
-**Status:** Accepted. **Amended 2026-09-04** ([#34](https://github.com/toon-protocol/slop_machine/issues/34)):
-the claim that a peering which cannot be established "rejects the packet, so no payment is taken" is
-withdrawn — an app that answers is answered for, and a refusal here is paid for. See
-[the amendment](#amendment-2026-09-04-a-refusal-is-paid-for-so-the-design-moves-refusals-rather-than-pricing-them-at-nothing)
-at the foot of this record. Everything else stands: a slot is bought, a peering is still only
-created.
+**Status:** Accepted. **Amended twice, both on 2026-09-04.**
+
+**First** ([#34](https://github.com/toon-protocol/slop_machine/issues/34)): the claim that a peering
+which cannot be established "rejects the packet, so no payment is taken" is withdrawn — an app that
+answers is answered for, and a refusal here is paid for. See
+[the first amendment](#amendment-2026-09-04-a-refusal-is-paid-for-so-the-design-moves-refusals-rather-than-pricing-them-at-nothing).
+
+**Second** ([#38](https://github.com/toon-protocol/slop_machine/issues/38)): the first amendment's
+rule that "a new refusal added at the buy is a new way to charge a broadcaster for nothing" is
+**qualified, not withdrawn** — the slot cap is refused at the buy, because a buyer the quote already
+warned is not being charged for nothing, and because a cap that is only reported bounds nothing. See
+[the second amendment](#amendment-2026-09-04-the-cap-is-enforced-at-the-buy-because-a-warned-buyer-is-not-charged-for-nothing).
+
+Everything else stands: a slot is bought, a peering is still only created.
 
 **Scope:** slopmachine hub — the slot app. Reconciles with
 [connector ADR 0043](https://github.com/toon-protocol/connector/blob/main/docs/adr/0043-purchasable-peering-is-removed.md),
@@ -75,11 +83,26 @@ things. Auto-approval removes three of them outright:
   it admits. Hub capital grows linearly with the roster, and the carriage fee has to cover it.
 - **Admission is a price, not a judgement.** That is the point — it makes onboarding self-service —
   but it means abuse bounds are the slot app's problem, since the connector no longer carries any.
-- **A refusal at a paid address is paid for** *(added by the 2026-09-04 amendment)*. The connector
+- **A refusal at a paid address is paid for** *(added by the first 2026-09-04 amendment)*. The connector
   fulfills on any complete answer from the app whatever its status, so the app cannot decline
   payment by refusing. Every foreseeable refusal therefore belongs at the cheap quote address rather
   than at the buy, and a new refusal added at the buy is a new way to charge a broadcaster for
-  nothing. See the amendment below.
+  nothing. See the first amendment below.
+
+  > **Amended 2026-09-04 ([#38](https://github.com/toon-protocol/slop_machine/issues/38)).** The
+  > last sentence is **too strong, and is left standing so the rule it states stays legible**. It
+  > holds for every refusal a broadcaster could not have seen coming — which is all of them but
+  > one. The **slot cap** is refused at the buy, deliberately, because a buyer who read
+  > `hasCapacity: false` at the quote and bought anyway was not charged for nothing: they were
+  > charged for an answer they had already been given at a floor price. See
+  > [the second amendment](#amendment-2026-09-04-the-cap-is-enforced-at-the-buy-because-a-warned-buyer-is-not-charged-for-nothing)
+  > at the foot of this record.
+- **The hub's collateral is bounded by the cap and by nothing else** *(added by the second
+  2026-09-04 amendment)*. Every admission opens a channel the hub fronts collateral toward, so the
+  roster is a balance-sheet commitment that grows linearly with its own size. `TOON_SLOT_CAP` is
+  therefore enforced at the buy rather than only reported at the quote, and it applies to a **new**
+  slot only: a renewal opens no channel, so it adds nothing to the commitment being bounded and is
+  never refused for it.
 
 ## Amendment, 2026-09-04: a refusal is paid for, so the design moves refusals rather than pricing them at nothing
 
@@ -146,3 +169,68 @@ the hub's operator, through the operator surface, with the operator's own key. N
 who creates a peering, that the fulfill means you are peered, that the work happens synchronously
 before the app answers, or that collapsing *slot* and *peering* in the code is what would turn this
 into a violation of connector ADR 0043.
+## Amendment, 2026-09-04: the cap is enforced at the buy, because a warned buyer is not charged for nothing
+
+**Cause.** [Issue #38](https://github.com/toon-protocol/slop_machine/issues/38) landed the lapse —
+the hub taking an unrenewed slot's routes and peering back out on its own initiative — which is the
+only thing that ever *reduces* a hub's collateral commitment. Building it made the other half
+visible: the only thing that ever *bounds* that commitment, `TOON_SLOT_CAP`, was not being
+enforced. `GET /quote` reported `hasCapacity: false` at the cap and `POST /buy` admitted the caller
+regardless, so the number a hub operator set was decoration. Closing that meant adding a refusal at
+the buy, which the first amendment had just finished arguing against, so the argument is settled
+here in the record rather than quietly in code.
+
+**What the first amendment established, and still establishes.** A refusal at a paid address is
+paid for: the connector fulfills on any complete answer from the app whatever its HTTP status, so
+an app cannot decline payment by refusing. From that it drew the working rule that every foreseeable
+refusal belongs at the cheap quote address, and that **"a new refusal added at the buy is a new way
+to charge a broadcaster for nothing."** Nothing about the mechanism has changed. The premise is
+still true and the design still moves refusals rather than pricing them at nothing.
+
+**Why the rule is qualified.** "For nothing" is doing the work in that sentence, and it is what
+distinguishes this refusal from every other one. The refusals the first amendment was written
+against are the ones a broadcaster **could not have seen coming**: a handle somebody else had
+claimed, arriving after they had configured their station for it. Being charged for one of those is
+being charged for a fact the hub could have told them for a floor price and did not. The cap is not
+that. The quote answers `hasCapacity`, and it answers it *about this hub, right now, at the cheap
+address that exists for exactly this question*. A broadcaster who reads `false` and buys anyway has
+had the warning the amendment demanded they be given. Charging them is charging for an answer, not
+charging for nothing — and it is the same charge they would have paid for any other purchase that
+told them something they did not want to hear.
+
+**Why the alternative is worse.** The alternative to refusing is admitting, and admitting is not
+free to anybody. Establishing a peering opens a payment channel the hub fronts collateral toward
+(this record's own Consequences, and connector ADR 0058), so **the roster is a balance-sheet
+commitment that grows linearly with its own size**. The cap is the only thing bounding it: there is
+no rate limit, no approval step and no human in the loop, because admission here is a price rather
+than a judgement. A cap that is only *reported* bounds nothing at all — any buyer who ignores the
+quote is admitted, and a hub operator's stated capital limit becomes a suggestion the internet is
+free to decline. The failure that produces is not a refused broadcaster; it is a hub that has
+committed collateral it cannot cover, which takes down every station on it, including the ones that
+were admitted properly. Weighing one paid refusal against that is not close.
+
+**A renewal is never refused for the cap, at it or over it.** This is the part that keeps the
+enforcement honest, and it is a rule about what the cap actually bounds. The cap bounds *collateral*
+— and a renewal opens no channel, writes no new peering and adds nothing to the commitment. It is
+the same broadcaster the hub is already carrying, paying to go on being carried. Refusing one would
+take a paying station off the air for renewing on time, which is the exact opposite of what the
+period is for. It also has an operational consequence worth stating: a hub operator who *lowers*
+their cap beneath their own roster closes the door without evicting anybody behind it, and the
+roster shrinks back to the new bound by slots lapsing rather than by the hub throwing out stations
+that did nothing wrong.
+
+**What stays unfair, said out loud.** Two broadcasters can quote the last free slot, both be told
+`hasCapacity: true`, and both buy. One of them is refused and pays the slot price for it, having
+been told yes. That is a real cost to a real person and it is not designed away here. It is not
+designed away because the alternatives are worse: reserving capacity at the quote would let a cheap
+address hold a hub's collateral hostage for free, and admitting both would be the unbounded roster
+this amendment exists to prevent. The window is the time between one broadcaster's quote and their
+buy, the refusal says plainly that capacity is what was missing and that a lapse frees a place, and
+the honest position is that it can happen rather than that it cannot.
+
+**What does not change.** The decision itself, and the first amendment in full. A slot is bought; a
+peering is still only created, by the hub's operator, through the operator surface, with the
+operator's own key. A refusal at a paid address is still paid for, every refusal that *can* be moved
+to the quote is still moved there, there is still no refund path and none is wanted, and the set of
+refusals at the buy is still deliberately small — one longer than it was, and this is the argument
+for the one.

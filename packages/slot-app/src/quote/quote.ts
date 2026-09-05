@@ -29,6 +29,13 @@
  * correction is recorded in ADR 0003's amendment, which this address is the
  * implementation of.
  *
+ * **`hasCapacity: false` is a warning that is enforced, not advice.** The buy
+ * refuses a new slot at the cap, because a cap that were only reported here
+ * would bound nothing — and the hub's collateral is what it bounds. That is
+ * the second amendment's subject, and it is the one place in this design
+ * where a refusal the quote *could* have foreseen is charged for anyway: the
+ * broadcaster was told, at a floor price, and bought past it.
+ *
  * **It has its own connector prefix, and it is not the buy's.** One handler,
  * one price: an address reachable at another address's price is a slot sold
  * for the cost of a quote, or a quote sold for the cost of a slot. `/quote`
@@ -118,8 +125,14 @@ export interface SlotQuote {
    * Whether the hub can admit another slot right now.
    *
    * `false` is the refusal this whole address exists to move: a broadcaster
-   * who cannot be admitted learns it here, for the price of a quote, instead of
-   * paying the slot price to be turned away.
+   * who cannot be admitted learns it here, for the price of a quote, instead
+   * of paying the slot price to be turned away. It is a **warning that means
+   * something** — the buy enforces the cap rather than merely reporting it,
+   * so a new purchase made past this answer is refused at the slot price.
+   *
+   * It says nothing about a **renewal**. A caller who already holds a slot —
+   * see {@link SlotQuote.slot} — can always renew, at the cap or over it,
+   * because renewing adds nothing to the commitment the cap bounds.
    */
   hasCapacity: boolean;
   /** How many slots the hub may hold at once — the operator's own cap. */
@@ -200,9 +213,11 @@ export function quoteRoutes(deps: QuoteDependencies): Hono {
       hubAddress: policy.hubAddress,
       slotPrice: policy.slotPrice,
       slotPeriodSeconds: policy.slotPeriodSeconds,
-      // A slot the caller already holds is renewable whether or not the hub
-      // has room for a new one — but capacity is reported as the plain fact it
-      // is, and #35 decides what a renewal does with it.
+      // Reported as the plain fact it is: whether the hub has room for
+      // ANOTHER slot. A caller who already holds one can always renew, at the
+      // cap or over it, so this field is not a prediction about their next
+      // purchase — `slot` beside it is what tells them which question they
+      // are asking.
       hasCapacity: roster.size() < policy.slotCap,
       slotCap: policy.slotCap,
       slotsHeld: roster.size(),

@@ -303,15 +303,29 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   slot_not_recorded` (the hub's
   own data directory, after the peering already landed — said out loud rather than left as a bare
   `500`, because what the broadcaster needs to know is that they are peered and that a retry costs
-  no second channel). **A hub at its cap is deliberately not
-  refused here** — that answer is the quote's, and charging the slot price for it again is what the
-  ADR 0003 amendment forbids. **No refusal leaves a half-written slot**: the roster is written last
+  no second channel) — plus the one refusal the quote *could* have foreseen, `503 at_capacity`,
+  which is [ADR 0003's second amendment](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md)'s
+  whole subject. **No refusal leaves a half-written slot**: the roster is written last
   and only once the peering and every route are in place, so a refused purchase is one the hub does
   not count. What can survive it is the peering and any route written before the refusal — both
   keyed by the caller's own derived label, both rewritten to the same values by a retry rather than
   duplicated, and neither of them a slot. Rolling them back would be worse: a purchase by a
   broadcaster who already holds a slot writes the same rows, and a rollback could not tell a row it
   had just created from one it had merely rewritten.
+- **The cap is enforced at the buy, not merely reported at the quote.** A purchase that would be a
+  **new** slot is refused `503 {"error": "at_capacity"}` once the roster is at `TOON_SLOT_CAP`,
+  **before any operator write**, so a hub at its cap opens no channel it cannot cover. This is a
+  deliberate exception to the first ADR 0003 amendment's rule that a new refusal at the buy charges
+  a broadcaster for nothing: the quote answers `hasCapacity: false` at a floor price, so a buyer who
+  went past it was charged for an answer rather than for nothing — and a cap that is only *reported*
+  bounds nothing at all, while the hub's collateral grows linearly with the roster and is bounded by
+  this number and no other. **A renewal is never refused for the cap, at it or over it**: renewing
+  opens no channel, so it adds nothing to the commitment the cap bounds, and an operator who lowers
+  their cap beneath their own roster closes the door without evicting the stations behind it. What
+  stays unfair and is not pretended away: two broadcasters can quote the last free slot and both
+  buy, and one of them pays for a refusal after being told yes. The
+  [second amendment](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) is the whole
+  argument.
 - **Buying again at `/buy` is renewing — there is no second call.** A purchase by a payer who
   already holds a slot walks exactly the same path: the handle is read off the roster rather than
   derived again, so the granted prefix and the handle are unchanged; the peering write finds the
@@ -399,6 +413,7 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   setting and means the hub is admitting nobody. The period is in **seconds** because that is what
   makes a lapse testable without a fake clock, the same way `--ingest-idle-seconds` is. Every one is
   validated fail-closed at boot — a `SlotPolicyError` and a non-zero exit, never a degraded run.
+  **The cap is a hard bound**: the buy refuses a new slot at it, and a renewal never is.
   `--lapse-sweep-seconds`/`TOON_LAPSE_SWEEP_SECONDS` (default `60`) is how often the roster is
   walked for lapsed slots — the *granularity* of the lapse, not its length. There is deliberately no
   value that turns the sweep off, and `0` is a `LapseError` and a non-zero exit: a hub that never

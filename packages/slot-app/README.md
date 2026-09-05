@@ -202,10 +202,15 @@ slot. Undoing them would be worse than leaving them: a purchase by a broadcaster
 slot writes the same rows, and a rollback could not tell a row it had just created from one it had
 merely rewritten.
 
-A hub **at its cap is not refused here** — that answer lives at the quote, where it costs a floor
-price, and charging the slot price for it a second time is exactly what
-[ADR 0003's amendment](../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md#amendment-2026-09-04-a-refusal-is-paid-for-so-the-design-moves-refusals-rather-than-pricing-them-at-nothing)
-forbids.
+A hub **at its cap refuses a new slot here**, `503 {"error": "at_capacity"}`, before any operator
+write — and it is the one refusal at this address that the quote could have foreseen. The cap is the
+hub's capital bound: every admission opens a channel it fronts collateral toward, so a cap that were
+only *reported* at the quote would bound nothing. Charging for that answer is not charging for
+nothing — the quote said `hasCapacity: false` for a floor price and the buyer went past it — which
+is the argument
+[ADR 0003's second amendment](../../docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md#amendment-2026-09-04-the-cap-is-enforced-at-the-buy-because-a-warned-buyer-is-not-charged-for-nothing)
+records in full. **A renewal is never refused for the cap**, at it or over it: renewing opens no
+channel, so it adds nothing to what the cap bounds.
 
 ### Buying again is renewing
 
@@ -356,7 +361,9 @@ need a code change.
 **`--hub-address`, `--slot-price`, `--slot-period-seconds` and `--slot-cap` are the hub's admission
 policy**, and they are configuration for the same reason: admission here is a price rather than a
 judgement, so those numbers *are* the policy and changing one must never be a code change.
-`--slot-cap` of `0` is a legal setting and means the hub is admitting nobody. `--slot-period-seconds` is in seconds because that is what makes a lapse testable without
+`--slot-cap` of `0` is a legal setting and means the hub is admitting nobody — and because a
+renewal is never refused for the cap, lowering it closes the door without evicting the stations
+behind it. `--slot-period-seconds` is in seconds because that is what makes a lapse testable without
 a fake clock — the suite sets it to a second or two, exactly as the station origin's
 `--ingest-idle-seconds` made a time rule ordinary configuration.
 
