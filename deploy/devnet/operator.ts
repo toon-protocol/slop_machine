@@ -173,6 +173,31 @@ export interface AcceptedClaim {
   book?: string;
 }
 
+/**
+ * Whether two spellings name the same channel.
+ *
+ * A channel id crosses this topology as a string through several hands — the
+ * slot app's answer, the connector's own tables, the token network's `bytes32`
+ * — and the `0x` prefix and the letter case are not agreed across all of them.
+ * Normalising once here is better than a comparison that silently finds
+ * nothing, which is what it did: the money had moved and the claim behind it
+ * looked absent.
+ */
+export function sameChannel(one: string, other: string): boolean {
+  const bare = (id: string) => id.trim().toLowerCase().replace(/^0x/, '');
+  return bare(one) === bare(other);
+}
+
+/** Claims as a string, for a failure message. `cumulativeAmount` is a bigint. */
+export function describeClaims(claims: AcceptedClaim[]): string {
+  return JSON.stringify(
+    claims.map((claim) => ({
+      ...claim,
+      cumulativeAmount: claim.cumulativeAmount.toString(),
+    }))
+  );
+}
+
 /** Every claim this node has accepted, out of both of its books. */
 export async function readAcceptedClaims(
   baseUrl: string,

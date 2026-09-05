@@ -60,10 +60,12 @@ import {
 } from './self-description.js';
 import {
   basePriceOf,
+  describeClaims,
   readAcceptedClaims,
   readCarriedPeerings,
   readCarriedRoutes,
   redeemLatestClaim,
+  sameChannel,
   slopeOf,
   type AcceptedClaim,
   type CarriedPeering,
@@ -1469,13 +1471,12 @@ describe('the devnet', () => {
     const inbound = stationClaims.filter(
       (claim) =>
         claim.direction === INBOUND &&
-        claim.channelId.toLowerCase() ===
-          bought.peering.channel.id.toLowerCase()
+        sameChannel(claim.channelId, bought.peering.channel.id)
     );
 
     expect(
       inbound.length,
-      `the station holds ${String(inbound.length)} inbound claims on the channel the hub funded: ${JSON.stringify(stationClaims)}`
+      `the station holds ${String(inbound.length)} inbound claims on the channel the hub funded (${bought.peering.channel.id}); every claim it holds is ${describeClaims(stationClaims)}`
     ).toBe(1);
 
     // A claim is CUMULATIVE, so this is everything that channel has carried —
@@ -1520,8 +1521,7 @@ describe('the devnet', () => {
       stationClaims.find(
         (claim) =>
           claim.direction === INBOUND &&
-          claim.channelId.toLowerCase() ===
-            bought.peering.channel.id.toLowerCase()
+          sameChannel(claim.channelId, bought.peering.channel.id)
       )?.cumulativeAmount ?? 0n;
 
     expect(
@@ -1544,8 +1544,7 @@ describe('the devnet', () => {
       stationClaims.find(
         (claim) =>
           claim.direction === INBOUND &&
-          claim.channelId.toLowerCase() ===
-            bought.peering.channel.id.toLowerCase()
+          sameChannel(claim.channelId, bought.peering.channel.id)
       )?.cumulativeAmount ?? 0n;
 
     expect(
