@@ -158,7 +158,7 @@ import {
   NO_PAID_TERMINATION_MESSAGE,
 } from '../slot/refusal.js';
 import type { SlotAppRefusal } from '../slot/refusal.js';
-import type { SlotRoster } from '../slot/roster.js';
+import type { GrantedRoute, SlotRoster } from '../slot/roster.js';
 
 /**
  * The prefix the buy sits beneath — and, being the whole address, is.
@@ -497,13 +497,17 @@ export function buyRoutes(deps: BuyDependencies): Hono {
     }
 
     // 6. The peering — the hub's operator key's own act, synchronously,
-    //    before any answer goes back.
+    //    before any answer goes back. The chain is the one the connector
+    //    stated this broadcaster demonstrably paid on, so the peering settles
+    //    where the money already moved rather than on a guess between two
+    //    shared chains.
+    const chain = statedChain(c.req.header(CHAIN_HEADER));
     let peering;
     try {
       peering = await establishPeering(deps, {
         localLabel: label,
         stationUrl: body,
-        chain: statedChain(c.req.header(CHAIN_HEADER)),
+        chain,
       });
     } catch (error) {
       return refusePeering(c, error);
@@ -556,7 +560,21 @@ export function buyRoutes(deps: BuyDependencies): Hono {
       Math.max(now, held?.lapsesAt ?? now) +
       slotPolicy.slotPeriodSeconds * 1000;
     try {
-      await roster.record({ payer: payerKey, label, lapsesAt });
+      await roster.record({
+        payer: payerKey,
+        label,
+        lapsesAt,
+        // What the hub granted, alongside when it lapses. Recorded so that a
+        // boot which finds one of these rows missing from the hub's own
+        // connector can write it back — without that, "the roster and the
+        // routing table disagree" would be a disagreement the hub could see
+        // and not settle. The URL rides along for the same reason: rewriting
+        // a row means naming the peering it points at, and establishing that
+        // peering means naming the station's own document.
+        stationUrl: body,
+        ...(chain === undefined ? {} : { chain }),
+        routes: written.map(granted),
+      });
     } catch (error) {
       // A hub whose disk failed under a paid purchase. Said out loud rather
       // than left as a bare 500: the peering IS established, so what the
@@ -773,6 +791,25 @@ function answered(route: ForwardedRoute): BoughtRoute {
     // Absent rather than "0" on a flat price, exactly as the station's own
     // document spells it: a reader written against a flat ladder sees the
     // document it always saw.
+    ...(route.pricePerKib === 0n
+      ? {}
+      : { pricePerKib: route.pricePerKib.toString() }),
+  };
+}
+
+/**
+ * A written route as the ROSTER records it — what the hub granted, so a later
+ * boot can tell whether its own connector is still carrying it.
+ *
+ * The same decimal strings the answer carries, and for the same reason: a
+ * price is a `u64` of base units, and a hub that round-tripped one through a
+ * double would come back from a restart rewriting the row a unit under the
+ * station's own termination.
+ */
+function granted(route: ForwardedRoute): GrantedRoute {
+  return {
+    prefix: route.prefix,
+    price: route.price.toString(),
     ...(route.pricePerKib === 0n
       ? {}
       : { pricePerKib: route.pricePerKib.toString() }),

@@ -14,9 +14,9 @@
  *   - the app boots on a *configured* port against a *configured* directory
  *     and answers liveness there;
  *   - the port is configuration, not a constant — two apps run side by side;
- *   - liveness is unpriced: it requires no payment header, reads none, and
- *     echoes none, and stays that way now that a paid address exists beside
- *     it;
+ *   - the two unpriced addresses — liveness, and the hub operator's roster —
+ *     require no payment header, read none, and echo none, and stay that way
+ *     now that a paid address exists beside them;
  *   - both operator credentials are named by path, both are required, and the
  *     refusal says which one is wrong;
  *   - neither credential value reaches a log line, an error message, or the
@@ -241,7 +241,7 @@ describe('the slot app', () => {
   it('answers nothing at an address it does not serve', async () => {
     const app = await boot();
 
-    for (const path of ['/', '/slots', '/peers', '/healthz', '/roster']) {
+    for (const path of ['/', '/slots', '/peers', '/healthz', '/rosters']) {
       const res = await fetch(appUrl(app, path));
       await res.arrayBuffer();
       expect(res.status).toBe(404);
@@ -288,47 +288,55 @@ describe('the hub operator surface', () => {
   });
 });
 
-describe('liveness is unpriced, and the app holds no payment code', () => {
+describe('the unpriced addresses are unpriced, and the app holds no payment code', () => {
   it('requires no payment header, reads none, and echoes none', async () => {
     const app = await boot();
 
-    // No headers at all. Liveness is what a supervisor inside the node dials,
-    // and it is never paid — the app port is published on no interface and
-    // /health has no route on the hub's connector.
-    const bare = await fetch(appUrl(app, '/health'));
-    const bareBody = await bare.text();
-    expect(bare.status).toBe(200);
+    // BOTH of them, on the same terms. Liveness is what a supervisor inside
+    // the node dials and the roster is what the hub operator reads; neither is
+    // ever paid, because the app port is published on no interface and neither
+    // address has a route on the hub's connector.
+    for (const path of ['/health', '/roster']) {
+      // No headers at all.
+      const bare = await fetch(appUrl(app, path));
+      const bareBody = await bare.text();
+      expect({ path, status: bare.status }).toEqual({ path, status: 200 });
 
-    // Payment-shaped headers change nothing and come back nowhere. The app
-    // holds no payment code, so it neither requires nor reads one — and the
-    // three attribution headers a terminating connector states are read by
-    // the paid surface only, which does not exist yet.
-    const noisy = await fetch(appUrl(app, '/health'), {
-      headers: {
-        'x-payment': 'not-read',
-        'x-toon-payer': 'evm:0xnot-read',
-        'x-toon-amount': '999999',
-        'x-toon-chain': 'not-read',
-        authorization: 'Bearer not-read',
-      },
-    });
-    const noisyBody = await noisy.text();
+      // Payment-shaped headers change nothing and come back nowhere. The app
+      // holds no payment code, so these addresses neither require nor read
+      // one — the three attribution headers a terminating connector states
+      // are read by the paid surface and by nothing else.
+      const noisy = await fetch(appUrl(app, path), {
+        headers: {
+          'x-payment': 'not-read',
+          'x-toon-payer': 'evm:0xnot-read',
+          'x-toon-amount': '999999',
+          'x-toon-chain': 'not-read',
+          authorization: 'Bearer not-read',
+        },
+      });
+      const noisyBody = await noisy.text();
 
-    expect(noisy.status).toBe(200);
-    for (const header of [
-      'x-payment',
-      'x-payment-response',
-      'x-toon-payer',
-      'x-toon-amount',
-      'x-toon-chain',
-      'authorization',
-      'www-authenticate',
-    ]) {
-      expect(noisy.headers.get(header)).toBeNull();
-    }
-    for (const sent of ['not-read', '999999']) {
-      expect(noisyBody).not.toContain(sent);
-      expect(bareBody).not.toContain(sent);
+      expect({ path, status: noisy.status }).toEqual({ path, status: 200 });
+      for (const header of [
+        'x-payment',
+        'x-payment-response',
+        'x-toon-payer',
+        'x-toon-amount',
+        'x-toon-chain',
+        'authorization',
+        'www-authenticate',
+      ]) {
+        expect({ path, header, got: noisy.headers.get(header) }).toEqual({
+          path,
+          header,
+          got: null,
+        });
+      }
+      for (const sent of ['not-read', '999999', 'evm:0xnot-read']) {
+        expect(noisyBody).not.toContain(sent);
+        expect(bareBody).not.toContain(sent);
+      }
     }
   });
 

@@ -15,8 +15,9 @@
  * this app — the one that reaches back into a connector's operator surface —
  * does not become the exception to it.
  *
- * What exists today (issues #33, #34, #35 and #36) is the boot, the quote and
- * the buy:
+ * What exists today (issues #33 through #39) is the boot, the quote, the buy,
+ * the renewal, the lapse, the reconciliation and the operator's two unpriced
+ * addresses:
  *
  *   - `GET /health` on the app port: process liveness, for a hub operator's
  *     supervisor inside the node. It requires no payment header, reads none,
@@ -24,6 +25,11 @@
  *     and **must never acquire a route** — the app port is published on no
  *     interface, which is what makes "unpriced" mean "in-node" rather than
  *     "free to the internet".
+ *
+ *   - `GET /roster` on the app port: **unpriced on exactly the same terms**,
+ *     and on the same terms it must never acquire a connector route. It
+ *     answers who holds a slot and when each lapses, so a hub operator does
+ *     not read their own database by hand. See `../slot/roster-view.ts`.
  *
  *   - `GET /quote` on the app port: **paid**, at a floor price, beneath its
  *     own connector prefix and never the buy's. It answers the prefix this
@@ -76,11 +82,15 @@
  *     `../lapse/lapse.ts` for why that order is the connector's rule rather
  *     than a preference, and why the roster row goes last.
  *
- * The boot reconciliation (#39) is deliberately not here yet: the first sweep
- * happens one interval after boot rather than at it, so a slot that lapsed
- * while the process was down keeps its routes and its peering until that
- * first tick, and nothing yet checks the connector's own tables against the
- * roster.
+ *   - **boot reconciliation** (#39), run before the port binds. It reads the
+ *     connector's own peerings and routes over the bearer-gated read surface
+ *     and makes them agree with the roster: what a crash left unwritten is
+ *     written, what the roster does not hold is taken back out, and anything
+ *     that lapsed while the process was down is torn down at once rather than
+ *     surviving the downtime. That last is why the ticker's first sweep is one
+ *     interval after boot and not at it — see `../reconcile/reconcile.ts`,
+ *     which also holds the three fences that keep a removal off a row this app
+ *     does not own.
  *
  * The app port, the data directory and every number in the hub's admission
  * policy are configuration rather than constants: the suite boots real
@@ -108,9 +118,11 @@ import {
 } from '../peering/policy.js';
 import type { PeeringPolicy } from '../peering/policy.js';
 import { QUOTE_ROUTE_PREFIX, quoteRoutes } from '../quote/quote.js';
+import { reconcileAtBoot } from '../reconcile/reconcile.js';
 import { describeSlotPolicy, resolveSlotPolicy } from '../slot/policy.js';
 import type { SlotPolicy } from '../slot/policy.js';
 import { openSlotRoster } from '../slot/roster.js';
+import { ROSTER_ROUTE_PATH, rosterRoutes } from '../slot/roster-view.js';
 import { VERSION } from '../version.js';
 
 // ---------- Defaults ----------
@@ -136,6 +148,15 @@ export const DEFAULT_DATA_DIR = './data';
  * sale and on the internet at the same time.
  */
 export const HEALTH_ROUTE_PATH = '/health';
+
+/**
+ * Where the roster answers. Unpriced, and outside every prefix the hub's
+ * connector routes, on exactly the same terms as liveness: it is the hub
+ * operator asking their own process who is admitted, on a port only they can
+ * reach, and a route to it would put that answer on sale and on the internet
+ * at once.
+ */
+export { ROSTER_ROUTE_PATH } from '../slot/roster-view.js';
 
 /**
  * Where the quote answers. **Paid**, beneath its own connector prefix and
@@ -296,7 +317,8 @@ export interface SlotAppInstance {
  * is what a hub operator's supervisor dials to decide whether to restart. It
  * is not a claim about the roster, about the hub's capacity, or about whether
  * any broadcaster holds a slot; those are the operator's roster address and a
- * broadcaster's quote, and neither is this.
+ * broadcaster's quote, and neither is this. A process that answers here has
+ * bound its port, which means it has already reconciled.
  */
 interface LivenessResponse {
   status: 'healthy';
@@ -419,6 +441,13 @@ export async function startSlotApp(
   // and reachable from inside the node only.
   app.get(HEALTH_ROUTE_PATH, (c) => c.json(livenessResponse()));
 
+  // The roster, on the same unpriced footing as liveness: no payment header
+  // is read and none is required, because there is no connector in front of
+  // this address to state one. It answers who holds a slot and when each
+  // lapses — the question a hub operator would otherwise answer by reading a
+  // database by hand.
+  app.route(ROSTER_ROUTE_PATH, rosterRoutes({ policy, roster }));
+
   // The quote, mounted at its own prefix and beneath nothing. The connector in
   // front terminates one route on exactly this path at its own floor price;
   // the buy will get another, at the slot price, and the two must never be the
@@ -452,6 +481,23 @@ export async function startSlotApp(
     policy: peering,
     signer,
     bearerToken,
+  });
+
+  // Boot reconciliation (#39), before the port binds and before this hub can
+  // take a purchase. The roster and the connector's own tables are two records
+  // of one fact, and a crash between two writes — or a hand-edit — leaves them
+  // disagreeing; this is where the disagreement stops being permanent. It also
+  // tears down anything that lapsed while the process was down, which is what
+  // the ticker's first-sweep-one-interval-later deliberately leaves to it:
+  // DOWNTIME MUST NOT EXTEND ANYBODY'S SLOT. It never throws — a hub whose own
+  // connector is still coming up boots anyway and reconciles next time.
+  await reconcileAtBoot({
+    roster,
+    hubAddress: policy.hubAddress,
+    policy: peering,
+    signer,
+    bearerToken,
+    sweep: ticker.sweep,
   });
 
   const { server, port } = await listen(app.fetch, host, requestedPort);
