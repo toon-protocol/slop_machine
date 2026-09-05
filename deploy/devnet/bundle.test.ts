@@ -334,7 +334,15 @@ const PACKAGE_MANIFESTS = [
  * devnet that has to fund a viber needs.
  */
 const CONTRACTS_DIR = `${DEVNET_DIR}/contracts`;
-const EXPECTED_ARTIFACTS = ['MockERC20', 'TokenNetworkRegistry'];
+const EXPECTED_ARTIFACTS = [
+  'MockERC20',
+  'TokenNetworkRegistry',
+  // Deployed by the REGISTRY rather than from here, so only its abi is ever
+  // used — it is how a run reads a channel: what each participant deposited,
+  // which is the assertion this whole epic exists to make, and what a claim
+  // against them has advanced to.
+  'TokenNetwork',
+];
 
 /**
  * `{ abi, bytecode }` and nothing else. This is what makes the key-material
