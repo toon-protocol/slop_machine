@@ -44,6 +44,20 @@
  * request is what keeps a slow chain from costing a broadcaster a purchase,
  * and it would be worth nothing if the retry could not be authenticated.
  *
+ * **And the verifier's memory outlives this process, so a fresh signer treats
+ * the second it was born in as already spent.** The replay cache lives in the
+ * connector, not here: it forgets a signature when that signature's own
+ * `expires` passes, and cares nothing for which of the app's processes made
+ * it. A map of what *this* process has signed therefore cannot see what its
+ * predecessor signed a few hundred milliseconds ago — and boot reconciliation
+ * repeats exactly the writes the previous process may just have made, so a
+ * crash and a restart inside one second would walk straight into a `401`
+ * nobody could act on. Every base the predecessor signed was signed at a
+ * second at or before this signer's own boot second, so refusing to sign at
+ * that second or earlier is enough to be certain of a base nobody has spent.
+ * The cost is bounded and paid once: the first write of a process waits, at
+ * most, for the top of the next second.
+ *
  * Nothing here logs, returns or embeds the seed. What leaves this module is
  * three header values and a public key.
  *
@@ -116,12 +130,15 @@ export interface WriteSigner {
   /**
    * Sign one write, resolving with the three headers it must carry.
    *
-   * **Never resolves with a signature it has already produced.** Where a
-   * retry would otherwise sign an identical parameter set — same method,
-   * same path, same body, same `created` second — this waits for the clock
-   * to advance rather than emitting bytes the verifier has already spent.
-   * The wait is bounded by one second, and it happens only on a retry of a
-   * byte-identical write inside the same second.
+   * **Never resolves with a signature it has already produced, and never with
+   * one a previous process could have produced.** Where a retry would
+   * otherwise sign an identical parameter set — same method, same path, same
+   * body, same `created` second — this waits for the clock to advance rather
+   * than emitting bytes the verifier has already spent; and a signer's very
+   * first write waits past the second the signer was built in, because a
+   * restarted app repeating a write its predecessor just made is the same
+   * collision seen from outside the process. Either wait is bounded by one
+   * second.
    *
    * @param method - the HTTP method, upper-cased into the base as the
    * verifier upper-cases it.
@@ -164,6 +181,12 @@ export function createWriteSigner(writeKey: string): WriteSigner {
   // each other, and only a byte-identical retry does.
   const spent = new Map<string, number>();
 
+  // The second this signer was built in, which stands in for every base the
+  // PREVIOUS process may have signed. Nothing it signed can have been signed
+  // later than this, so a base with no entry of its own is treated as having
+  // been spent here — see this module's header.
+  const bornAt = nowSeconds();
+
   return {
     keyid,
     async sign(method, path, body) {
@@ -171,7 +194,7 @@ export function createWriteSigner(writeKey: string): WriteSigner {
       const upperMethod = method.toUpperCase();
       const base = `${upperMethod} ${path} ${contentDigest}`;
 
-      const created = await freshCreated(spent, base);
+      const created = await freshCreated(spent, base, bornAt);
       const expires = created + SIGNATURE_TTL_SECONDS;
 
       const params = signatureParams({ created, expires, keyid });
@@ -254,17 +277,26 @@ function signatureBase(
  * that claims to have been made in a second that has not happened is a lie
  * about when a hub wrote to its own routing table, and the audit record the
  * connector retains is exactly that claim.
+ *
+ * **A base this signer has never signed counts as spent at `bornAt`.** The
+ * cache that would refuse a repeat is the connector's and outlives this
+ * process; a restarted app repeating a write its predecessor made moments
+ * earlier is the same collision, seen from outside. Nothing the predecessor
+ * signed can carry a `created` later than the second this signer was built
+ * in, so starting every base there is exactly the guarantee, and no more of
+ * one than that.
  */
 async function freshCreated(
   spent: Map<string, number>,
-  base: string
+  base: string,
+  bornAt: number
 ): Promise<number> {
   for (;;) {
     const now = nowSeconds();
     forget(spent, now);
 
-    const last = spent.get(base);
-    if (last === undefined || last < now) {
+    const last = spent.get(base) ?? bornAt;
+    if (last < now) {
       spent.set(base, now);
       return now;
     }
