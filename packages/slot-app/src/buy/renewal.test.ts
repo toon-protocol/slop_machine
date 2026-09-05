@@ -124,7 +124,7 @@ function mountCredentials(dir: string): {
   bearerTokenFile: string;
 } {
   const seed = randomBytes(32).toString('hex');
-  const writeKeyFile = join(dir, 'operator-write.key');
+  const writeKeyFile = join(dir, 'operator-signing.key');
   writeFileSync(writeKeyFile, `${seed}\n`, { mode: 0o600 });
 
   const bearerToken = randomBytes(32).toString('hex');
@@ -152,6 +152,11 @@ async function boot(config: Partial<SlotAppConfig> = {}): Promise<Hub> {
     hubAddress: HUB_ADDRESS,
     peeringFee: CARRIAGE,
     operatorUrl: operator.url,
+    // This suite is a local topology: the fake station connector serves its
+    // self-description over plaintext on loopback, with no certificate
+    // anywhere. A hub with a public name reads https only — see
+    // TOON_ALLOW_PLAINTEXT_STATION_URLS, whose default is false.
+    allowPlaintextStationUrls: true,
     operatorWriteKeyFile: mounted.writeKeyFile,
     operatorBearerTokenFile: mounted.bearerTokenFile,
     ...config,

@@ -42,11 +42,15 @@
 **/*.pem
 **/*.secret
 
-# The operator surface's credentials. The bearer token is a secret outright;
-# the write-key allowlist and `ingest-tls.crt` are public halves, but both are
-# per box, and neither is a build input.
+# The operator surface's credentials. The bearer token is a secret outright and
+# `operator-signing.key` is the slot app's private ed25519 seed — the credential
+# that mutates a hub's routing table, named `signing` rather than `write` so it
+# is not one character from the allowlist it belongs to. The write-key allowlist
+# and `ingest-tls.crt` are public halves, but both are per box. None of them is
+# a build input.
 **/operator-bearer.token
 **/operator-write.keys
+**/operator-signing.key
 **/*.allow
 **/ingest-tls.crt
 

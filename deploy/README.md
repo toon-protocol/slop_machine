@@ -4,6 +4,12 @@ The files that run a slop machine **station** node: one broadcaster's origin,
 the connector that prices it, and the TLS front. This page is the reference for
 what each file is and how to bring a station up.
 
+A **hub** is a different node and a different bundle: [`hub/`](hub/) beside
+this one. A station serves vibes; a hub sells the routing-table entries that
+make a station reachable and carries the announcements that make one findable.
+You need a slot from one before this station is reachable from anywhere — see
+step 3.
+
 | File                            | What it is                                                                                                                                                            |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `docker-compose.yml`            | The node: Caddy (TLS) → connector (payments) → origin. Three published ports and the segment port is not one of them; the connector's `image:` is the only place a connector build is pinned. |
@@ -13,7 +19,7 @@ what each file is and how to bring a station up.
 | `docker-compose.local.yml`      | Local overlay: no TLS, origin built from this checkout, plain RTMP.                                                                                                    |
 | `docker-compose.watchtower.yml` | Auto-redeploy overlay, scoped to the origin's moving tag.                                                                                                              |
 | `auto-apply.sh` + systemd units | The box half of following main: fast-forward, `compose up -d`, require the connector healthy.                                                                          |
-| `bundle.test.ts`                | The guard. Reads the real files above — never fixtures — and fails the build if the segment port is ever host-published, if `per_kib` is ever set on a route, if the ladder and the routes drift apart, if a route stops terminating strictly beneath the origin path it prices, if `/health` or `/encode` acquires a route, if the pin appears twice, or if a healthcheck goes back to `localhost`. Run by `pnpm test` from the repo root. |
+| `bundle.test.ts`                | The guard. Reads the real files above — never fixtures — and fails the build if the segment port is ever host-published, if `per_kib` is ever set on a route, if the ladder and the routes drift apart, if a route stops terminating strictly beneath the origin path it prices, if `/health` or `/encode` acquires a route, if a connector build is named anywhere but the two bundles' pins or the two pins disagree, or if a healthcheck goes back to `localhost`. Run by `pnpm test` from the repo root. |
 
 ## The ports story
 
@@ -54,9 +60,14 @@ handler path and can never replace any part of it (connector ADR 0025).
 | `g.toon.slopmachine.demo.720p`   | `2000` | `http://origin:3100/segments/720p`   | `/segments/720p/<seq>.ts`       |
 | `g.toon.slopmachine.demo.1080p`  | `3500` | `http://origin:3100/segments/1080p`  | `/segments/1080p/<seq>.ts`      |
 
-`demo` is a placeholder for your station's handle — replace it in all five
-prefixes and in `[node].addresses`. Prices are in the settlement token's
-smallest unit (6-decimal USDC) and are the placeholders from
+**`demo` is a placeholder, and it is not yours to choose.** The whole prefix
+above the rung name is the hub's: a hub grants
+`<its own apex>.<a handle it derives from the payer key you buy with>`, and it
+is the same handle every time you come back. So `g.toon.slopmachine.demo`
+becomes `g.<your hub's apex>.<the label it granted you>` — pull a **quote**
+first (step 3 below), write the granted prefix into all five routes and into
+`[node].addresses`, and only then bring the station up. Prices are in the
+settlement token's smallest unit (6-decimal USDC) and are the placeholders from
 [`../docs/placeholder-numbers.md`](../docs/placeholder-numbers.md).
 
 **`per_kib` is never set on a station route.** Every price above is flat per
@@ -117,12 +128,46 @@ ownership inside the container, so the connector's files must be readable by
 uid 10001 and the origin's by uid 1000, or the container restart-loops on
 "Permission denied". `chmod 644` is not the fix.
 
-### 3. Config
+### 3. Config, and your handle comes from the hub
 
 ```bash
 cp .env.example .env    # EDGE_HOST and ACME_EMAIL are required
-$EDITOR connector.toml  # replace `demo` with your handle, and the hostname
 ```
+
+**Before you edit `connector.toml`, pull a quote from the hub you intend to be
+reachable through.** The five prefixes it ships are written beneath
+`g.toon.slopmachine.demo`, where the whole thing is a placeholder: the apex is
+the hub's own address and `demo` stands in for a handle **the hub assigns**,
+derived from the payer key you buy your slot with. You do not pick it and
+nobody can take it from you — the same key reads the same handle for ever.
+
+A quote is a paid pull at the hub's own quote address, at a floor price, and it
+answers what a slot costs, how long it lasts, whether the hub has room, and —
+the part you need here — the exact prefix it would grant you:
+
+```json
+{ "prefix": "g.toon.slopmachine.7a1c93f0be42", "slotPrice": 1000000, "hasCapacity": true, … }
+```
+
+Then:
+
+```bash
+$EDITOR connector.toml  # replace `g.toon.slopmachine.demo` with the granted
+                        # prefix, in all five routes AND in [node].addresses,
+                        # and set your own hostnames
+```
+
+**If you skip this, the hub's routes and your station's terminations name
+different prefixes and every packet the hub forwards arrives somewhere your
+connector does not terminate.** The hub writes one forwarded route per address
+your connector *publishes beneath the prefix it granted you*, so a station that
+still says `demo` publishes nothing beneath its grant and the purchase is
+refused before any peering is established — which is the friendly version of
+the failure, and it still costs the slot price to discover. Quote first.
+
+That is also why the quote is priced apart from the buy: it exists so you can
+configure for your prefix **before** paying for it, rather than buying twice.
+See [`hub/README.md`](hub/README.md) for the hub side of the same handshake.
 
 If you change `STATION_RUNGS`, change the routes in `connector.toml` to match.
 

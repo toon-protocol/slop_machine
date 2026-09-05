@@ -149,6 +149,25 @@ const PLANTED_KEY_MATERIAL: { path: string; what: string }[] = [
     path: 'deploy/operator.allow',
     what: 'an allowlist under the other name it is written by',
   },
+  // The hub bundle (slop_machine#40) is a second directory of key material,
+  // one level deeper — which is exactly the depth a `.dockerignore` pattern
+  // without a leading globstar would miss.
+  {
+    path: 'deploy/hub/operator-signing.key',
+    what: "the slot app's private ed25519 seed — the credential that mutates a hub's routing table",
+  },
+  {
+    path: 'deploy/hub/operator-bearer.token',
+    what: "a hub's operator bearer token",
+  },
+  {
+    path: 'deploy/hub/operator-write.keys',
+    what: "a hub's write-key allowlist — public halves, but per box",
+  },
+  {
+    path: 'deploy/hub/.env',
+    what: "a hub operator's environment file, which carries the relay's own identity key",
+  },
   {
     path: 'deploy/ingest-tls.crt',
     what: 'the public half of the RTMPS certificate — per box, per hostname',

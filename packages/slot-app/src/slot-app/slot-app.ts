@@ -245,6 +245,17 @@ export interface SlotAppConfig {
    * (default: `10000000`). The hub's own policy, on the same terms.
    */
   peeringMaxPacketAmount?: number | string | undefined;
+  /**
+   * Whether a purchase may name a plaintext `http://` station connector
+   * (default: `false`).
+   *
+   * The hub fetches the URL a purchase names, from inside its own network,
+   * and writes its routing table from what comes back — so a hub with a
+   * public name reads `https` only, and a local topology or this repo's own
+   * suite, neither of which has a certificate anywhere, turns it on. The name
+   * and the default are the connector's own `peer_allow_plaintext_endpoints`.
+   */
+  allowPlaintextStationUrls?: boolean | string | undefined;
 
   /**
    * Path to the mounted file holding the hub's operator **write key**.
@@ -288,8 +299,9 @@ export interface ResolvedSlotAppConfig {
   lapseSweepSeconds: number;
   /**
    * The hub's peering policy — where its operator surface is, what it charges
-   * to carry a packet to a broadcaster, and how large a packet it will carry.
-   * A URL and two numbers, none of it secret.
+   * to carry a packet to a broadcaster, how large a packet it will carry, and
+   * whether it will read a station connector over plaintext. A URL, two
+   * numbers and a yes-or-no, none of it secret.
    */
   peering: PeeringPolicy;
   /** The path the operator write key was read from. Never its contents. */
@@ -372,7 +384,7 @@ function livenessResponse(): LivenessResponse {
  *   dataDir: '/tmp/hub',
  *   hubAddress: 'g.toon.slopmachine',
  *   operatorUrl: 'http://connector:3000',
- *   operatorWriteKeyFile: '/run/secrets/operator-write.key',
+ *   operatorWriteKeyFile: '/run/secrets/operator-signing.key',
  *   operatorBearerTokenFile: '/run/secrets/operator-bearer.token',
  * });
  * await fetch(`http://127.0.0.1:${app.config.slotPort}/health`);

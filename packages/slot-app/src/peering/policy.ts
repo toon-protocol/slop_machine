@@ -44,6 +44,28 @@ export const DEFAULT_PEERING_FEE = 10;
  */
 export const DEFAULT_PEERING_MAX_PACKET_AMOUNT = 10_000_000;
 
+/**
+ * Whether this hub will read a station connector over plaintext `http://`
+ * (env: `TOON_ALLOW_PLAINTEXT_STATION_URLS`).
+ *
+ * **`false`, because a purchase names a URL of the buyer's choosing and the
+ * hub then fetches it from inside its own network.** That fetch is already
+ * bounded — one attempt, a whole-exchange timeout, a size cap, and no
+ * redirect followed, so the named host cannot hand the routing table to a
+ * different host — and refusing plaintext is the last part of the same
+ * bound: an `http://` hop is one any network path between here and there can
+ * rewrite, and what it would rewrite is the price list this hub is about to
+ * write its routing table from.
+ *
+ * The name and the default are the connector's own
+ * `peer_allow_plaintext_endpoints`, which is a loopback-and-test opt-in and
+ * defaults `false` there for the same reason. A station configured the way
+ * `deploy/README.md` says publishes an `https://` endpoint, so a public hub
+ * never meets this; a local topology and this repo's own suite have no
+ * certificate anywhere, and turn it on.
+ */
+export const DEFAULT_ALLOW_PLAINTEXT_STATION_URLS = false;
+
 /** Where the hub's operator surface is, and the terms it peers on. */
 export interface PeeringPolicy {
   /**
@@ -59,13 +81,22 @@ export interface PeeringPolicy {
   fee: number;
   /** The largest amount the hub will forward in one packet. */
   maxPacketAmount: number;
+  /**
+   * Whether a purchase may name a plaintext `http://` station connector.
+   *
+   * A hub with a public name says `false` and means it; a local topology and
+   * the suite say `true` because neither has a certificate. See
+   * {@link DEFAULT_ALLOW_PLAINTEXT_STATION_URLS}.
+   */
+  allowPlaintextStationUrls: boolean;
 }
 
-/** The same three, as a caller may leave them for their defaults. */
+/** The same four, as a caller may leave them for their defaults. */
 export interface PeeringPolicyConfig {
   operatorUrl?: string | undefined;
   peeringFee?: number | string | undefined;
   peeringMaxPacketAmount?: number | string | undefined;
+  allowPlaintextStationUrls?: boolean | string | undefined;
 }
 
 /**
@@ -127,7 +158,35 @@ export function resolvePeeringPolicy(
         min: 1,
       }
     ),
+    allowPlaintextStationUrls: flag(config.allowPlaintextStationUrls, {
+      fallback: DEFAULT_ALLOW_PLAINTEXT_STATION_URLS,
+      what: 'plaintext station URL policy',
+      env: 'TOON_ALLOW_PLAINTEXT_STATION_URLS',
+    }),
   };
+}
+
+/**
+ * One yes-or-no policy, or a refusal naming the setting and the value.
+ *
+ * Only `true` and `false` are read, never "anything not empty is true": an
+ * operator who wrote `TOON_ALLOW_PLAINTEXT_STATION_URLS=no` meaning no must
+ * not get yes, and a security posture is the last setting to guess at.
+ */
+function flag(
+  value: boolean | string | undefined,
+  setting: { fallback: boolean; what: string; env: string }
+): boolean {
+  if (value === undefined || value === '') return setting.fallback;
+  if (typeof value === 'boolean') return value;
+
+  const stated = value.trim().toLowerCase();
+  if (stated === 'true') return true;
+  if (stated === 'false') return false;
+
+  throw new PeeringPolicyError(
+    `the ${setting.what} (${setting.env}) must be "true" or "false", not ${JSON.stringify(value)}`
+  );
 }
 
 /** One policy number, or a refusal naming the setting and the value. */
@@ -151,6 +210,7 @@ function whole(
 export function describePeeringPolicy(policy: PeeringPolicy): string {
   return (
     `peerings written at ${policy.operatorUrl} with fee ${String(policy.fee)} ` +
-    `and a packet cap of ${String(policy.maxPacketAmount)}`
+    `and a packet cap of ${String(policy.maxPacketAmount)}, reading station ` +
+    `connectors over ${policy.allowPlaintextStationUrls ? 'https or plaintext http' : 'https only'}`
   );
 }

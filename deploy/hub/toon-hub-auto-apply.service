@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply the merged slop machine hub bundle (fast-forward, compose up)
+Documentation=https://github.com/toon-protocol/slop_machine/blob/main/deploy/hub/README.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/slop_machine/deploy/hub/auto-apply.sh
+# The script takes its own flock; this only stops systemd stacking runs.
+TimeoutStartSec=600

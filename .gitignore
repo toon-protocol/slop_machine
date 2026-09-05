@@ -17,12 +17,28 @@
 *.pem
 *.secret
 
-# The operator surface's credentials. The bearer token is a secret outright;
-# the write-key allowlist is public halves, but it is per box and ADR 0008
-# revokes authority by editing it on the box — a committed allowlist puts that
-# behind a pull request and re-creates two sources of truth.
+# The operator surface's credentials, and on a HUB box all three sit in one
+# directory (deploy/hub/), which is why the third is named the way it is:
+#
+#   operator-bearer.token   a secret outright. It gates the connector's reads.
+#   operator-write.keys     the ALLOWLIST — public halves, one keyid per line.
+#     (plural)              Not secret, but per box, and ADR 0008 revokes
+#                           authority by editing it ON the box; a committed
+#                           allowlist puts revocation behind a pull request
+#                           and re-creates two sources of truth.
+#   operator-signing.key    the slot app's PRIVATE ed25519 seed — the
+#     (singular)            credential that mutates a hub's routing table.
+#                           Called `operator-write.key` it would sit one
+#                           character from the allowlist above: two files a
+#                           tab-completion apart, one the secret that holds
+#                           the authority and the other the file you hand-edit
+#                           to take it away. It is caught by `*.key` too; it
+#                           is listed here by NAME because a wildcard is a
+#                           rule you have to know and a name is one you can
+#                           read.
 operator-bearer.token
 operator-write.keys
+operator-signing.key
 *.allow
 
 # Wallets and chain deploy output — private keys or per-cluster state.

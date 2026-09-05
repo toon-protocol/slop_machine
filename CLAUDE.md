@@ -492,19 +492,40 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   look broken rather than look fine. Neither value is ever logged, echoed, put in an error message,
   or present on `SlotAppInstance.config`; the two *paths* are, because an operator fixing a bad mount
   needs to know which file was read. Both filenames an operator is told to create
-  (`operator-write.key`, `operator-bearer.token`) are already covered by `.gitignore` and
-  `.dockerignore` wildcards.
+  (`operator-signing.key`, `operator-bearer.token`) are covered by `.gitignore` and `.dockerignore`
+  — by wildcard and, since #40, **by name as well**.
+  **The seed on the box is `operator-signing.key`, not `operator-write.key`.** On a hub both it and
+  the connector's `operator-write.keys` — the allowlist of **public** halves that an operator
+  hand-edits to revoke authority (connector ADR 0008) — live in one directory, and two files one
+  character apart, one a secret and one an editor's file, is the affordance
+  [this repo's own hazard section](#this-repo-is-public-and-will-hold-key-material-on-live-boxes)
+  is about. The environment variable is still `TOON_OPERATOR_WRITE_KEY_FILE`: it names the path, and
+  the path is what changed.
+- **A station connector is read over `https` only, unless a hub says otherwise.** The buy's fetch of
+  the URL a purchase named is the one request either app in this repo makes to a destination a
+  stranger chose, so it is bounded on every axis: one attempt, a 10s whole-exchange budget, a 64 KiB
+  cap, no redirect followed, and no plaintext.
+  `--allow-plaintext-station-urls`/`TOON_ALLOW_PLAINTEXT_STATION_URLS` defaults **`false`** — the
+  same name and the same default as the connector's own `peer_allow_plaintext_endpoints`, which is a
+  loopback-and-test opt-in there too. A station configured the way `deploy/README.md` says publishes
+  an `https` endpoint, so a public hub never meets the refusal; the suite and
+  `deploy/hub/docker-compose.local.yml` turn it on, because neither has a certificate anywhere. It
+  is **not a new refusal at a paid address**: a plaintext URL is answered with the `502
+  station_unreadable` that address already has, which is what it is — the hub declining to read the
+  caller's node — and it is decided before a socket is opened. Only `"true"` and `"false"` are read;
+  anything else is a `PeeringPolicyError` and a non-zero exit.
 
 **The slot app contains no payment code**, and it does not become the exception to the invariant
 below just because it is the app that reaches back into a connector's operator surface: no claim
 validation, no settlement key, no payment-header parsing, no pricing logic.
 
-The hub deploy bundle (#40) **does not exist**: there is no `deploy/hub/`, so nothing yet writes
-the `connector.toml` that prices `/quote` and `/buy`, and nothing yet asserts that the app's
-unpriced addresses have no route (#41). The **complete surface a hub's `connector.toml` has to
-agree with** is four paths on the app port: `/quote` and `/buy` are **priced**, each strictly
+The hub deploy bundle is [`deploy/hub/`](deploy/hub/) (#40) — see
+[the deploy bundles](#the-deploy-bundles) below. The **complete surface a hub's `connector.toml`
+has to agree with** is four paths on the app port: `/quote` and `/buy` are **priced**, each strictly
 beneath its own prefix and never the other's; `/health` and `/roster` are **unpriced and must never
-be routed at all**.
+be routed at all**. What does not exist yet is the guard that holds that still (#41), so
+`deploy/hub/` is checked today only by `docker compose config` and by the station guard's
+whole-repository rules.
 
 **A signer that outlives its own process.** The connector's replay cache keys on the signature
 bytes and ed25519 is deterministic, so an identical base is an identical, already-spent credential
@@ -527,12 +548,52 @@ first agree with the table of the second, and the app wires all of it up. **The 
 rather than inferred**: a fifth block asserts the exact set of directories under `src/`, so a new
 module cannot quietly become a fifth exemption by being new.
 
-### The deploy bundle
+### The deploy bundles
 
-[`deploy/`](deploy/) is the fleet's house bundle shape, the same one `relay` and `store` ship:
-`docker-compose.yml` (Caddy → connector → origin), a bind-mounted `connector.toml`, a `Caddyfile`, a
-local overlay, a Watchtower overlay, and the `auto-apply.sh` + systemd pair that follows `main` on a
-box. `deploy/README.md` walks a broadcaster from DNS to `docker compose up -d` to OBS.
+**Two node shapes ship from this repository, and they are siblings, not variants.**
+[`deploy/`](deploy/) runs a **station** node and [`deploy/hub/`](deploy/hub/) runs a **hub** node.
+Both take the fleet's house bundle shape, the same one `relay` and `store` ship: a
+`docker-compose.yml`, a bind-mounted `connector.toml`, a `Caddyfile`, a local overlay, a Watchtower
+overlay, and an `auto-apply.sh` + systemd pair that follows `main` on a box. `deploy/README.md`
+walks a broadcaster from DNS to `docker compose up -d` to OBS; `deploy/hub/README.md` walks a hub
+operator from DNS to `docker compose up -d`, including the step everything else depends on —
+putting the slot app's own public key on the connector's `write_keys` allowlist.
+
+Their **ports invariants are different numbers on purpose**, and the difference is the whole
+distinction between the two nodes:
+
+| Bundle        | Published ports                                                    | Why                                                                       |
+| ------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `deploy/`     | **three** — Caddy's 80 and 443, plus the origin's RTMPS ingest 1935 | stock Caddy does not speak RTMP, so a station fronts its own uplink        |
+| `deploy/hub/` | **two** — Caddy's 80 and 443, and nothing else                      | **a hub carries no vibes of its own**, so it has no uplink to front        |
+
+**No RTMP port, service or path appears anywhere in the hub bundle**, and none may: a hub is never a
+station. In both bundles the connector's client edge is published on `127.0.0.1` only, and every app
+port is `expose:` and nothing else — the origin's 3100, the slot app's 3200, and the relay's 3100
+and 7100. The rule that holds across all of it is **Caddy owns the only unqualified publishes, in
+every file set an operator is told to run**; the hub's local overlay adds one loopback-qualified
+publish (the relay's free reads, 7100) because with Caddy dropped nothing else would reach them.
+
+**The hub's own routes.** `deploy/hub/connector.toml` terminates four, each declaring its `request`
+shape (connector ADR 0067, which assigns the check that a declared shape matches what the app serves
+to the app's own repository — this one):
+
+| ILP prefix                              | Price     | Handler URL                         | Declared request                     |
+| --------------------------------------- | --------- | ----------------------------------- | ------------------------------------- |
+| `g.toon.slopmachine.slot.quote`          | `50`      | `http://slot-app:3200/quote`        | `GET`, no body                        |
+| `g.toon.slopmachine.slot.buy`            | `1000000` | `http://slot-app:3200/buy`          | `POST` json, body `{ stationUrl }`    |
+| `g.toon.slopmachine.announce`            | `1`       | `http://relay:3100/write`           | `POST` json, body `{ event }`         |
+| `g.toon.slopmachine.announce.ephemeral`  | `0`       | `http://relay:3100/write-ephemeral` | `POST` json, ephemeral kinds only     |
+
+The quote and the buy sit beneath **different** prefixes and always must, or one is reachable at the
+other's price; `/health` and `/roster` have **no route there and never may**, which is what keeps a
+hub operator's roster of every admitted broadcaster off the internet and off sale. `TOON_SLOT_PRICE`
+and the buy route's price are **one pair**, and so are `TOON_HUB_ADDRESS` and the apex all four
+prefixes are written beneath — the app grants prefixes under that address, so a hub whose app and
+connector disagree about its own name writes routes nobody addresses. The **relay's published
+image** is the announcement surface: a station being *reachable* is what the slot routes sell, and a
+station being *found* is what the announcement carries. This repo publishes no relay image and only
+pulls one.
 
 **Connector configuration is bundle work, not application code.** `deploy/connector.toml` terminates
 **five routes** — one per rung at that rung's price, plus one for the station's *now* at its own low
@@ -560,8 +621,11 @@ these real files rather than fixtures, and every value it expects is a literal i
 no route is unsellable, and a route naming a rung the origin does not offer is a paid 404. Change one
 and change the other in the same commit.
 
-The connector is the **stock GHCR image on an immutable pin**, and that pin appears in exactly one
-place — `deploy/docker-compose.yml`'s `connector.image`. This repo publishes no connector image.
+The connector is the **stock GHCR image on an immutable pin**, and that pin appears in exactly two
+places, one per bundle: `deploy/docker-compose.yml`'s and `deploy/hub/docker-compose.yml`'s
+`connector.image`. **Both must name the same build** — `deploy/bundle.test.ts` fails on a third site
+and on a disagreement between the two, because two copies that drift are how an operator deploys one
+connector while reading about another. This repo publishes no connector image.
 `connector.toml` is bind-mounted, never baked, so the pin and the config it was validated against
 reach a box in one `git pull`. The stream key and the RTMPS private key are mounted files, gitignored
 and never in an image. `.dockerignore` excludes them from the **build context** by the same wildcards
@@ -588,11 +652,14 @@ and what the Watchtower overlay follows, so `docker compose up -d` on a fresh bo
 image. This repo publishes those two app images and no others — never a connector.
 
 **What is still design:** the slot app boots, quotes, sells a slot, peers, routes, renews, lapses,
-reconciles at boot and shows the operator its roster, but the hub deploy bundle and its guard
-([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s remaining slices,
-[#40](https://github.com/toon-protocol/slop_machine/issues/40) and
-[#41](https://github.com/toon-protocol/slop_machine/issues/41)) are not written yet, so there is no
-`deploy/hub/`, and there is no devnet node. Do not infer other commands from the sibling repos.
+reconciles at boot and shows the operator its roster, and `deploy/hub/` deploys all of it
+([#40](https://github.com/toon-protocol/slop_machine/issues/40)) — but **the hub bundle's guard
+([#41](https://github.com/toon-protocol/slop_machine/issues/41)) is not written yet**, so nothing
+holds its ports, its routes or its declared request shapes still the way
+[`deploy/bundle.test.ts`](deploy/bundle.test.ts) holds the station's. `vitest.config.ts`'s include
+list and `format`/`format:check` already reach `deploy/hub/*.ts`, so that guard is one file with no
+config change behind it. There is no devnet node. Do not infer other commands from the sibling
+repos.
 
 What does exist, all run from the repo root:
 
@@ -604,8 +671,9 @@ pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTM
                  # fresh ports against a temporary directory. Deliberately slow — real encoding
                  # is the point, because ADR 0001 is a claim about bytes. The include list is
                  # packages/*/src/**/*.test.ts, so a new package's suites are picked up with
-                 # no change here; it also covers deploy/*.test.ts, so deploy/bundle.test.ts
-                 # runs beside the files it guards; smol-toml and yaml are there to read them
+                 # no change here; it also covers deploy/*.test.ts and deploy/hub/*.test.ts,
+                 # so each bundle's guard runs beside the files it guards; smol-toml and yaml
+                 # are there to read them
 pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key material where
                  # deploy/README.md says to generate the real thing, then builds the build
                  # context and EVERY published image and proves none carries it. Needs a Docker
@@ -613,7 +681,7 @@ pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key 
                  # guard. An image this repo publishes belongs in its PUBLISHED_IMAGES list
 pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit
-pnpm format      # prettier over packages/*/src/**/*.ts and deploy/*.ts
+pnpm format      # prettier over packages/*/src/**/*.ts and deploy/**/*.ts — both bundles
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 docker build -f packages/slot-app/Dockerfile -t ghcr.io/toon-protocol/slot-app:latest .
 ```
@@ -629,11 +697,12 @@ own version placeholder from its `version-define.ts`. A new package adds a line 
 replacing one; without it, that package's `VERSION` falls back to `0.0.0-dev` under the root suite
 while its own config gets it right, and only the image's version assertion in CI would notice.
 
-And from `deploy/`, once its keys and `.env` exist (see `deploy/README.md`):
+And from `deploy/` (a station) or `deploy/hub/` (a hub), once that bundle's keys and `.env` exist
+(see the README beside each):
 
 ```
 docker compose config                                          # validate the bundle
-docker compose up -d                                           # a real station
+docker compose up -d                                           # a real node
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d   # local, no TLS
 ```
 
@@ -718,9 +787,17 @@ Quality is priced per rung, by address ([ADR 0002](docs/adr/0002-bitrate-follows
 A slopmachine node deploys the standard connector bundle and so generates an ILP signer key,
 settlement keys that hold real value, and peering secrets. A station additionally holds its
 broadcaster's **stream key** and the private key of its RTMPS certificate; a hub additionally holds
-an operator **write key** and an operator **bearer token**, both of which the slot app reads.
-`.gitignore` already covers these by wildcard (`*.key`, `*.secret`, `*.pem`, operator credentials)
-before any of them exist — see its comments for the incidents that shaped those rules. Every one of
+an operator **write key** (`operator-signing.key` on the box) and an operator **bearer token**, both
+of which the slot app reads. `.gitignore` already covers these by wildcard (`*.key`, `*.secret`,
+`*.pem`) and the operator credentials **by name** before any of them exist — see its comments for
+the incidents that shaped those rules.
+
+- **`deploy/hub/` is the one directory where a secret and a hand-edited file have near-identical
+  names, so they were made not to.** `operator-signing.key` (singular) is the slot app's private
+  seed; `operator-write.keys` (plural) is the connector's allowlist of public halves, which an
+  operator opens in an editor to revoke that seed's authority. Naming the seed `operator-write.key`
+  would put those two one tab-completion apart. Do not rename it back, and do not add a third file
+  in that family without asking what a tired operator at 3am would do with it. Every one of
 them is provisioned as a mounted value: never baked into an image, never a default in code, never a
 literal in a test. `pnpm test:image` proves that for every image this repo publishes.
 
@@ -741,8 +818,11 @@ literal in a test. `pnpm test:image` proves that for every image this repo publi
   `CONTEXT.md` and [`connector/CONTEXT.md`](https://github.com/toon-protocol/connector/blob/main/CONTEXT.md)
   disagree, that one wins.
 - **[relay](https://github.com/toon-protocol/relay)** — the reference for putting an ordinary app
-  behind the connector, and the hub's announcement surface. Read its `deploy/` before writing one
-  here.
+  behind the connector, and the hub's announcement surface. `deploy/hub/` runs
+  `ghcr.io/toon-protocol/relay:release` unmodified: `TOON_BLS_PORT` 3100 takes paid writes and
+  `TOON_RELAY_PORT` 7100 serves free NIP-01 reads, and `NOSTR_SECRET_KEY` — the one environment
+  secret in either bundle, because that image offers no file-valued form — is its identity. This
+  repo publishes no relay image.
 - **[toon-client](https://github.com/toon-protocol/toon-client)** — the payer side. The client
   daemon is built on it, and its keystore is Node-only: there is no browser key management, so no
   part of the client can be a web app.

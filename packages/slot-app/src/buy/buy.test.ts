@@ -155,7 +155,7 @@ function mountCredentials(dir: string): {
   bearerTokenFile: string;
 } {
   const seed = randomBytes(32).toString('hex');
-  const writeKeyFile = join(dir, 'operator-write.key');
+  const writeKeyFile = join(dir, 'operator-signing.key');
   writeFileSync(writeKeyFile, `${seed}\n`, { mode: 0o600 });
 
   const bearerToken = randomBytes(32).toString('hex');
@@ -203,6 +203,11 @@ async function boot(
     dataDir,
     hubAddress: HUB_ADDRESS,
     operatorUrl: operator.url,
+    // This suite is a local topology: the fake station connector serves its
+    // self-description over plaintext on loopback, with no certificate
+    // anywhere. A hub with a public name reads https only — see
+    // TOON_ALLOW_PLAINTEXT_STATION_URLS, whose default is false.
+    allowPlaintextStationUrls: true,
     operatorWriteKeyFile: mounted.writeKeyFile,
     operatorBearerTokenFile: mounted.bearerTokenFile,
     ...config,
@@ -603,6 +608,47 @@ describe('a purchase made twice', () => {
 });
 
 // ---------- The refusals that cannot be quoted away ----------
+
+describe('a station connector this hub will not go and read at all', () => {
+  it('is refused for being plaintext, before any operator write', async () => {
+    // The DEFAULT posture, stated here rather than inherited: every other
+    // suite in this file opts into plaintext because the fake station has no
+    // certificate, and a hub with a public name does not.
+    const { app, operator } = await boot({ allowPlaintextStationUrls: false });
+
+    const payer = evmPayer();
+    await configureStation(app, payer);
+
+    // `station.url` is loopback http — exactly the shape a local topology
+    // uses and a public hub refuses.
+    const res = await buy(app, paid(payer), { stationUrl: station.url });
+    const body = (await res.json()) as RefusalBody;
+
+    // Not a NEW refusal: it is the one this address already answers when a
+    // station cannot be read, because that is what it is. Adding a refusal at
+    // a paid address is adding a way to charge a broadcaster for nothing.
+    expect(res.status).toBe(502);
+    expect(body.error).toBe('station_unreadable');
+    expect(body.message).toMatch(/https/);
+    // Nothing was dialled and nothing was written: a hub that refuses the
+    // scheme does not open the socket.
+    expect(operator.writes()).toEqual([]);
+    expect(operator.peerings()).toEqual([]);
+  });
+
+  it('is bought from happily once the hub allows plaintext', async () => {
+    // The same purchase, the same URL, the same station — so the refusal
+    // above is the POLICY and not a broken fixture.
+    const { app } = await boot({ allowPlaintextStationUrls: true });
+
+    const payer = evmPayer();
+    await configureStation(app, payer);
+
+    const res = await buy(app, paid(payer), { stationUrl: station.url });
+
+    expect(res.status).toBe(200);
+  });
+});
 
 describe('a station the hub cannot read', () => {
   it("is told about, and told it is about the broadcaster's own node", async () => {

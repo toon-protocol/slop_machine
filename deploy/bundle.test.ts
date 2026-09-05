@@ -211,11 +211,28 @@ const CONNECTOR_BUILD_LITERAL =
   /rust-(?:sha-[0-9a-f]{7,40}|\d{4}\.\d{2}\.\d{2}\.\d+|main|release)/g;
 
 /**
- * This file is the one place besides the pin of record that may name a
- * connector build, because a guard that cannot name the expected pin cannot
- * check it. Everything else in the repository is scanned.
+ * The hub bundle's own pin, and the only other place a connector build may be
+ * named.
+ *
+ * Two bundles ship from this repository now — a station node and a hub node
+ * (slop_machine#40) — and each runs its own connector, so each pins one. What
+ * the old "exactly one place" rule was really protecting is unchanged and is
+ * still checked below: two copies that DRIFT are how an operator deploys one
+ * connector while reading about another, so both sites must name the same
+ * build. A third site is still a failure.
  */
-const THE_GUARD_ITSELF = 'deploy/bundle.test.ts';
+const HUB_COMPOSE_PATH = 'deploy/hub/docker-compose.yml';
+
+/**
+ * The two guards are the only files besides the pins themselves that may name
+ * a connector build, because a guard that cannot name the expected pin cannot
+ * check it. Everything else in the repository is scanned.
+ *
+ * `deploy/hub/bundle.test.ts` is named here before it exists
+ * (slop_machine#41): a guard that has to be edited by the pull request it is
+ * meant to constrain is not a guard.
+ */
+const THE_GUARDS = ['deploy/bundle.test.ts', 'deploy/hub/bundle.test.ts'];
 
 const NOT_SCANNED_FOR_A_PIN = new Set([
   '.git',
@@ -688,18 +705,28 @@ describe('deploy bundle', () => {
     ).toMatch(/:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/);
   });
 
-  it('names a connector build in exactly one place', () => {
+  it('names a connector build only in the two bundles that run one, and names the same one', () => {
     const sites = everyRepositoryFile()
-      .filter((file) => file !== THE_GUARD_ITSELF)
+      .filter((file) => !THE_GUARDS.includes(file))
       .flatMap((file) => {
         const found = readFile(file).match(CONNECTOR_BUILD_LITERAL) ?? [];
         return found.map((literal) => ({ file, literal }));
-      });
+      })
+      // Sorted, because a directory walk's order is the filesystem's business
+      // and this assertion is about the SET of sites.
+      .sort((a, b) => a.file.localeCompare(b.file));
 
+    // One entry per bundle, both carrying the SAME literal. A third site, a
+    // missing one, or two that disagree all fail here — and the last of those
+    // is the one that matters: a hub and a station on different connectors is
+    // one config file validated against a build the other box is not running.
     expect(
       sites,
-      `a connector build is named in ${JSON.stringify(sites)} — ${BASE_COMPOSE_PATH}'s connector \`image:\` is the only place in this repository a build may be pinned, because two copies drift and an operator then deploys one connector while reading about another`
-    ).toEqual([{ file: BASE_COMPOSE_PATH, literal: EXPECTED_CONNECTOR_TAG }]);
+      `a connector build is named in ${JSON.stringify(sites)} — the only places in this repository a build may be pinned are ${BASE_COMPOSE_PATH}'s and ${HUB_COMPOSE_PATH}'s connector \`image:\`, and they must name the SAME build, because two copies that drift are how an operator deploys one connector while reading about another`
+    ).toEqual([
+      { file: BASE_COMPOSE_PATH, literal: EXPECTED_CONNECTOR_TAG },
+      { file: HUB_COMPOSE_PATH, literal: EXPECTED_CONNECTOR_TAG },
+    ]);
   });
 
   it('never builds the connector — this repo publishes no connector image', () => {

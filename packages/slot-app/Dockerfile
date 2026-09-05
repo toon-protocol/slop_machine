@@ -28,14 +28,22 @@
 # either, saying which one:
 #
 #   docker run \
-#     -v /srv/hub/operator-write.key:/run/secrets/operator-write.key:ro \
+#     -v /srv/hub/operator-signing.key:/run/secrets/operator-signing.key:ro \
 #     -v /srv/hub/operator-bearer.token:/run/secrets/operator-bearer.token:ro \
-#     -e TOON_OPERATOR_WRITE_KEY_FILE=/run/secrets/operator-write.key \
+#     -e TOON_OPERATOR_WRITE_KEY_FILE=/run/secrets/operator-signing.key \
 #     -e TOON_OPERATOR_BEARER_TOKEN_FILE=/run/secrets/operator-bearer.token ...
 #
 # There is deliberately no ENV carrying either value: an ENV is baked into the
 # image and readable from its metadata by anyone who pulls it, without ever
 # running it.
+#
+# ON THE NAME `operator-signing.key`. It is this app's PRIVATE ed25519 seed. It
+# is deliberately not `operator-write.key`, because a hub box also holds
+# `operator-write.keyS` — the connector's ALLOWLIST of public halves, which the
+# operator hand-edits to REVOKE this key's authority — in the same directory.
+# One character between a secret and an editor's file is not a name, it is a
+# trap. TOON_OPERATOR_WRITE_KEY_FILE still names the path; the path is what
+# changed.
 #
 # TOON_SLOT_PORT is EXPOSEd on the compose network and must never be
 # host-published. A hub publishes exactly Caddy's 80 and 443; the app's port is

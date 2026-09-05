@@ -22,8 +22,18 @@
 #      degraded run.
 #
 # To run your own station, change [node] to your own ILP apex and hostname and
-# the prices to yours; everything else can stay as it is. `demo` throughout is
-# a PLACEHOLDER for your station's handle — replace all five occurrences.
+# the prices to yours; everything else can stay as it is.
+#
+# `g.toon.slopmachine.demo` throughout is a PLACEHOLDER, and the handle in it
+# IS NOT YOURS TO PICK. A hub grants `<its apex>.<a handle derived from the
+# payer key you buy your slot with>`, the same one every time you come back.
+# PULL A QUOTE FROM YOUR HUB FIRST — it is a floor-priced address whose whole
+# job is telling you the prefix you would be granted — then replace all five
+# occurrences AND the five entries in [node].addresses with it, and only then
+# bring the station up. A station still saying `demo` publishes nothing beneath
+# the prefix its hub granted, so the hub's forwarded routes and this file's
+# terminations name different prefixes and every packet the hub carries arrives
+# somewhere this connector does not terminate. See ./README.md step 3.
 # =============================================================================
 
 # The one listener. POST /ilp, GET /ilp (self-description), GET /ilp/btp,
@@ -230,13 +240,26 @@ key_file = "/app/data/settlement-solana.key"
 # never in this config. A section naming a file that is missing or empty is a
 # refuse-to-start, never a silently open surface.
 #
+# TWO NAMES THAT LOOK ALIKE AND ARE NOT THE SAME THING:
+#
+#   operator-write.keys   the ALLOWLIST, mounted below. Public halves, one
+#     (plural)            keyid per line, hand-edited to grant or REVOKE
+#                         authority. Not secret; per box.
+#   operator-signing.key  the PRIVATE ed25519 seed the writes are signed with.
+#     (singular, and      On a station it does not live on this box at all —
+#      not "write")       you keep it wherever you sign from. It is called
+#                         `signing` rather than `write` so it is never one
+#                         character away from the file above; on a hub the two
+#                         DO share a directory (deploy/hub/), and one of them
+#                         is a secret while the other is something you edit by
+#                         hand.
+#
 #   openssl rand -hex 32 > operator-bearer.token
-#   openssl rand -hex 32 > operator-write.key        # the PRIVATE half, kept
-#                                                    # wherever you sign from
-#   connector send --operator-key operator-write.key --print-keyid \
+#   openssl rand -hex 32 > operator-signing.key      # the PRIVATE half
+#   connector send --operator-key operator-signing.key --print-keyid \
 #     > operator-write.keys                          # the PUBLIC half: the
 #                                                    # allowlist, one per line
-#   chmod 600 operator-bearer.token operator-write.key
+#   chmod 600 operator-bearer.token operator-signing.key
 #   sudo chown 10001:10001 operator-bearer.token operator-write.keys
 #
 # Revoke a key by deleting its line from operator-write.keys and restarting.
