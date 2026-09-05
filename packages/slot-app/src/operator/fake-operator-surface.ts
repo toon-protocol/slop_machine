@@ -55,6 +55,17 @@
  *     `204` on a row it held, `404` on one it never had, so a repeat is not a
  *     failure, and `409` on a prefix the config file owns.
  *
+ * And the verb a **lapse** needs, on the other address:
+ *
+ *   - **`DELETE /peers/:id`** removes a peering, signature-gated, refusing in
+ *     `remove_runtime_peer`'s own order: `409` for a row the config file
+ *     owns, `404` for one it never held, and `409 PeerInUse` for one a
+ *     runtime route **still forwards to**. That last is the referential rule
+ *     the whole teardown order exists for (connector ADR 0034), and it is
+ *     keyed on the route's `peer_id` rather than on its prefix — so a
+ *     teardown that took the peering out first, or that missed a row pointing
+ *     at it, is refused here exactly as a real hub would refuse it.
+ *
  * **This module is test scaffolding and ships in no bundle** — nothing the
  * app's entrypoints import reaches it. It is a `.ts` file beside the code it
  * fakes rather than inside a test file because more than one suite will want
@@ -498,6 +509,73 @@ export async function startFakeOperatorSurface(
       return c.text(`no runtime route for '${prefix}'`, 404);
     }
 
+    return c.body(null, 204);
+  });
+
+  // `DELETE /peers/:id`, and with it the referential rule a teardown has to
+  // obey. Signature-gated like every other write, and its three refusals in
+  // `remove_runtime_peer`'s own order: owned by the config file, then not
+  // found, then STILL REFERENCED BY A RUNTIME ROUTE — which is the `409` that
+  // makes "routes first, then the peering" a thing a suite finds out rather
+  // than a comment somebody has to keep believing.
+  surface.delete('/peers/:id', async (c) => {
+    const body = await c.req.text();
+    const headers = headersOf(c.req.raw);
+    const path = new URL(c.req.url).pathname;
+
+    const authenticated = authenticate({
+      method: 'DELETE',
+      path,
+      headers,
+      body,
+      allowlist,
+      spent,
+    });
+    if ('reason' in authenticated) {
+      refused.push({ method: 'DELETE', path, reason: authenticated.reason });
+      return c.json({ error: authenticated.reason }, 401);
+    }
+
+    accepted.push({
+      method: 'DELETE',
+      path,
+      keyid: authenticated.keyid,
+      body,
+      headers,
+      created: authenticated.created,
+    });
+
+    if (failing(path)) {
+      return c.text('the peer table did not answer in time', 503);
+    }
+
+    const id = c.req.param('id');
+
+    if (configOwns(id)) {
+      return c.text(
+        `'${id}' is defined in this node's config file and cannot be changed at runtime`,
+        409
+      );
+    }
+    if (!peerings.has(id)) {
+      return c.text(`no such runtime peer '${id}'`, 404);
+    }
+    // `PeerRouteTableError::PeerInUse`: a runtime peering cannot be removed
+    // while a runtime route still forwards to it. Keyed on the route's
+    // `peer_id` and on nothing else — a row's prefix has no bearing on it, so
+    // a teardown that only removed rows beneath a granted prefix would be
+    // refused here by anything else pointing at the same peering.
+    const referencing = [...forwarded.values()].filter(
+      (route) => route.peer_id === id
+    );
+    if (referencing.length > 0) {
+      return c.text(
+        `peer '${id}' is still referenced by a runtime route (${referencing.map((route) => route.prefix).join(', ')})`,
+        409
+      );
+    }
+
+    peerings.delete(id);
     return c.body(null, 204);
   });
 

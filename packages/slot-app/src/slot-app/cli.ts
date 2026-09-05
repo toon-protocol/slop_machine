@@ -49,6 +49,7 @@ import {
   DEFAULT_PEERING_FEE,
   DEFAULT_PEERING_MAX_PACKET_AMOUNT,
 } from '../peering/policy.js';
+import { DEFAULT_LAPSE_SWEEP_SECONDS } from '../lapse/lapse.js';
 import { VERSION } from '../version.js';
 
 function printHelp(): void {
@@ -88,6 +89,15 @@ Options:
                          hub's collateral bound: every admission opens a
                          channel the hub fronts collateral toward. 0 is a legal
                          policy and means admitting nobody
+  --lapse-sweep-seconds <n>
+                         How often the hub walks its roster tearing down slots
+                         nobody renewed (default: ${DEFAULT_LAPSE_SWEEP_SECONDS};
+                         env: TOON_LAPSE_SWEEP_SECONDS). The GRANULARITY of the
+                         lapse, not its length: a slot lasts
+                         --slot-period-seconds and is torn down within one
+                         sweep of that. There is no value that turns the sweep
+                         off — a hub that never reclaims a dead station's
+                         peering only ever commits more collateral
   --operator-url <url>   Base URL of the hub connector's OPERATOR SURFACE,
                          where the peering is written (env:
                          TOON_OPERATOR_URL). Required; there is no default,
@@ -183,6 +193,7 @@ function configFromEnvironment(
       'slot-price': { type: 'string' },
       'slot-period-seconds': { type: 'string' },
       'slot-cap': { type: 'string' },
+      'lapse-sweep-seconds': { type: 'string' },
       'operator-url': { type: 'string' },
       'peering-fee': { type: 'string' },
       'peering-max-packet-amount': { type: 'string' },
@@ -241,6 +252,15 @@ function configFromEnvironment(
   const cap = values['slot-cap'] ?? env['TOON_SLOT_CAP'];
   if (cap !== undefined && cap !== '') {
     config.slotCap = parseWhole(cap, '--slot-cap', 0);
+  }
+
+  // How often the roster is swept for lapsed slots. Ordinary configuration
+  // for the same reason the period is: it is what makes a lapse testable in
+  // real time rather than against a fake clock.
+  const sweep =
+    values['lapse-sweep-seconds'] ?? env['TOON_LAPSE_SWEEP_SECONDS'];
+  if (sweep) {
+    config.lapseSweepSeconds = parseWhole(sweep, '--lapse-sweep-seconds', 1);
   }
 
   // The hub's peering policy. The operator URL is required and has no
@@ -312,6 +332,7 @@ main().catch((err: unknown) => {
     (err.name === 'OperatorCredentialError' ||
       err.name === 'SlotPolicyError' ||
       err.name === 'PeeringPolicyError' ||
+      err.name === 'LapseError' ||
       err.name === 'SlotRosterError')
   ) {
     console.error(`[slot-app] ${err.name}: ${err.message}`);

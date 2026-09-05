@@ -39,6 +39,7 @@ export {
   AMOUNT_HEADER,
   CHAIN_HEADER,
   ROUTE_UNDER_CHARGES,
+  AT_CAPACITY,
   NO_STATION_URL,
   STATION_UNREADABLE,
   STATION_NOT_AT_PREFIX,
@@ -86,9 +87,25 @@ export {
 } from './slot/roster.js';
 export type { Slot, SlotRoster } from './slot/roster.js';
 
+// The lapse: a slot nobody renewed, taken back out by the hub itself — every
+// route first, then the peering, then the roster row, because the connector
+// refuses to release a peering a runtime route still forwards to.
+export {
+  DEFAULT_LAPSE_SWEEP_SECONDS,
+  LapseError,
+  resolveLapseSweepSeconds,
+  describeLapseSweep,
+  startLapseTicker,
+} from './lapse/lapse.js';
+export type { LapseDependencies, LapseTicker } from './lapse/lapse.js';
+
 // The peering the hub's operator key creates in response to a purchase — and
 // the hub's own terms for it, which a broadcaster never chooses.
-export { establishPeering, PeeringError } from './peering/peering.js';
+export {
+  establishPeering,
+  releasePeering,
+  PeeringError,
+} from './peering/peering.js';
 export type {
   EstablishedPeering,
   PeeringChannel,
@@ -117,6 +134,7 @@ export {
   deriveForwardedRoutes,
   writeForwardedRoutes,
   retireForwardedRoutes,
+  withdrawForwardedRoutes,
   ForwardedRouteError,
 } from './peering/routes.js';
 export type {
@@ -126,6 +144,7 @@ export type {
   ForwardedRouteRequest,
   ForwardedRouteDependencies,
   ForwardedRouteRetirement,
+  RouteOwnership,
   CarriedRoute,
   DerivedRoutes,
 } from './peering/routes.js';

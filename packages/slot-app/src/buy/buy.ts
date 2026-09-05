@@ -103,11 +103,26 @@
  *     own config file already owns. All of them are about the **hub**, and
  *     the message names the hub operator.
  *
- * **What is deliberately *not* refused here is the cap.** A hub at its cap
- * answers that at the quote, where it costs a floor price to hear; refusing
- * it again at the buy would be charging the slot price for an answer the
- * broadcaster could already have had, which is exactly what the amendment
- * forbids.
+ * **And one refusal that the quote *could* have foreseen: the cap.** It is
+ * the single deliberate exception, and ADR 0003's second amendment is where
+ * the exception is argued rather than assumed. `TOON_SLOT_CAP` is the hub's
+ * capital bound — every admission opens a channel the hub fronts collateral
+ * toward, and nothing else bounds a commitment that grows linearly with the
+ * roster. A cap the quote merely *reports* bounds nothing: a buyer who read
+ * `hasCapacity: false` and bought anyway is admitted, and the operator's
+ * number is decoration. So the buy enforces it, before any operator write.
+ * Charging for that answer is not charging for nothing — the quote gave the
+ * warning at a floor price, and the buyer went past it.
+ *
+ * **A renewal is never refused for the cap, at it or over it.** Renewing adds
+ * no collateral: the channel is open, the routes are written, and the hub's
+ * exposure is unchanged. Refusing one would take a paying broadcaster off the
+ * air for being punctual, and would make a hub whose cap was lowered beneath
+ * its own roster unable to keep any of the stations it is already carrying.
+ *
+ * The one case that stays unfair, and is not pretended away: two broadcasters
+ * quoting the last free slot and both buying. One of them is refused, having
+ * been told yes, and pays for it. See the amendment.
  *
  * **No payment code lives here.** The three headers are read as facts the
  * connector stated. No claim is validated, nothing is charged, and nothing is
@@ -173,6 +188,29 @@ export const CHAIN_HEADER = 'x-toon-chain';
 
 /** The route in front of this address did not charge what a slot costs. */
 export const ROUTE_UNDER_CHARGES = 'route_under_charges';
+
+/**
+ * The hub is at its cap and this purchase would be a **new** slot.
+ *
+ * The one refusal here that the quote *could* have foreseen, and the only
+ * place in this app where that is deliberate. `TOON_SLOT_CAP` is the hub's
+ * capital bound — every admission opens a channel the hub fronts collateral
+ * toward, and the cap is the only thing bounding a commitment that otherwise
+ * grows linearly with the roster and with nothing else. A cap that the quote
+ * merely *reports* bounds nothing at all: a buyer who ignores
+ * `hasCapacity: false` is admitted anyway, and the number a hub operator set
+ * is decoration.
+ *
+ * It is **never** a renewal's refusal — see {@link buyRoutes}. Renewing adds
+ * no collateral, so the bound has nothing to say about it, and turning a
+ * paying broadcaster away for being punctual would tear down a station the
+ * hub is already carrying.
+ *
+ * ADR 0003's second amendment records why charging for this one is not
+ * charging for nothing: the quote answered `hasCapacity: false` at a floor
+ * price, so the broadcaster who bought anyway had their warning.
+ */
+export const AT_CAPACITY = 'at_capacity';
 
 /** The request body named no station connector URL. */
 export const NO_STATION_URL = 'no_station_url';
@@ -387,6 +425,32 @@ export function buyRoutes(deps: BuyDependencies): Hono {
     //    the quote asked, so the prefix a broadcaster configured their
     //    station for is the prefix they get peered at.
     const held = roster.find(payerKey);
+
+    // 3a. The cap, and only against a NEW slot. This is the hub's capital
+    //     bound: every admission opens a channel it fronts collateral
+    //     toward, so an unbounded roster is an unbounded commitment, and a
+    //     cap the quote only reports is not a bound at all. Refused BEFORE
+    //     the station document is read and before any operator write, so a
+    //     hub at its cap spends nothing on a purchase it will not honour.
+    //
+    //     A renewal is never refused here, at the cap or over it. Renewing
+    //     adds no collateral — the channel is already open and the routes
+    //     already written — so the bound has nothing to say about it, and
+    //     refusing one would take a paying broadcaster off the air for
+    //     renewing on time. It is also the only way a hub whose cap was
+    //     lowered beneath its own roster can shrink back to it: by lapses,
+    //     not by evictions.
+    if (held === undefined && roster.size() >= slotPolicy.slotCap) {
+      return c.json(
+        refusal(
+          AT_CAPACITY,
+          `this hub holds ${String(roster.size())} slot(s) against a cap of ${String(slotPolicy.slotCap)}, so it cannot admit another one. Nothing about your node is the thing to fix. The quote at this hub's quote address answers "hasCapacity": false while this is true, for a floor price — ask there before buying, and buy when it says true. A slot that lapses without being renewed frees its place, so capacity does come back. If you already hold a slot here, renewing it is never refused for the cap.`
+        ),
+        503,
+        noStore()
+      );
+    }
+
     const label =
       held?.label ??
       deriveHandleLabel(

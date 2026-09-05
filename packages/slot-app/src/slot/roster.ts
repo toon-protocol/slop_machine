@@ -8,13 +8,15 @@
  * a route: the roster records what was *bought*, and the connector's own
  * tables record what was *done about it*.
  *
- * Four questions and one answer, which is the whole surface:
+ * Five questions and two answers, which is the whole surface:
  *
  *   - how many slots are held, which is what the cap is measured against;
  *   - whether this caller holds one, and when it lapses;
  *   - whether a candidate label is already somebody's, which is what makes
  *     handle derivation lengthen rather than collide;
- *   - and, from the buy onward, `record` — one slot, written down.
+ *   - every slot held, which is what the lapse walks;
+ *   - and, from the buy onward, `record` — one slot, written down — and its
+ *     opposite, `remove`, which is how a slot nobody renewed stops being one.
  *
  * **`record` returns only once the slot is on disk.** That ordering is the
  * point of it and it is not an implementation detail: gas is spent inside a
@@ -86,6 +88,16 @@ export interface SlotRoster {
    */
   holderOf(label: string): Slot | undefined;
   /**
+   * Every slot held right now, in no promised order.
+   *
+   * This is what a lapse walks: the question "which of these is past its
+   * lapse time" cannot be asked of a roster that only answers about one payer
+   * at a time. It is a snapshot — a caller that records or removes while
+   * reading it is reading what was there when it asked, which is the right
+   * reading for a sweep that then acts on each row one at a time.
+   */
+  held(): Slot[];
+  /**
    * Write one slot down, replacing whatever this payer held before.
    *
    * **Resolves only once the slot is durable.** A caller that awaits this
@@ -98,6 +110,22 @@ export interface SlotRoster {
    * the retry finds it.
    */
   record(slot: Slot): Promise<void>;
+  /**
+   * Take this payer's slot back off the roster, if they held one.
+   *
+   * **Resolves only once the removal is durable**, on exactly the terms
+   * `record` resolves on. A hub that answered before it had written would
+   * come back from a restart still holding a slot it had already taken the
+   * routes and the peering out for, and would spend the rest of that slot's
+   * life trying to tear down a station it had already released.
+   *
+   * Removing a payer who holds nothing is a success and writes nothing: the
+   * state asked for is the state that already obtains, and a sweep that
+   * crossed a purchase must not be a sweep that failed.
+   *
+   * @throws SlotRosterError if the roster could not be written.
+   */
+  remove(payer: string): Promise<void>;
 }
 
 /** A roster that could not be read or written. */
@@ -149,8 +177,22 @@ export function createSlotRoster(slots: readonly Slot[] = []): SlotRoster {
     holderOf(label) {
       return byLabel.get(label);
     },
+    held() {
+      return [...byPayer.values()];
+    },
     record(slot) {
       hold(slot);
+      return Promise.resolve();
+    },
+    remove(payer) {
+      const slot = byPayer.get(payer);
+      if (slot !== undefined) {
+        byPayer.delete(payer);
+        // Only where the label is still this payer's. A slot rewritten at a
+        // new label leaves the old one to whoever holds it now, and a removal
+        // that took it out would free an address somebody else was granted.
+        if (byLabel.get(slot.label) === slot) byLabel.delete(slot.label);
+      }
       return Promise.resolve();
     },
   };
@@ -175,23 +217,24 @@ export function openSlotRoster(dataDir: string): SlotRoster {
   const slots = readSlots(path);
   const roster = createSlotRoster(slots);
 
-  // What gets serialized, keyed the way a slot is identified. Kept here
-  // rather than read back off the roster because enumerating is not one of
-  // the questions the interface answers, and adding one so that persistence
-  // could be implemented would put this file's needs into everybody's read
-  // surface.
-  const written = new Map(slots.map((slot) => [slot.payer, slot]));
-
   return {
     size: roster.size,
     find: roster.find,
     holderOf: roster.holderOf,
+    held: roster.held,
     async record(slot) {
       // Memory first, so what is written down is exactly what a reader would
       // be answered; then the file; then, and only then, the caller.
       await roster.record(slot);
-      written.set(slot.payer, slot);
-      write(path, [...written.values()]);
+      write(path, roster.held());
+    },
+    async remove(payer) {
+      // Nothing held is nothing to write. A sweep that crossed a purchase, or
+      // ran twice over the same slot, must not rewrite the file to say what
+      // it already says.
+      if (roster.find(payer) === undefined) return;
+      await roster.remove(payer);
+      write(path, roster.held());
     },
   };
 }

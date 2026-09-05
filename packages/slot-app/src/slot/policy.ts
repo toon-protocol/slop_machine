@@ -74,10 +74,21 @@ export const DEFAULT_SLOT_PERIOD_SECONDS = 30 * 24 * 60 * 60;
  * is the only thing bounding it. A hub operator picks the number their
  * collateral can carry.
  *
+ * **It is a hard bound, not a hint.** The quote reports it so a broadcaster
+ * learns at a floor price that they cannot be admitted, and the buy
+ * *enforces* it: a purchase that would be a **new** slot is refused at the
+ * cap, before any operator write. A cap that were only reported would bound
+ * nothing at all — a buyer who ignored the quote would be admitted anyway,
+ * and the number an operator set would be decoration. **A renewal is never
+ * refused for it**, at the cap or over it: renewing opens no channel, so it
+ * adds nothing to the commitment this number bounds.
+ *
  * **Zero is legal and means "admitting nobody"** — a hub that is full, or
  * closed, or not yet funded. It is a policy an operator may want to state, and
  * it must be reachable by configuration rather than by taking the app down:
- * the quote still answers, and answers honestly that there is no capacity.
+ * the quote still answers, and answers honestly that there is no capacity —
+ * and a broadcaster already on the roster can still renew, so lowering the cap
+ * closes the door without evicting anybody behind it.
  */
 export const DEFAULT_SLOT_CAP = 100;
 
