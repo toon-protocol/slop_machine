@@ -1,0 +1,308 @@
+# =============================================================================
+# The connector in front of this hub — the payment proxy.
+# =============================================================================
+# Mounted read-only into the stock connector image at
+# /app/config/connector.toml (see ./docker-compose.yml), which is also where
+# that image's build is pinned — so the build and the config it was validated
+# against live at one commit and reach a box in one `git pull`.
+#
+# THIS FILE IS WHERE A HUB'S PRICES LIVE. Pricing a route is connector config,
+# never application code: the slot app behind this proxy has no notion of a
+# payment at all, and every request that reaches it is already proven paid.
+# The numbers below are the placeholders from
+# ../../docs/placeholder-numbers.md.
+#
+# Three things to know before editing:
+#   1. There is NO environment-variable layer. Every value comes from this
+#      file. The only variable the binary reads is RUST_LOG.
+#   2. Every table is `deny_unknown_fields`. An unrecognised key — a typo, or
+#      one from an older connector — is a load failure that names it.
+#   3. Startup is FAIL-CLOSED. A missing key file, an unwritable state_dir, or
+#      a settlement chain it cannot reach is `exit 1` with the reason, never a
+#      degraded run.
+#
+# To run your own hub, change [node] to your own ILP apex and hostnames and
+# the prices to yours. If you change the apex, change TOON_HUB_ADDRESS in
+# ./docker-compose.yml with it, in the same commit: the app derives every
+# prefix it grants from that address, and the four routes below are written
+# beneath this one.
+# =============================================================================
+
+# The one listener. POST /ilp, GET /ilp (self-description), GET /ilp/btp,
+# GET /ilp/identity and the operator surface all share it — there is no
+# separate admin or health port. 0.0.0.0 so the compose network reaches it
+# (the slot app dials http://connector:3000 over it); the port is published to
+# 127.0.0.1 only, never to the internet (see docker-compose.yml's ports
+# invariant).
+client_edge_addr = "0.0.0.0:3000"
+
+# Durable claim state, on a named volume.
+#
+# The append-only claim journals live here, and replaying them is what makes a
+# channel's replay watermark survive a restart. Without a volume, every
+# watermark resets on restart, a channel with no watermark accepts any nonce,
+# and every claim a broadcaster already spent buys another slot.
+state_dir = "/app/state"
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# A LOCATION, never the key itself: 64 hex characters holding a secp256k1
+# secret key. This is the connector's own ILP signing identity — it holds no
+# money, so it is fresh random material per box:
+#
+#   openssl rand -hex 32 > signer.key
+#   chmod 600 signer.key && sudo chown 10001:10001 signer.key
+#
+# A bind-mounted file keeps its HOST ownership inside the container, so a
+# root-owned key is unreadable to uid 10001 and the container restart-loops on
+# "Permission denied". The chown is the fix; `chmod 644` is not.
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── What this hub says about itself ──────────────────────────────────────────
+# The facts a node cannot introspect: from inside a container it sees
+# 0.0.0.0:3000 and a private network, never its own public name. They are
+# served, free and unauthenticated, on `GET /ilp` — a stranger with this URL
+# needs nothing else to transact with it, which is exactly how a broadcaster
+# who has only heard of this hub finds the address to buy a slot at.
+#
+# `addresses` lists every prefix this hub TERMINATES, which is exactly the
+# four routes below. It does NOT list the prefixes this hub CARRIES: every
+# station the slot app admits gets a forwarded route beneath
+# `g.toon.slopmachine.<their handle>`, written at runtime by the app's own
+# operator key and never by this file. A terminated prefix is one this hub
+# answers; a forwarded one is one it passes on.
+#
+# Replace the apex and both hostnames with your own.
+[node]
+addresses = [
+  "g.toon.slopmachine.slot.quote",
+  "g.toon.slopmachine.slot.buy",
+  "g.toon.slopmachine.announce",
+  "g.toon.slopmachine.announce.ephemeral",
+]
+http_endpoint = "https://hub.example.com/ilp"
+btp_endpoint = "wss://hub.example.com/ilp/btp"
+
+# ── The quote ────────────────────────────────────────────────────────────────
+# What a slot costs, how long it lasts, whether this hub has room for another
+# one, and — the part a broadcaster needs before anything else — THE ADDRESS
+# THIS HUB WILL GRANT THEM. They write that prefix into their own station's
+# connector.toml, boot, and are ready to be pointed at, all before paying the
+# slot price.
+#
+# ITS OWN ROUTE AT ITS OWN LOW PRICE, exactly as a station's `/now` is priced
+# apart from its segments. That is not tidiness, it is the design: a connector
+# fulfils on ANY complete answer from an app whatever its HTTP status, so a
+# refusal at a paid address is a refusal the caller paid for. Every foreseeable
+# refusal therefore lives HERE, at a floor price — no capacity, and the
+# caller's own current slot — so the expensive address below is only ever
+# reached when the answer is already yes.
+#
+# 50 is a floor price, a twentieth of a thousandth of the slot price. Non-zero,
+# which is also what keeps the x402 greeting armed on it.
+[[routes]]
+prefix = "g.toon.slopmachine.slot.quote"
+
+# `/quote`, not the bare app: the connector GETs exactly this URL, and an
+# envelope's target resolves strictly BENEATH this path and can never replace
+# any part of it (connector ADR 0025). So a packet paying the QUOTE price can
+# reach the quote and nothing else — not the buy, and not /health or /roster,
+# which have NO ROUTE IN THIS FILE AND NEVER MAY.
+handler_url = "http://slot-app:3200/quote"
+price = 50
+
+# The request shape, published verbatim on this route's self-description entry
+# and on the x402 greeting for it (connector ADR 0067). The connector never
+# reads a key out of it; it is for the client. ADR 0067 assigns the check that
+# a declared shape matches what the app actually serves to the APP'S OWN
+# repository — which is this one, so deploy/hub/bundle.test.ts is where that
+# check lives.
+#
+# There is nothing to send: the quote is a GET with no body, and the one
+# identity that matters — who is asking, and therefore which prefix they would
+# be granted — is X-TOON-Payer, which this connector states and no caller
+# supplies.
+[routes.request]
+method = "GET"
+body = "none"
+
+# ── The buy ──────────────────────────────────────────────────────────────────
+# At the slot price, and BENEATH ITS OWN PREFIX — never the quote's, or one of
+# the two would be reachable at the other's price. This is the expensive
+# address, and the fulfill means you are peered: the peering is established
+# and one forwarded route is written per address your station's own connector
+# publishes, synchronously, before it answers.
+#
+# THIS PRICE AND TOON_SLOT_PRICE IN ./docker-compose.yml ARE ONE PAIR. This
+# file is what charges; that variable is what the quote reports and the floor
+# the app checks this connector's own stated X-TOON-Amount against, so a route
+# misconfigured to under-charge cannot sell slots below policy. The app
+# refuses `403 route_under_charges` when they disagree in that direction —
+# which is a refusal the broadcaster paid for. Change one and change the other
+# in the same commit.
+[[routes]]
+prefix = "g.toon.slopmachine.slot.buy"
+handler_url = "http://slot-app:3200/buy"
+price = 1000000
+
+# The buy carries exactly one thing, and everything else is derived — the
+# handle from the payer this connector verified, the price list from the
+# station's own self-description, the carriage terms from the hub's own
+# configuration, the chain from X-TOON-Chain. `stationUrl` is the station
+# connector's own self-description URL (connector ADR 0050), typically its
+# base URL with `/ilp` on the end, and on a public hub it must be `https://`.
+[routes.request]
+method = "POST"
+contentType = "application/json"
+body = { stationUrl = "string, required — your station connector's own https self-description URL" }
+
+# ── The announcement surface ─────────────────────────────────────────────────
+# The relay's paid write. A station being REACHABLE is what the two routes
+# above sell; a station being FOUND is this one. A connector never announces
+# (connector OP-06, ADR 0046), so an announcement is an ordinary paid write to
+# a Nostr relay and this hub is where it lands.
+#
+# `/write`, not the bare relay: the relay serves /write, /write-ephemeral,
+# /health and /metrics, and a sender's own envelope target resolves strictly
+# beneath this path — so nobody can address /health or /metrics through this
+# route at this route's price.
+#
+# 1 micro-USDC per write. A price is REQUIRED on a terminated route — it is
+# never silently free — and keeping it non-zero is what keeps the x402
+# greeting armed.
+[[routes]]
+prefix = "g.toon.slopmachine.announce"
+handler_url = "http://relay:3100/write"
+price = 1
+
+# No `transport` on this route, unlike the devnet relay's own bundle, which
+# pins BTP because its heaviest client holds a persistent session at 49
+# frames a second. A station announces occasionally and a controller sampling
+# this hub should not need a BTP session to do it. Transport is per-connector
+# policy, not a protocol constant.
+[routes.request]
+method = "POST"
+contentType = "application/json"
+body = { event = "a signed NIP-01 event" }
+
+# ── Free ephemeral writes (presence) ─────────────────────────────────────────
+# A separate route, not a second alias: the same handler_url cannot carry two
+# prices, so a free lane needs its own prefix and its own relay endpoint. It
+# accepts ONLY ephemeral kinds (NIP-16, 20000–29999), never stores, and always
+# runs full signature verification — this route has no payment gate to lean
+# on, unlike the paid one above, and its rate limit and body cap (see
+# ./docker-compose.yml) ARE its admission control.
+#
+# Explicitly free. Presence is pay-for-what-persists traffic that never
+# persists, so `price = 0` states that rather than leaving it implicit — the
+# parser requires a price either way.
+[[routes]]
+prefix = "g.toon.slopmachine.announce.ephemeral"
+handler_url = "http://relay:3100/write-ephemeral"
+price = 0
+
+[routes.request]
+method = "POST"
+contentType = "application/json"
+body = { event = "a signed NIP-01 event of an ephemeral kind, 20000-29999" }
+
+# `per_kib` is set on NO route in this file. A price is a schedule over the
+# INBOUND payload, and everything this hub terminates is a small request: a
+# quote with no body at all, a purchase carrying one URL, an announcement
+# carrying one event. There is no slope worth having, and a slope on the buy
+# would mean a longer station URL cost more.
+
+# ── Getting paid ─────────────────────────────────────────────────────────────
+# With this section, anyone who opens a channel on chain can pay this hub with
+# no config edit, and the accepted claim's watermark is journaled under
+# state_dir. Without it, this node has a record of no channel and refuses every
+# claim at its edge as unknown.
+#
+# A HUB'S SETTLEMENT KEY IS ALSO ITS WORKING CAPITAL. Unlike a station's, it
+# is not only what broadcasters open channels against: it is what this hub
+# funds the OTHER side of every peering from. Every slot admitted opens a
+# channel this hub fronts collateral toward, so the roster is a balance-sheet
+# commitment and TOON_SLOT_CAP in ./docker-compose.yml is the only thing
+# bounding it.
+#
+# Fail-closed at STARTUP: the connector resolves token_address through the
+# registry at contract_address and reads the token's own decimals(). A wrong
+# RPC, a registry that does not answer, or a decimals mismatch is exit 1
+# before it serves anything. Every chain below is one more endpoint this node
+# must reach before it will boot.
+#
+# These values are the shared TOON devnet's deployment — the same registry,
+# token and decimals the rest of the fleet settles through. Point them
+# elsewhere only if you are running your own fleet end to end.
+[settlement.evm]
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+# Deliberately NOT the [signer] key above. That one is per-box random material
+# with no funds; this one holds the hub's money, so provision it from a seed
+# you can reproduce, not from `openssl rand`. The TOON fleet derives it at
+# NIP-06 m/44'/1237'/0'/0/0 — the NOSTR coin type, not the standard
+# m/44'/60'. Deriving at m/44'/60' yields a valid address no channel was ever
+# opened against; verify the derived address BEFORE the first `up -d`.
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# A node that accepts claims is a counterparty on whichever chain the payer
+# chose, so an EVM-only hub refuses every Solana-paid purchase that reaches
+# it. It also bounds which chain a peering can settle on: the slot app opens
+# each peering on the chain the broadcaster demonstrably paid on, so a chain
+# this hub does not accept is a chain no slot is ever bought over. Drop these
+# two tables (and the key mount in docker-compose.yml) to run EVM-only.
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
+decimals = 6
+
+[settlement.solana.key]
+# A 32-byte ed25519 seed as 64 hex characters; the fleet derives it from the
+# same mnemonic at m/44'/501'/0'/0'.
+key_file = "/app/data/settlement-solana.key"
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# On a hub this is not an occasional convenience: it is the surface the SLOT
+# APP writes through, on every purchase, every renewal and every lapse. Every
+# read (peers, routes, channels, claims, /metrics) needs the bearer token;
+# every write — `POST /peers`, `POST /routes/peers`,
+# `DELETE /routes/peers/:prefix`, `DELETE /peers/:id` — needs an RFC 9421
+# signature from a key on the allowlist. The app's writes are
+# signature-gated and never bearer-gated; its bearer token is for READS ONLY.
+#
+# TWO FILES LIVE IN THIS DIRECTORY AND THEY ARE NOT THE SAME KIND OF THING:
+#
+#   operator-write.keys   the ALLOWLIST. Public halves, one keyid per line,
+#     (plural)            mounted below. You hand-edit it to grant or REVOKE
+#                         authority (ADR 0008), and a restart applies it. Not
+#                         a secret; per box.
+#   operator-signing.key  the slot app's PRIVATE ed25519 seed. Mounted into
+#     (singular, and      the slot-app service, never into this one. It is
+#      not "write")       the credential that mutates this hub's routing
+#                         table, and it is called `signing` and not `write`
+#                         precisely so that it is not one character away from
+#                         the file above.
+#
+#   openssl rand -hex 32 > operator-bearer.token
+#   openssl rand -hex 32 > operator-signing.key   # the app's PRIVATE seed
+#   connector send --operator-key operator-signing.key --print-keyid \
+#     > operator-write.keys                       # its PUBLIC half: the
+#                                                 # allowlist, one per line
+#   chmod 600 operator-bearer.token operator-signing.key
+#   sudo chown 10001:10001 operator-bearer.token operator-write.keys
+#   sudo chown 1000:1000  operator-signing.key    # the app runs as `node`
+#
+# The slot app prints the same keyid at boot, so an allowlist that does not
+# contain it is visible in one `docker compose logs slot-app`.
+#
+# Revoke the app's authority by deleting its line from operator-write.keys and
+# restarting the connector. That is the whole revocation path, and it is why
+# the allowlist is hand-edited and per box rather than committed.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file   = "/app/data/operator-write.keys"

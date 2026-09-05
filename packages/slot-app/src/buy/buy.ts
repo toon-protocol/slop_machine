@@ -152,6 +152,7 @@ import {
   grantedPrefix,
   readPayerKey,
 } from '../slot/handle.js';
+import type { PeeringPolicy } from '../peering/policy.js';
 import type { SlotPolicy } from '../slot/policy.js';
 import {
   NO_PAID_TERMINATION,
@@ -362,6 +363,17 @@ export interface BoughtSlot {
 
 /** What the buy route needs to answer. */
 export interface BuyDependencies extends ForwardedRouteDependencies {
+  /**
+   * The hub's **whole** peering policy, narrowed from the three fields a
+   * peering write needs to the four this route does.
+   *
+   * The buy is the one place that goes and READS something a stranger named,
+   * so it is the one place that needs
+   * {@link PeeringPolicy.allowPlaintextStationUrls}. Establishing or
+   * releasing a peering does not, which is why the interface this one extends
+   * asks for less.
+   */
+  policy: PeeringPolicy;
   /** The hub's admission policy: price, period, cap, and its own address. */
   slotPolicy: SlotPolicy;
   /** The hub's roster — read for the handle, written before the answer. */
@@ -466,9 +478,16 @@ export function buyRoutes(deps: BuyDependencies): Hono {
     //    the buyer, so nothing can drift from their real configuration. A
     //    station the hub cannot read is refused here, having cost the hub no
     //    channel and the broadcaster no orphaned peering.
+    //
+    //    This is the one fetch either app in this repository makes to a
+    //    destination a stranger chose, so it is read under the hub's own
+    //    policy: bounded, unretried, no redirect followed, and https-only
+    //    unless this hub opted out.
     let published;
     try {
-      published = await readStationDescription(body);
+      published = await readStationDescription(body, {
+        allowPlaintext: deps.policy.allowPlaintextStationUrls,
+      });
     } catch (error) {
       return refusePeering(c, error);
     }

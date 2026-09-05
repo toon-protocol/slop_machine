@@ -1,0 +1,400 @@
+# =============================================================================
+# A slop machine HUB node: Caddy (TLS) → connector (payments) → slot app +
+# relay.
+# =============================================================================
+#
+#   broadcaster ──POST /ilp──▶ caddy ─▶ connector ──▶ slot-app :3200  (paid)
+#                                        one route for the quote, one for the
+#                                        buy, each beneath its own prefix
+#
+#   controller  ──POST /ilp──▶ caddy ─▶ connector ──▶ relay    :3100  (paid)
+#                                        the announcement a viber finds a
+#                                        station by
+#
+#   viber       ──wss────────▶ caddy ─────────────▶ relay    :7100  (free
+#                                        reads — announcements are found for
+#                                        nothing; being reachable is what
+#                                        costs)
+#
+# A HUB CARRIES NO VIBES OF ITS OWN. It ingests nothing, encodes nothing and
+# serves no segments: it sells the routing-table entries that make somebody
+# else's station reachable, and it carries the announcement that makes one
+# findable. Everything a viber actually watches is served by the broadcaster's
+# own station node, from its own connector, over the peering a slot bought.
+#
+# ── The ports invariant, enforced by construction ────────────────────────────
+# EXACTLY TWO PUBLISHED PORTS — and it is a different number from a station's
+# for exactly that reason. A station publishes a third, its RTMPS ingest,
+# because stock Caddy does not speak RTMP and its origin must front its own
+# uplink. A hub has no uplink:
+#
+#   caddy   80, 443     the paid HTTP path and the free-read WebSocket — the
+#                       only two doors onto this box
+#
+# NO RTMP PORT, SERVICE OR PATH APPEARS ANYWHERE IN THIS BUNDLE, and none may:
+# a hub is never a station.
+#
+# Everything else is either `expose`d on the compose network — the slot app's
+# port (3200) and both of the relay's (3100 writes, 7100 reads) — or published
+# to LOOPBACK only (the connector's client edge, 3000, for on-box operator
+# calls). So:
+#
+#   THE SLOT APP'S PORT IS NEVER HOST-PUBLISHED, IN ANY FORM, NOT EVEN ON
+#   LOOPBACK.
+#
+# It is the payment-oblivious surface: /quote, /buy, /health and /roster all
+# answer on it with no notion of a payment at all. /health and /roster have no
+# connector route and never may, so the only reason "unpriced" does not mean
+# "free to the internet" is that this port is published on no interface — and
+# /roster names every broadcaster this hub admitted. The relay's write port is
+# the same shape for the same reason.
+#
+# Remember a docker `ports:` publish WITHOUT a host-IP prefix is
+# internet-reachable even with ufw locked to 22/80/443 — Docker's iptables
+# chain runs ahead of ufw. Never convert an `expose:` here into a `ports:`,
+# and never drop the `127.0.0.1:` from the connector's.
+#
+#   Production:  docker compose up -d
+#   Local, no TLS, slot app built from source:
+#     docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#   With auto-redeploy:
+#     docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+# =============================================================================
+
+name: hub
+
+services:
+  # ── TLS ────────────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      # Two public names, because unlike a station a hub DOES serve something
+      # free: the announcements a viber reads to find a station at all. Being
+      # findable is free; being reachable is what a broadcaster pays for.
+      EDGE_HOST: ${EDGE_HOST:?set EDGE_HOST in .env (the connector edge hostname)}
+      READ_HOST: ${READ_HOST:?set READ_HOST in .env (the free-read WS hostname)}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Named, so a `docker compose up`
+      # that recreates this container does not re-issue every certificate and
+      # walk into Let's Encrypt's rate limit.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      connector:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+      slot-app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The payment proxy ──────────────────────────────────────────────────────
+  #
+  # The STOCK connector image on an immutable pin, with this directory's
+  # connector.toml mounted in. Same image and same shape as the station bundle
+  # beside it and as the relay, store and gas-station bundles — one connector
+  # deployment model across the fleet. THIS REPO PUBLISHES NO CONNECTOR IMAGE;
+  # it only pins one.
+  #
+  # ── Bumping the pin ────────────────────────────────────────────────────────
+  # This `image:` line is the hub bundle's pin of record, and it is one of
+  # exactly two places in this repository a connector build may be named — the
+  # other is the station bundle's own compose file. deploy/bundle.test.ts fails
+  # the build if a third copy appears anywhere, or if the two disagree: two
+  # bundles running two different connectors is how an operator ends up
+  # deploying one connector while reading about another.
+  #
+  # Pin an exact immutable build, never a floating tag. The config parser is
+  # `deny_unknown_fields` and startup is fail-closed, so a schema drift under
+  # you is a refuse-to-start rather than a degraded run — which is the
+  # behaviour you want, but it means an accidental bump is an outage. It also
+  # cuts the other way: this bundle's connector.toml declares a `request`
+  # shape on every route it terminates (connector ADR 0067), and `request` is
+  # a key the connector only learned in this pin's own build. Rolling the pin
+  # BACKWARDS without dropping those tables is a refuse-to-start.
+  #
+  # Because the pin is IMMUTABLE, this container does not auto-deploy: there
+  # is no moving tag for Watchtower to follow, so a connector or config change
+  # needs `git pull && docker compose up -d` on the box. The label below stays
+  # for shape-parity with the other bundles, and is inert here.
+  connector:
+    image: ghcr.io/toon-protocol/connector:rust-2026.08.28.1
+    # No `environment:` block, deliberately: the connector has no
+    # environment-variable layer at all. Every value comes from the mounted
+    # ./connector.toml, so there is exactly one place any value comes from —
+    # including the price of a quote and the price of a slot.
+    labels:
+      # Watchtower only ever touches a container carrying this label, and only
+      # when docker-compose.watchtower.yml is in the file set. Inert for this
+      # service while the image above is pinned to an immutable tag.
+      com.centurylinklabs.watchtower.enable: 'true'
+    volumes:
+      # The whole connector configuration — the quote route and its floor
+      # price, the buy route and the slot price, the announcement routes,
+      # settlement, and what this hub says about itself. Mounted, not baked:
+      # the pin above and this file are the same reviewed commit, and the box
+      # takes both with one `git pull`. It names key PATHS only and holds
+      # nothing secret.
+      - ./connector.toml:/app/config/connector.toml:ro
+      # Two identities, provisioned two different ways — see connector.toml.
+      # In short: the signer holds no money and is fresh random material per
+      # box; the settlement key is what broadcasters open channels against and
+      # what this hub funds its own peerings from, so it comes from a seed you
+      # can reproduce. Both must exist and be readable by uid 10001 before the
+      # first `up -d`.
+      - ./signer.key:/app/data/signer.key:ro
+      - ./settlement.key:/app/data/settlement.key:ro
+      # Drop this line (and connector.toml's [settlement.solana]) for EVM-only.
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      # The operator surface's two credentials — see connector.toml's
+      # [operator]. The bearer token gates reads; operator-write.keys is the
+      # ALLOWLIST of PUBLIC halves allowed to sign a write, which on a hub is
+      # where the slot app's own public key goes (README step 3).
+      #
+      # operator-write.keyS, PLURAL, is not the slot app's key file. The app's
+      # private seed is `operator-signing.key`, mounted into the slot-app
+      # service below, and the two are deliberately not one character apart:
+      # this is the one directory in the fleet where both live side by side,
+      # and the allowlist is the file an operator hand-edits to REVOKE
+      # authority while the seed is the secret that holds it.
+      - ./operator-bearer.token:/app/data/operator-bearer.token:ro
+      - ./operator-write.keys:/app/data/operator-write.keys:ro
+      # The claim journal. NAMED, not a host bind: the image ships /app/state
+      # owned by uid 10001, which is what a fresh named volume inherits on
+      # first mount and what a bind mount does not. Replaying it is what stops
+      # a restart from re-accepting a claim a broadcaster already spent.
+      - connector_state:/app/state
+    ports:
+      # LOOPBACK ONLY. Broadcaster traffic reaches the edge through Caddy;
+      # this publish is for on-box operator calls (`/peers`, `/routes/peers`,
+      # `/channels`) and nothing else. Dropping the `127.0.0.1:` would put the
+      # edge — and with it the operator surface — on the internet. The slot
+      # app does NOT reach the connector through this publish: it dials
+      # `http://connector:3000` on the compose network.
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      # The connector has no /health route. GET /ilp/identity answers 200 only
+      # once the process is serving AND has read its signer key file.
+      # 127.0.0.1, never localhost: the listener is IPv4-only, but "localhost"
+      # in a container can resolve to ::1, where nothing is listening.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      relay:
+        condition: service_healthy
+      slot-app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The slot app ───────────────────────────────────────────────────────────
+  #
+  # The hub's admission desk. A broadcaster buys a SLOT and this app's
+  # operator key creates the PEERING and writes the routes that make their
+  # station reachable — two words for two things (ADR 0003), and nothing here
+  # calls one by the other's name.
+  #
+  # It holds NO payment code: no claim validation, no settlement key, no
+  # payment-header parsing. By the time a request reaches it the connector in
+  # front has already proven it paid, and has stated who paid, how much and on
+  # which chain.
+  #
+  # It does hold the hub's OPERATOR WRITE KEY, which is this repo's own named
+  # hazard: it is the one app in the fleet that reaches back into a
+  # connector's operator surface, so compromising it means mutating this hub's
+  # routing table. That is why its port is `expose:` and why both credentials
+  # are mounted files.
+  #
+  # DELIBERATELY NO `depends_on` ON THE CONNECTOR, even though it writes to
+  # it: the connector depends on this app being healthy (nothing should
+  # terminate into an app that is not up), and the app tolerates a connector
+  # that has not come up yet — its boot reconciliation says so in the log and
+  # tries again rather than refusing to boot. A `depends_on` here would be a
+  # cycle compose refuses to start at all.
+  slot-app:
+    image: ${SLOT_APP_IMAGE:-ghcr.io/toon-protocol/slot-app:release}
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    environment:
+      TOON_SLOT_PORT: '3200' # the admission desk — PRIVATE, never published
+      TOON_DATA_DIR: /data
+      # The hub's own ILP apex, and therefore the root of every prefix it
+      # grants: a broadcaster is granted `<hub address>.<their handle>`.
+      # KEEP THIS IN STEP WITH connector.toml: the two slot routes there are
+      # written beneath this address, and the app derives the prefix it grants
+      # from this one. A hub whose app and connector disagree about its own
+      # address writes routes nobody addresses.
+      TOON_HUB_ADDRESS: ${HUB_ADDRESS:-g.toon.slopmachine}
+      # ── The admission policy. These numbers ARE the policy ────────────────
+      # Admission is a price, not a judgement, so changing one is a config
+      # edit and never a code change.
+      #
+      # TOON_SLOT_PRICE and connector.toml's BUY route are ONE PAIR. The
+      # connector is what charges; this number is what the quote reports and
+      # the floor the buy checks the connector's own stated X-TOON-Amount
+      # against, so a route misconfigured to under-charge cannot sell slots
+      # below policy. Change one and change the other in the same commit.
+      TOON_SLOT_PRICE: ${HUB_SLOT_PRICE:-1000000}
+      # How long a slot lasts. Seconds, because that is what makes a lapse
+      # testable without a fake clock. 2592000 is thirty days.
+      TOON_SLOT_PERIOD_SECONDS: ${HUB_SLOT_PERIOD_SECONDS:-2592000}
+      # THE HUB'S CAPITAL BOUND, and the number an operator is most likely to
+      # change first. Every admission opens a payment channel this hub fronts
+      # collateral toward, so the roster is a balance-sheet commitment and
+      # this is the only thing bounding it. `0` is legal and means the hub is
+      # admitting nobody. Lowering it below the roster closes the door without
+      # evicting the stations behind it: a renewal is never refused for the
+      # cap.
+      TOON_SLOT_CAP: ${HUB_SLOT_CAP:-100}
+      # How often the roster is walked for slots past their lapse time — the
+      # GRANULARITY of the lapse, not its length. There is no value that turns
+      # the sweep off; `0` is refused at boot, because a hub that never
+      # reclaims a dead station's peering only ever commits more collateral.
+      TOON_LAPSE_SWEEP_SECONDS: ${HUB_LAPSE_SWEEP_SECONDS:-60}
+      # ── The peering policy: this hub's own terms about a counterparty ─────
+      # The connector on the compose network, NOT the loopback publish above:
+      # a container reaching its own host's 127.0.0.1 reaches itself.
+      TOON_OPERATOR_URL: http://connector:3000
+      # What the hub retains for carrying one packet onward. Carriage is where
+      # a hub earns — the slot price exists to make admission self-service and
+      # to lapse dead stations, not to be revenue — and it is what has to
+      # cover the collateral every admission fronts. A route this app writes
+      # is priced at the station's own published price PLUS this, because the
+      # station's connector checks per packet that a peer-wire arrival covers
+      # its own termination price: a hub route priced any lower forwards into
+      # a refusal.
+      TOON_PEERING_FEE: ${HUB_PEERING_FEE:-20}
+      # The largest amount this hub will forward in one packet. It has to sit
+      # above the most expensive thing any station it admits sells, or the hub
+      # is peered with a station whose top rung nobody can pay for.
+      TOON_PEERING_MAX_PACKET_AMOUNT: ${HUB_PEERING_MAX_PACKET_AMOUNT:-10000000}
+      # A PUBLIC hub reads a station connector over TLS ONLY. The purchase
+      # body carries a URL of the buyer's choosing and this app then GETs it
+      # from inside the hub's own network, so an `http://` station URL is
+      # both a credential-free hop a network path can rewrite and the widest
+      # part of the buyer-supplied-URL surface. This mirrors the connector's
+      # own `peer_allow_plaintext_endpoints`, which is a loopback-and-test
+      # opt-in and defaults false there too. The LOCAL overlay turns it back
+      # on; nothing on a box with a public name should.
+      TOON_ALLOW_PLAINTEXT_STATION_URLS: 'false'
+      # ── The two operator credentials: LOCATIONS, never values ─────────────
+      # There is deliberately no TOON_OPERATOR_WRITE_KEY and no
+      # TOON_OPERATOR_BEARER_TOKEN, and no flag for either literal: a command
+      # line is world-readable on the box and an image's environment is
+      # readable from its metadata without ever running it. The app refuses to
+      # start without either and says which one — a hub that cannot admit
+      # anybody must look broken rather than look fine.
+      #
+      # `operator-signing.key` is the app's PRIVATE ed25519 seed. It is
+      # deliberately NOT called `operator-signing.key`, because
+      # `operator-write.keys` — mounted into the connector above — is a
+      # different artifact living in this same directory: the allowlist of
+      # PUBLIC halves that a hub operator hand-edits to revoke authority. Two
+      # files one character apart, one secret and one hand-edited, is the
+      # affordance this bundle refuses to ship.
+      TOON_OPERATOR_WRITE_KEY_FILE: /run/secrets/operator-signing.key
+      TOON_OPERATOR_BEARER_TOKEN_FILE: /run/secrets/operator-bearer.token
+    volumes:
+      # The mounted values. Both are gitignored and neither is ever baked into
+      # an image. They keep their HOST ownership inside the container, so they
+      # must be readable by the image's runtime user (uid 1000, `node`) — see
+      # the README's step 2.
+      - ./operator-signing.key:/run/secrets/operator-signing.key:ro
+      - ./operator-bearer.token:/run/secrets/operator-bearer.token:ro
+      # The roster: who holds a slot and when each lapses. Named so it has a
+      # name an operator can find and a stray `docker volume prune` — which
+      # reaps unused ANONYMOUS volumes — cannot take it. Losing it is not
+      # losing a cache: it is the hub forgetting which peerings it is funding.
+      - hub_data:/data
+    expose:
+      # The admission desk. `expose:`, never `ports:` — this is the whole of
+      # the app-port invariant. /health and /roster answer here unpriced, and
+      # /roster names every broadcaster this hub admitted.
+      - '3200'
+    healthcheck:
+      # 127.0.0.1, never localhost — see the connector's healthcheck.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3200/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── The announcement surface ───────────────────────────────────────────────
+  #
+  # The RELAY's own published image, unmodified — this repo writes no relay
+  # code and publishes no relay image. A station being REACHABLE is the slot
+  # app's business; a station being FOUND is this one's. A connector never
+  # announces (connector OP-06, ADR 0046), so the announcement is an ordinary
+  # paid write to a Nostr relay and the hub is where it lands.
+  #
+  # Two ports, neither published: 3100 takes paid writes and is dialled only
+  # by the connector, and 7100 serves free NIP-01 reads and is dialled only by
+  # Caddy. The relay skips schnorr verification for PAID EPHEMERAL kinds on
+  # the assumption that 3100 is reachable exclusively through the
+  # payment-gating connector, which the ports invariant above is what makes
+  # true. If that ever changes, set RELAY_VERIFY_EPHEMERAL=true.
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:release}
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    environment:
+      TOON_BLS_PORT: '3100' # paid writes — PRIVATE, only the connector dials it
+      TOON_RELAY_PORT: '7100' # free reads — fronted by Caddy
+      TOON_DATA_DIR: /data
+      # The relay's own Nostr IDENTITY (not money, and not the connector's
+      # keys). It will not boot without one, and changing it changes the
+      # pubkey every viber's client knows this hub's relay by.
+      #
+      # THE ONE SECRET IN .env, and it is there because the relay image takes
+      # its identity that way and offers no file-valued form. Everything else
+      # this bundle holds is a mounted file.
+      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:?set RELAY_NOSTR_SECRET_KEY in .env (32-byte hex)}
+      # true skips event-signature verification on writes. Smoke tests only.
+      TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
+      # true restores full schnorr verification for paid ephemeral kinds. The
+      # default false is safe only while 3100 is reachable exclusively through
+      # the connector — see the ports invariant.
+      TOON_VERIFY_EPHEMERAL: ${RELAY_VERIFY_EPHEMERAL:-false}
+      # WS read-connection cap. Each costs one file descriptor.
+      TOON_MAX_CONNECTIONS: ${RELAY_MAX_CONNECTIONS:-4096}
+      # Retention: an event past its own NIP-40 `expiration` stops being
+      # served and is deleted after the grace window. An announcement carrying
+      # an expiration is how a station's own listing goes quiet on its own.
+      TOON_ENFORCE_EXPIRATION: ${RELAY_ENFORCE_EXPIRATION:-true}
+      TOON_EXPIRATION_REAP_GRACE_SECONDS: ${RELAY_EXPIRATION_REAP_GRACE_SECONDS:-86400}
+      TOON_EXPIRATION_REAP_INTERVAL_SECONDS: ${RELAY_EXPIRATION_REAP_INTERVAL_SECONDS:-3600}
+      # Free ephemeral lane bounds. That lane has no payment gate, so these
+      # ARE its admission control.
+      TOON_EPHEMERAL_RATE_LIMIT: ${RELAY_EPHEMERAL_RATE_LIMIT:-200}
+      TOON_EPHEMERAL_RATE_WINDOW_MS: ${RELAY_EPHEMERAL_RATE_WINDOW_MS:-10000}
+      TOON_EPHEMERAL_MAX_BODY_BYTES: ${RELAY_EPHEMERAL_MAX_BODY_BYTES:-8192}
+    volumes:
+      # events.db — the announcements themselves. Named, for the same reason
+      # the roster's volume is.
+      - relay_data:/data
+    expose:
+      - '3100' # paid writes — PRIVATE, only the connector dials this
+      - '7100' # free reads  — fronted by Caddy
+    healthcheck:
+      # 127.0.0.1, never localhost — see the connector's healthcheck.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  connector_state:
+  hub_data:
+  relay_data:

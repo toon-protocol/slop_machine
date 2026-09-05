@@ -1,0 +1,64 @@
+# =============================================================================
+# Auto-redeploy overlay — Watchtower, scoped to this node's three app images.
+# =============================================================================
+#   docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+#
+# `--label-enable` makes Watchtower ignore every container UNLESS it carries
+# `com.centurylinklabs.watchtower.enable=true`. In docker-compose.yml that
+# label is on `connector`, `slot-app` and `relay` and nowhere else, so:
+#
+#   * a green merge to this repo's main publishes the SLOT APP image and moves
+#     its `:release` tag — that is
+#     `.github/workflows/publish-slot-app-image.yml`, which runs on push to
+#     main — and this container recreates it within about a minute;
+#   * the RELAY is another repository's image on its own `:release` tag, and a
+#     green merge to relay's main moves it the same way. This bundle pulls
+#     that image and publishes none of it;
+#   * the CONNECTOR is pinned to an immutable tag, which by definition never
+#     moves, so Watchtower has nothing to follow for it. Its label is kept for
+#     shape-parity with the other bundles and is inert. Changing the connector
+#     pin or its config — which is where the price of a quote and the price of
+#     a slot live — is a `git pull && docker compose up -d` on the box, not
+#     something that arrives on its own;
+#   * Caddy is NEVER touched. It holds the certificates and the ACME account,
+#     and it is the one component whose job is surviving the others being
+#     replaced — recreating it on an upstream `caddy:2-alpine` push would be
+#     an unreviewed change to the TLS edge.
+#
+# A recreate of the slot app is a few seconds during which a purchase in
+# flight is a connector-side `T01` — the app was unreachable, which is one of
+# the two outcomes that escapes payment, so a broadcaster is not charged for
+# it. The roster is on a named volume that survives the recreate, and the
+# restarted app RECONCILES against the connector's own tables before it binds
+# its port, so a purchase that landed half-written before the recreate is
+# finished rather than lost. What a broadcaster sees is a retry that works.
+#
+# A recreate of the relay drops every open read WebSocket; clients reconnect.
+# No announcement is lost — events.db is on a named volume too.
+#
+# Rollback is by immutable tag: every build of either app keeps its
+# `sha-<short>` tag in its registry, so pinning SLOT_APP_IMAGE or RELAY_IMAGE
+# to one and running `up -d` puts a specific build back. Rolling the connector
+# back is editing the pin in docker-compose.yml.
+#
+# `--interval 60` is one manifest check per minute against public
+# repositories, so no registry credentials are mounted. `--cleanup` removes
+# the image a recreate just superseded, so a box following a moving tag does
+# not accumulate one dangling image per merge.
+#
+# The docker socket is unavoidable for a container-recreating tool. Nothing is
+# published: there is nothing here for Caddy to front and nothing that should
+# ever be reachable off-box — THIS OVERLAY ADDS NO THIRD PUBLISHED PORT.
+# =============================================================================
+
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    environment:
+      # Watchtower's bundled client defaults to Docker API 1.25 and refuses to
+      # talk to a newer daemon without this set explicitly.
+      DOCKER_API_VERSION: '1.44'
+    command: ['--label-enable', '--interval', '60', '--cleanup']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

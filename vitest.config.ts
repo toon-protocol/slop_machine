@@ -18,10 +18,18 @@ export default defineConfig({
     poolOptions: {
       forks: { minForks: 1, maxForks: 4 },
     },
-    // Every workspace package's own suites, plus deploy/*.test.ts — the guard
-    // that reads the real deploy artifacts (it is not app source, so it
-    // lives next to the files it guards, exactly as relay's does).
-    include: ['packages/*/src/**/*.test.ts', 'deploy/*.test.ts'],
+    // Every workspace package's own suites, plus the deploy guards — the
+    // suites that read the real deploy artifacts (they are not app source, so
+    // each lives next to the files it guards, exactly as relay's does). TWO
+    // bundles ship from here, a station node's and a hub node's, so the
+    // pattern reaches one directory down as well: a guard that ran only
+    // against `deploy/` would leave the hub bundle's ports and routes
+    // unasserted (slop_machine#41).
+    include: [
+      'packages/*/src/**/*.test.ts',
+      'deploy/*.test.ts',
+      'deploy/hub/*.test.ts',
+    ],
     // deploy/image-secrets.test.ts is the one exception: it needs a Docker
     // daemon and builds real images, so it runs from vitest.image.config.ts
     // via `pnpm test:image` rather than adding minutes to every run here.

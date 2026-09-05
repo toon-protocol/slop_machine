@@ -101,7 +101,7 @@ function mountCredentials(): Mounted {
   const dir = freshDir();
   return {
     dir,
-    writeKey: mountCredential(dir, 'operator-write.key'),
+    writeKey: mountCredential(dir, 'operator-signing.key'),
     bearerToken: mountCredential(dir, 'operator-bearer.token'),
   };
 }
@@ -284,6 +284,11 @@ describe('the hub operator surface', () => {
       operatorUrl: 'http://connector:3000',
       fee: 25,
       maxPacketAmount: 12_345,
+      // Unset above, so this is the DEFAULT, written out here rather than
+      // read back off the app: a hub reads a station connector over https
+      // only unless its operator said otherwise, and a default that flipped
+      // would fail here instead of on a live box.
+      allowPlaintextStationUrls: false,
     });
   });
 });
@@ -379,7 +384,7 @@ describe('the two operator credentials', () => {
   });
 
   it('refuses to start when a credential file is missing, naming that file', async () => {
-    const missing = join(freshDir(), 'operator-write.key');
+    const missing = join(freshDir(), 'operator-signing.key');
 
     const error = await refusal({ operatorWriteKeyFile: missing });
 
@@ -405,7 +410,7 @@ describe('the two operator credentials', () => {
 
   it('refuses to start on an empty credential file', async () => {
     const dir = freshDir();
-    const empty = join(dir, 'operator-write.key');
+    const empty = join(dir, 'operator-signing.key');
     writeFileSync(empty, '\n', { mode: 0o600 });
 
     const error = await refusal({ operatorWriteKeyFile: empty });
@@ -459,7 +464,7 @@ describe('the two operator credentials', () => {
 
   it('refuses to start on a write key it could never sign with', async () => {
     const dir = freshDir();
-    const notASeed = join(dir, 'operator-write.key');
+    const notASeed = join(dir, 'operator-signing.key');
     // What an operator gets by generating the wrong thing, or by mounting the
     // PUBLIC half. Refused at boot rather than at the first purchase: the
     // symptom otherwise is a 401 on a broadcaster who already paid.

@@ -119,7 +119,7 @@ function freshDir(): string {
 /** Throwaway credentials, mounted at real files. Fresh and random per hub. */
 function mountCredentials(dir: string): Mounted {
   const seed = randomBytes(32).toString('hex');
-  const writeKeyFile = join(dir, 'operator-write.key');
+  const writeKeyFile = join(dir, 'operator-signing.key');
   writeFileSync(writeKeyFile, `${seed}\n`, { mode: 0o600 });
 
   const bearerToken = randomBytes(32).toString('hex');
@@ -156,6 +156,11 @@ async function boot(config: Partial<SlotAppConfig> = {}): Promise<Hub> {
       peeringFee: CARRIAGE,
       slotPeriodSeconds: PERIOD_SECONDS,
       operatorUrl: operator.url,
+      // This suite is a local topology: the fake station connector serves its
+      // self-description over plaintext on loopback, with no certificate
+      // anywhere. A hub with a public name reads https only — see
+      // TOON_ALLOW_PLAINTEXT_STATION_URLS, whose default is false.
+      allowPlaintextStationUrls: true,
       operatorWriteKeyFile: mounted.writeKeyFile,
       operatorBearerTokenFile: mounted.bearerTokenFile,
       ...overrides,

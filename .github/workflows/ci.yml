@@ -236,16 +236,16 @@ jobs:
         run: |
           set -euo pipefail
           SECRETS=$(mktemp -d)
-          openssl rand -hex 32 > "$SECRETS/operator-write.key"
+          openssl rand -hex 32 > "$SECRETS/operator-signing.key"
           openssl rand -hex 32 > "$SECRETS/operator-bearer.token"
           # The image runs unprivileged as `node`, and `mktemp -d` is 0700 —
           # without this the container cannot traverse the mount and the
           # refusal we would see is the one about an unreadable file.
           chmod 755 "$SECRETS"
-          chmod 644 "$SECRETS/operator-write.key" "$SECRETS/operator-bearer.token"
+          chmod 644 "$SECRETS/operator-signing.key" "$SECRETS/operator-bearer.token"
           docker run -d --name slot-app-ci \
             -v "$SECRETS:/run/secrets:ro" \
-            -e TOON_OPERATOR_WRITE_KEY_FILE=/run/secrets/operator-write.key \
+            -e TOON_OPERATOR_WRITE_KEY_FILE=/run/secrets/operator-signing.key \
             -e TOON_OPERATOR_BEARER_TOKEN_FILE=/run/secrets/operator-bearer.token \
             -e TOON_OPERATOR_URL=http://connector:3000 \
             -p 127.0.0.1:3200:3200 slot-app:ci

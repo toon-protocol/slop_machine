@@ -1,0 +1,41 @@
+# TLS for a hub node. Caddy obtains and renews Let's Encrypt certificates on
+# its own — there is no certbot sidecar and no renewal timer to forget.
+#
+# Two names, two upstreams:
+#   EDGE_HOST → the connector's client edge, where a broadcaster's paid quote
+#               and paid buy land, along with a controller's paid
+#               announcement, the x402 greeting, and the free GET /ilp
+#               self-description.
+#   READ_HOST → the relay's Nostr WebSocket. FREE reads: a viber finding a
+#               station costs nothing, because being FOUND is not what a
+#               broadcaster pays a hub for — being REACHABLE is, and that is
+#               the slot. Caddy proxies the upgrade with no extra
+#               configuration.
+#
+# THERE IS NO RTMP IN THIS FILE AND THERE CANNOT BE. Stock Caddy does not
+# speak it, and more to the point a hub carries no vibes of its own: it
+# ingests nothing, so it fronts no uplink. A station node is where ingest
+# lives, and that is a different bundle (../).
+#
+# THE SLOT APP'S PORT (3200) IS DELIBERATELY ABSENT from this file and from
+# every route in it, and so is the relay's write port (3100). Both are
+# payment-oblivious surfaces — /quote, /buy, /health and /roster all answer on
+# 3200 with no notion of a payment at all — and a public path to either is a
+# free door. On 3200 that door would sell nothing and give away two things: a
+# free slot, and /roster's list of every broadcaster this hub admitted.
+#
+# The upstreams are NAMED, not addressed. Caddy re-resolves a container name
+# per dial, so a Watchtower recreate that moves `connector` or `relay` to a
+# new address on the compose network heals itself with no reload.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$EDGE_HOST} {
+	reverse_proxy connector:3000
+}
+
+{$READ_HOST} {
+	reverse_proxy relay:7100
+}

@@ -1,0 +1,70 @@
+# =============================================================================
+# Local overlay — run a hub on your machine, without TLS.
+# =============================================================================
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# Three changes from the production file:
+#   * Caddy is dropped. There is no public hostname to get a certificate for
+#     and nothing for it to front. The connector's edge needs nothing here:
+#     the base file already publishes it on 127.0.0.1:3000, which is where a
+#     local broadcaster points their quote and their buy.
+#
+#     ONE GOTCHA. `.env` still has to exist and still has to set EDGE_HOST,
+#     READ_HOST, ACME_EMAIL and RELAY_NOSTR_SECRET_KEY, even though Caddy
+#     never starts. Compose interpolates each file on its own BEFORE merging
+#     the set, so docker-compose.yml's `${EDGE_HOST:?...}` is resolved while
+#     Caddy is still an ordinary service; a profile only decides what runs,
+#     never what is read. Any values will do for the three hostnames — `cp
+#     .env.example .env` and leave them — but the relay's identity is read by
+#     a service that DOES start, so generate a real one.
+#   * The slot app is BUILT FROM THIS CHECKOUT rather than pulled. The base
+#     file's `ghcr.io/toon-protocol/slot-app:release` is published on every
+#     merge to main and can be pulled, but it is what MAIN says, not what your
+#     working tree says — and running your own change is the whole point of
+#     this overlay. This is the only place in the bundle a local build
+#     appears, and it is this repository's own app image, never the
+#     connector's and never the relay's: both of those are stock published
+#     images in every file set.
+#   * Plaintext station URLs are allowed again. A local topology's station
+#     connector is `http://station-connector:3000/ilp` or a loopback port,
+#     with no certificate anywhere, and the production file refuses those on
+#     purpose — see TOON_ALLOW_PLAINTEXT_STATION_URLS there. NEVER set this on
+#     a box with a public name: a purchase names a URL of the buyer's
+#     choosing and the app then GETs it from inside the hub's own network.
+#
+# The relay's FREE READ port is published on loopback here, because with Caddy
+# gone nothing else would reach it and reading announcements is how you check
+# a local hub is carrying anything. It is `127.0.0.1:`-qualified, like the
+# connector's edge in the base file, so this overlay adds no third
+# INTERNET-REACHABLE door — the invariant is unqualified publishes, and Caddy
+# holds the only two of those in every file set.
+#
+# THE SLOT APP'S PORT AND THE RELAY'S WRITE PORT STAY UNPUBLISHED EVEN HERE.
+# Publishing 3200 would put a free slot and /roster's list of every admitted
+# broadcaster on your machine, and it is the one habit that would then look
+# normal in production. Reach the app the way a broadcaster does — through the
+# connector on 127.0.0.1:3000 — or
+# `docker compose exec slot-app wget -qO- http://127.0.0.1:3200/roster` for
+# the in-node diagnostics.
+# =============================================================================
+
+services:
+  caddy:
+    # `docker compose up` ignores a service whose profile is not active, and
+    # no profile is ever activated here. Cleaner than a second copy of the
+    # file with the service deleted.
+    profiles: ['never']
+
+  slot-app:
+    build:
+      context: ../..
+      dockerfile: packages/slot-app/Dockerfile
+    environment:
+      # A string, not a boolean: compose merges environment MAPS, so this
+      # overrides the base file's 'false' rather than being appended to it.
+      # Local station connectors have no TLS, and this hub has no public name.
+      TOON_ALLOW_PLAINTEXT_STATION_URLS: 'true'
+
+  relay:
+    ports:
+      - '127.0.0.1:7100:7100' # free NIP-01 reads — loopback only

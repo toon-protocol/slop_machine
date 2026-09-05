@@ -45,12 +45,20 @@
  *
  * **The request is bounded and unretried**, on the terms connector ADR 0058
  * sets for the same fetch on the connector's side: a whole-exchange timeout,
- * a size cap, and no redirect followed — the broadcaster named a URL and this
+ * a size cap, no redirect followed — the broadcaster named a URL and this
  * reads *that* URL, because following a redirect would let the named host
- * hand the routing table to a different host. It is not retried, because
- * every failure here is a fact about the caller's own node that will say the
- * same thing however many times it is asked, and the packet's deadline is the
- * broadcaster's to spend.
+ * hand the routing table to a different host — and, on a hub that has not
+ * opted out, **`https://` only**. This is the one fetch in either app that a
+ * stranger chooses the destination of, so its bounds are the whole of what
+ * keeps a purchase from being a request the hub makes on somebody else's
+ * behalf. Plaintext is the last of them: an `http://` hop is one any network
+ * path between here and there can rewrite, and what it would rewrite is the
+ * price list the hub is about to write its routing table from. The switch is
+ * `TOON_ALLOW_PLAINTEXT_STATION_URLS`, defaulting `false`, named and
+ * defaulted after the connector's own `peer_allow_plaintext_endpoints`. It is
+ * not retried, because every failure here is a fact about the caller's own
+ * node that will say the same thing however many times it is asked, and the
+ * packet's deadline is the broadcaster's to spend.
  *
  * Failures are {@link PeeringError}s with `failure: 'station'`, which is the
  * hub's word for *this is about the counterparty's node*. That is deliberate:
@@ -117,19 +125,38 @@ export interface StationDescription {
   routes: PublishedRoute[];
 }
 
+/** What a hub will and will not go and read, per {@link readStationDescription}. */
+export interface StationReadPolicy {
+  /**
+   * Whether a plaintext `http://` URL is read at all.
+   *
+   * `false` on a hub with a public name; `true` in a local topology and in
+   * this repo's own suite, neither of which has a certificate anywhere. The
+   * refusal is checked before a socket is opened, so a plaintext URL costs
+   * the hub no connection at all.
+   */
+  allowPlaintext: boolean;
+}
+
 /**
  * Read the self-description a station connector publishes at `url`.
  *
  * @param url - the station connector's own URL, exactly as the purchase
  * carried it. Typically the connector's base URL with `/ilp` on the end.
+ * @param policy - what this hub is willing to go and read.
  * @returns what that node published about itself, as far as the hub reads it.
- * @throws PeeringError with `failure: 'station'` — unreachable, redirecting,
- * oversized, not JSON, or publishing something this hub cannot price a route
- * from. Every one of them is about the caller's own node.
+ * @throws PeeringError with `failure: 'station'` — plaintext where this hub
+ * reads only TLS, unreachable, redirecting, oversized, not JSON, or
+ * publishing something this hub cannot price a route from. Every one of them
+ * is about the caller's own node, and none of them is a new refusal at a paid
+ * address: they are all the one the buy already answers.
  */
 export async function readStationDescription(
-  url: string
+  url: string,
+  policy: StationReadPolicy
 ): Promise<StationDescription> {
+  refuseUnreadableScheme(url, policy);
+
   let response: Response;
   try {
     response = await fetch(url, {
@@ -181,6 +208,44 @@ export async function readStationDescription(
     ilpAddresses: addressesOf(published),
     routes: routesOf(published),
   };
+}
+
+/**
+ * Refuse a URL this hub will not dial at all, before a socket is opened.
+ *
+ * Two cases, and both are about the caller's own node rather than about their
+ * request, which is why both take the same `failure: 'station'` the fetch's
+ * own failures take:
+ *
+ * - **a scheme that is not HTTP at all.** `fetch` supports two, so `file:`,
+ *   `data:` and the rest would fail anyway — but they would fail as "could
+ *   not be reached", which reads like a station that is down rather than a
+ *   URL that was never a station.
+ * - **plaintext, where this hub reads only TLS.** See
+ *   {@link StationReadPolicy}.
+ */
+function refuseUnreadableScheme(url: string, policy: StationReadPolicy): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Not a URL at all: leave it to the fetch, whose message quotes what the
+    // runtime made of it.
+    return;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw unreadable(
+      'a station connector is read over https, and that URL is neither https nor http',
+      `the scheme was ${JSON.stringify(parsed.protocol.replace(/:$/, ''))}`
+    );
+  }
+  if (parsed.protocol === 'http:' && !policy.allowPlaintext) {
+    throw unreadable(
+      'this hub reads a station connector over https only, and that URL is plaintext http',
+      'the hub fetches the URL a purchase names, from inside its own network, and writes its routing table from what comes back — so a hop anything on the path can rewrite is one it will not take. Publish your connector behind TLS (deploy/README.md step 1 is the whole of it) and buy again; nothing was written and no peering was established'
+    );
+  }
 }
 
 /**

@@ -27,9 +27,12 @@
  * because an operator fixing a bad mount needs to know which file — while the
  * contents never leave this module's return value.
  *
- * On the shape of the files: both are what `deploy/connector.toml`'s own
- * provisioning comments tell a hub operator to generate, `openssl rand -hex 32`
- * into `operator-write.key` and `operator-bearer.token`. So both are read as
+ * On the shape of the files: both are what `deploy/hub/README.md`'s step 2
+ * tells a hub operator to generate, `openssl rand -hex 32`
+ * into `operator-signing.key` and `operator-bearer.token` — the first named
+ * `signing` rather than `write` so that it is never one character from
+ * `operator-write.keys`, the connector's hand-edited allowlist of public
+ * halves, which sits in that same directory. So both are read as
  * text and trimmed, exactly as the station origin reads its stream key —
  * a mounted credential is usually written by a human with an editor or an
  * `echo`, and the trailing newline is not part of it. Nothing here decodes the

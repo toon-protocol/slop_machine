@@ -380,24 +380,40 @@ Neither value is ever logged, echoed, put in an error message, or present on
 `SlotAppInstance.config`; the two *paths* are, because an operator fixing a bad mount needs to know
 which file was read.
 
-A hub operator generates both exactly as `deploy/connector.toml`'s own provisioning comments say:
+A hub operator generates both exactly as `deploy/hub/README.md`'s step 2 says:
 
 ```sh
-openssl rand -hex 32 > operator-write.key    # the PRIVATE half, kept
+openssl rand -hex 32 > operator-signing.key   # the app's PRIVATE seed
 openssl rand -hex 32 > operator-bearer.token
-chmod 600 operator-write.key operator-bearer.token
+chmod 600 operator-signing.key operator-bearer.token
 ```
+
+**`operator-signing.key` is not `operator-write.keys`, and the one-character gap between those two
+names is why the first one is spelled the way it is.** On a hub box both files sit in the same
+directory, and they are opposites:
+
+| File | What it holds | Who touches it |
+| --- | --- | --- |
+| `operator-signing.key` (singular) | this app's **private** ed25519 seed — the credential that mutates the hub's routing table | mounted read-only into this app, and nothing else |
+| `operator-write.keys` (plural) | the connector's **allowlist** of public halves, one keyid per line | the hub operator, **by hand**, to grant or revoke authority ([ADR 0008](https://github.com/toon-protocol/connector/blob/main/docs/adr/0008-operator-surface-splits-read-from-write.md)) |
+
+Calling the seed `operator-write.key` would put a secret one tab-completion away from the file an
+operator opens in an editor to take that secret's authority away. It is called `signing` instead,
+which is also what it does: `TOON_OPERATOR_WRITE_KEY_FILE` names the file, and the file is called
+`operator-signing.key`.
 
 **The write key file is that seed and nothing else: 64 hex characters.** The app wraps it in the
 fixed Ed25519 PKCS8 DER prefix at signing time, so there is no second key file in a second format to
 keep in step. The value that goes on the connector's `write_keys` allowlist is the **public** half,
 which the app prints at boot beside its peering policy — the same value
-`connector send --operator-key operator-write.key --print-keyid` derives. A write key file that is
+`connector send --operator-key operator-signing.key --print-keyid` derives. A write key file that is
 not a seed is a **refusal to start**: a hub that cannot sign a write can admit nobody, and finding
 out at the first broadcaster's purchase would cost them the slot price.
 
-Both filenames are covered by the repository's `.gitignore` (`*.key`, `operator-bearer.token`) and
-excluded from every Docker build context by `.dockerignore`, before either exists.
+Both filenames are covered by the repository's `.gitignore` — by the `*.key` wildcard and by
+`operator-signing.key` and `operator-bearer.token` **by name**, because a wildcard is a rule you have
+to know and a name is a rule you can read — and excluded from every Docker build context by
+`.dockerignore` on the same two terms, before either file exists.
 
 ## Configuration
 
@@ -470,7 +486,7 @@ const app = await startSlotApp({
   slotPeriodSeconds: 30 * 24 * 60 * 60,
   slotCap: 100,
   operatorUrl: 'http://connector:3000',
-  operatorWriteKeyFile: '/run/secrets/operator-write.key',
+  operatorWriteKeyFile: '/run/secrets/operator-signing.key',
   operatorBearerTokenFile: '/run/secrets/operator-bearer.token',
 });
 

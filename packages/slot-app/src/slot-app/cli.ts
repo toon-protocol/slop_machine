@@ -17,7 +17,7 @@
  *   slot-app --slot-port 3200 --data-dir /data \
  *     --hub-address g.toon.slopmachine --slot-price 1000000 --slot-cap 100 \
  *     --operator-url http://connector:3000 \
- *     --operator-write-key-file /run/secrets/operator-write.key \
+ *     --operator-write-key-file /run/secrets/operator-signing.key \
  *     --operator-bearer-token-file /run/secrets/operator-bearer.token
  *   TOON_OPERATOR_WRITE_KEY_FILE=... TOON_OPERATOR_BEARER_TOKEN_FILE=... slot-app
  *
@@ -46,6 +46,7 @@ import {
   DEFAULT_SLOT_PRICE,
 } from '../slot/policy.js';
 import {
+  DEFAULT_ALLOW_PLAINTEXT_STATION_URLS,
   DEFAULT_PEERING_FEE,
   DEFAULT_PEERING_MAX_PACKET_AMOUNT,
 } from '../peering/policy.js';
@@ -118,6 +119,17 @@ Options:
                          TOON_PEERING_MAX_PACKET_AMOUNT). It has to sit above
                          the most expensive thing a station sells, or the top
                          rung is a rung nobody can pay for
+  --allow-plaintext-station-urls <true|false>
+                         Whether a purchase may name a plaintext http://
+                         station connector (default:
+                         ${String(DEFAULT_ALLOW_PLAINTEXT_STATION_URLS)}; env:
+                         TOON_ALLOW_PLAINTEXT_STATION_URLS). The hub fetches
+                         the URL a purchase names, from inside its own
+                         network, and writes its routing table from what comes
+                         back — so a public hub reads https only, and a local
+                         topology with no certificate anywhere turns this on.
+                         The same name and the same default as the connector's
+                         own peer_allow_plaintext_endpoints
   --operator-write-key-file <p>
                          File holding the hub's operator WRITE KEY (env:
                          TOON_OPERATOR_WRITE_KEY_FILE). Required; there is no
@@ -197,6 +209,7 @@ function configFromEnvironment(
       'operator-url': { type: 'string' },
       'peering-fee': { type: 'string' },
       'peering-max-packet-amount': { type: 'string' },
+      'allow-plaintext-station-urls': { type: 'string' },
       'operator-write-key-file': { type: 'string' },
       'operator-bearer-token-file': { type: 'string' },
       version: { type: 'boolean' },
@@ -285,6 +298,17 @@ function configFromEnvironment(
       '--peering-max-packet-amount',
       1
     );
+  }
+
+  // The one thing a purchase names that this hub then goes and READS, so the
+  // policy about what it will read lives beside the policy about what it will
+  // peer on. "true" or "false" and nothing else — a security posture is the
+  // last setting to guess at.
+  const plaintext =
+    values['allow-plaintext-station-urls'] ??
+    env['TOON_ALLOW_PLAINTEXT_STATION_URLS'];
+  if (plaintext !== undefined && plaintext !== '') {
+    config.allowPlaintextStationUrls = plaintext;
   }
 
   // Paths only, for both. A credential literal has no flag and no environment

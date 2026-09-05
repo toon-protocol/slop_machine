@@ -88,7 +88,7 @@ function mountCredentials(): {
   };
   return {
     dir,
-    writeKeyFile: mount('operator-write.key'),
+    writeKeyFile: mount('operator-signing.key'),
     bearerTokenFile: mount('operator-bearer.token'),
   };
 }
