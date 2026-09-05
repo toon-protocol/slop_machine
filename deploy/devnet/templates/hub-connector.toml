@@ -1,0 +1,121 @@
+# =============================================================================
+# The devnet's HUB connector — RENDERED, never run as it stands.
+# =============================================================================
+# `deploy/devnet/config.ts` fills every `{{…}}` below and writes the result
+# into `deploy/devnet/run/hub/connector.toml`, which git ignores and the
+# compose file mounts. This template is what is committed; the rendered file
+# is what a container reads.
+#
+# IT IS A TEMPLATE AND NOT A COPY OF `deploy/hub/connector.toml`. That file is
+# a hub operator's, frozen by its own guard, and pointed at the shared TOON
+# devnet's contracts on a public chain; this one is pointed at an anvil that
+# did not exist until a run started, at addresses the replay decides. Nothing
+# under `deploy/` or `deploy/hub/` is edited or read as the devnet's own
+# configuration, in either direction.
+#
+# What is the same is the SHAPE: a quote and a buy beneath different prefixes,
+# each terminating strictly beneath its own handler path, at the prices the
+# hub's own `TOON_SLOT_PRICE` is paired with. What is different is everything
+# a laptop makes different — no TLS anywhere, one chain, and a plaintext peer
+# endpoint, because there is no certificate in this topology to have.
+# =============================================================================
+
+# The one listener. The compose file publishes it on 127.0.0.1:3000, which is
+# where the driver's payer sends a paid quote and a paid buy.
+client_edge_addr = "0.0.0.0:3000"
+
+# The claim journal. Replaying it is what stops a restart from re-accepting a
+# claim somebody already spent — and the station connector is restarted mid-run
+# by design, so this is not hypothetical here.
+state_dir = "/app/state"
+
+# The station this hub carries for is `http://station-connector:3000/ilp`,
+# a container port with no TLS terminator in front of it. A peer endpoint is
+# `wss://`/`https://` only unless a node says otherwise, and this is the node
+# saying otherwise. The slot app's own `TOON_ALLOW_PLAINTEXT_STATION_URLS` is
+# the same opt-in one layer up, for the same reason. Neither belongs on a box
+# with a public name.
+peer_allow_plaintext_endpoints = true
+
+[signer]
+# Generated per run into ./run/hub/, never committed. This identity holds no
+# money — it is what this node signs ILP with.
+key_file = "/app/data/signer.key"
+
+# ── What this hub says about itself ──────────────────────────────────────────
+# `addresses` lists what this hub TERMINATES, which is exactly the two routes
+# below. It does not list what it CARRIES: every station the slot app admits
+# gets a forwarded route written at runtime by the app's own operator key, and
+# never by this file.
+[node]
+addresses = ["{{HUB_ADDRESS}}.slot.quote", "{{HUB_ADDRESS}}.slot.buy"]
+# Named at the compose service, because that is what the other half of this
+# topology dials — a devnet node has no public name to publish.
+http_endpoint = "http://hub-connector:3000/ilp"
+
+# ── The quote ────────────────────────────────────────────────────────────────
+# Its own route at its own floor price, exactly as the shipped hub bundle
+# prices it: a connector fulfils on ANY complete answer whatever its status, so
+# every foreseeable refusal lives here rather than at the buy.
+[[routes]]
+prefix = "{{HUB_ADDRESS}}.slot.quote"
+handler_url = "http://hub-slot-app:3200/quote"
+price = 50
+
+[routes.request]
+method = "GET"
+body = "none"
+
+# ── The buy ──────────────────────────────────────────────────────────────────
+# Beneath its OWN prefix, never the quote's, or one would be reachable at the
+# other's price. This price and the slot app's `TOON_SLOT_PRICE` in
+# `../docker-compose.yml` are ONE PAIR: this file is what charges, and that
+# variable is the floor the app checks this connector's own stated
+# X-TOON-Amount against.
+[[routes]]
+prefix = "{{HUB_ADDRESS}}.slot.buy"
+handler_url = "http://hub-slot-app:3200/buy"
+price = 1000000
+
+[routes.request]
+method = "POST"
+contentType = "application/json"
+body = { stationUrl = "string, required — your station connector's own self-description URL" }
+
+# `per_kib` is set on no route in this file, as in neither shipped bundle: a
+# price is a schedule over the INBOUND payload, and everything terminated here
+# is a small request.
+
+# ── Getting paid, and paying ─────────────────────────────────────────────────
+# A hub's settlement key is also its working capital: it is what broadcasters
+# open channels against AND what this hub funds the other side of every peering
+# from. The driver generates it per run and funds it on the chain below with
+# gas and with the token it will front.
+#
+# `contract_address` is the TokenNetworkRegistry, never a TokenNetwork: the
+# connector resolves `getTokenNetwork(token_address)` through it at boot and
+# refuses to start if that comes back zero. Both addresses are where THIS
+# RUN's replay landed them.
+[settlement.evm]
+rpc_url = "{{CHAIN_RPC_URL}}"
+contract_address = "{{REGISTRY_ADDRESS}}"
+token_address = "{{TOKEN_ADDRESS}}"
+decimals = {{TOKEN_DECIMALS}}
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# EVM ONLY. There is no `[settlement.solana]` table and no Solana validator in
+# this topology — both shipped bundles document dropping those two tables as
+# supported, and a devnet that started a validator to prove a payment nobody
+# makes on it would be paying for it in every run.
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# On a hub this is not an occasional convenience: it is the surface the SLOT
+# APP writes through on every purchase, every renewal and every lapse. Reads
+# are bearer-gated; writes need an RFC 9421 signature from a key on the
+# allowlist, and the allowlist the driver writes holds exactly the public half
+# of the seed it mounted into the slot app.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"

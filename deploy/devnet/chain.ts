@@ -120,7 +120,16 @@ export async function chainClients(rpcUrl: string): Promise<ChainClients> {
   return {
     rpcUrl,
     chainId,
-    publicClient: createPublicClient({ chain, transport: http(rpcUrl) }),
+    // `cacheTime: 0`, deliberately. viem caches a block number for its polling
+    // interval by default, which is exactly right for an app watching a public
+    // chain and exactly wrong for a driver that sends a transaction and then
+    // asks what happened: the answer would be the height from before it, and
+    // the assertion would be about a cache rather than about the chain.
+    publicClient: createPublicClient({
+      chain,
+      transport: http(rpcUrl),
+      cacheTime: 0,
+    }),
     walletClient: createWalletClient({
       chain,
       account: deployer,
@@ -257,4 +266,69 @@ export async function tokenDecimals(
       functionName: 'decimals',
     })
   );
+}
+
+/**
+ * Send gas to an address the run generated.
+ *
+ * Every key both nodes use is fresh material with nothing behind it, so each
+ * has to be funded before it can do anything on chain — opening a channel,
+ * funding one, or redeeming a claim. This is where a devnet's "no account, no
+ * faucet, no real money" actually happens: anvil funded account zero, and
+ * account zero funds these.
+ */
+export async function fundGas(
+  rpcUrl: string,
+  to: Address,
+  wei: bigint
+): Promise<void> {
+  const clients = await chainClients(rpcUrl);
+  const hash = await clients.walletClient.sendTransaction({
+    to,
+    value: wei,
+    account: clients.deployer,
+    chain: clients.walletClient.chain,
+  });
+  await waitFor(clients, hash, `funding ${to} with gas`);
+}
+
+/**
+ * Mint the settlement token to an address.
+ *
+ * The mock token's `mint` is deliberately ungated, and that is exactly why the
+ * devnet deploys it rather than rehydrating a state snapshot: a hub has to
+ * hold the collateral it fronts per broadcaster, and a viber has to hold what
+ * they are about to spend.
+ */
+export async function mintToken(
+  rpcUrl: string,
+  token: Address,
+  to: Address,
+  amount: bigint
+): Promise<void> {
+  const clients = await chainClients(rpcUrl);
+  const hash = await clients.walletClient.writeContract({
+    address: token,
+    abi: MOCK_ERC20.abi,
+    functionName: 'mint',
+    args: [to, amount],
+    account: clients.deployer,
+    chain: clients.walletClient.chain,
+  });
+  await waitFor(clients, hash, `minting ${String(amount)} to ${to}`);
+}
+
+/** What an address holds of the settlement token, in base units. */
+export async function tokenBalance(
+  rpcUrl: string,
+  token: Address,
+  owner: Address
+): Promise<bigint> {
+  const clients = await chainClients(rpcUrl);
+  return (await clients.publicClient.readContract({
+    address: token,
+    abi: MOCK_ERC20.abi,
+    functionName: 'balanceOf',
+    args: [owner],
+  })) as bigint;
 }

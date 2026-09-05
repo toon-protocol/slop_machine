@@ -21,15 +21,39 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Address } from 'viem';
+import { createWriteSigner } from '../../packages/slot-app/src/operator/write-signature.js';
 import {
   anvilAccount,
   chainClients,
   deploySettlementContracts,
+  fundGas,
+  mintToken,
+  tokenBalance,
   tokenDecimals,
   TOKEN_DECIMALS,
   type SettlementDeployment,
 } from './chain.js';
+import {
+  generateCredentials,
+  GENERATED_FILES,
+  HUB_CONNECTOR_TOML,
+  STATION_CONNECTOR_TOML,
+  WORK_DIR,
+  type DevnetCredentials,
+} from './credentials.js';
+import {
+  CHAIN_URL_ON_THE_COMPOSE_NETWORK,
+  renderHubConnectorToml,
+  renderStationConnectorToml,
+  type ChainSettings,
+} from './config.js';
+import {
+  readSelfDescription,
+  type SelfDescription,
+} from './self-description.js';
 import {
   down,
   logs,
@@ -48,11 +72,21 @@ const EXPECTED_CHAIN_ID = 31337;
 const EXPECTED_FUNDED_ACCOUNTS = 10;
 
 /**
- * How many transactions the replay sends: the mock token, the registry, and
- * the `createTokenNetwork` call. One block each, because the chain has NO
- * block time — which is what makes the height an assertion rather than a race.
+ * How long the chain is watched doing nothing, to prove no clock is mining.
+ *
+ * Anvil's shortest meaningful `--block-time` is one second, so a window
+ * comfortably past that is what tells "no block time" apart from "a block time
+ * that has not fired yet".
  */
-const REPLAY_TRANSACTIONS = 3;
+const IDLE_OBSERVATION_MS = 2_500;
+
+/**
+ * A `{{PLACEHOLDER}}` nobody filled — the renderer's own shape, which is not
+ * merely "two braces": both templates explain in their own headers that
+ * `config.ts` fills every `{{…}}` below, and a check that matched prose would
+ * fail on a file that had rendered perfectly.
+ */
+const AN_UNFILLED_PLACEHOLDER = /\{\{[A-Z_]+\}\}/;
 
 /**
  * The deterministic addresses the rest of the fleet commits — the connector's
@@ -70,8 +104,72 @@ const EXPECTED_REGISTRY: Address = '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512';
 
 const CHAIN_SERVICE = 'chain';
 
+// ── The two nodes ────────────────────────────────────────────────────────────
+
+/**
+ * Each connector's client edge, on loopback and on its OWN host port. Two
+ * connectors share a machine here, which is the whole reason these differ
+ * while both containers still listen on 3000 inside.
+ */
+const HUB_EDGE_URL = 'http://127.0.0.1:3000';
+const STATION_EDGE_URL = 'http://127.0.0.1:3001';
+
+/** The hub's ILP apex — the same value the slot app is given as TOON_HUB_ADDRESS. */
+const HUB_ADDRESS = 'g.toon.slopmachine';
+
+/**
+ * The apex the station is FIRST rendered at, and it is deliberately not one
+ * this hub would ever grant.
+ *
+ * `deploy/README.md` tells a broadcaster to pull a quote before editing their
+ * own `connector.toml`, because the prefix they are reachable at is the one
+ * their hub grants and `demo` is a placeholder that was never theirs to
+ * choose. A run boots here, quotes, and re-renders at the granted prefix —
+ * the documented order, executed rather than described.
+ */
+const PLACEHOLDER_STATION_APEX = `${HUB_ADDRESS}.demo`;
+
+/** Every route each node terminates, and at what price. The templates' own numbers. */
+const EXPECTED_HUB_ROUTES: { prefix: string; price: bigint }[] = [
+  { prefix: `${HUB_ADDRESS}.slot.quote`, price: 50n },
+  { prefix: `${HUB_ADDRESS}.slot.buy`, price: 1_000_000n },
+];
+const EXPECTED_STATION_ROUTES: { rung: string; price: bigint }[] = [
+  { rung: 'now', price: 50n },
+  { rung: 'audio', price: 200n },
+  { rung: '480p', price: 1000n },
+];
+
+/** Every service the two nodes are, in the order compose is asked for them. */
+const NODE_SERVICES = [
+  'station-origin',
+  'station-connector',
+  'hub-slot-app',
+  'hub-connector',
+];
+
+/**
+ * What each node's settlement key is funded with before it boots.
+ *
+ * Gas, because every key a run generates is fresh material with nothing behind
+ * it; and the token, because a hub fronts collateral toward every broadcaster
+ * it admits and a station has to be able to redeem what it was paid. Both are
+ * generous on a chain whose money is play money — the point is that neither
+ * node ever fails for want of funds, so a failure is about the thing under
+ * test.
+ */
+const GAS_PER_NODE = 10n ** 18n; // one ether
+const TOKEN_PER_NODE = 1_000_000_000n; // a thousand of a six-decimal token
+
+/** The chain, as the document a node publishes names it. */
+const EXPECTED_SETTLEMENT_CHAIN = `evm:${String(EXPECTED_CHAIN_ID)}`;
+
 describe('the devnet', () => {
   let deployment: SettlementDeployment;
+  let credentials: DevnetCredentials;
+  let chain: ChainSettings;
+  let hub: SelfDescription;
+  let station: SelfDescription;
   /** Set by the first failure, so a red run leaves the logs behind and a green one does not. */
   let failed = false;
 
@@ -90,7 +188,47 @@ describe('the devnet', () => {
     await up([CHAIN_SERVICE]);
 
     deployment = await deploySettlementContracts(CHAIN_RPC_URL);
-  }, 600_000);
+
+    // Every credential, fresh, into a directory git ignores — both connectors'
+    // signer and settlement keys, both bearer tokens and allowlists, the slot
+    // app's operator seed, and the station's stream key. The repository gains
+    // no credential literal, anvil's included.
+    credentials = generateCredentials();
+
+    // Fund what a run generated. Nothing here has an account, a faucet or any
+    // real money behind it: anvil funded account zero, and account zero funds
+    // these.
+    for (const settlementAddress of [
+      credentials.hub.settlementAddress,
+      credentials.station.settlementAddress,
+    ]) {
+      await fundGas(CHAIN_RPC_URL, settlementAddress, GAS_PER_NODE);
+      await mintToken(
+        CHAIN_RPC_URL,
+        deployment.token,
+        settlementAddress,
+        TOKEN_PER_NODE
+      );
+    }
+
+    // Both configurations, rendered from the committed templates: the chain
+    // repointed at the compose service, the addresses this run's replay landed
+    // at, six decimals, plaintext peer endpoints allowed, and each node's own
+    // endpoint named at its compose service.
+    chain = {
+      rpcUrl: CHAIN_URL_ON_THE_COMPOSE_NETWORK,
+      registry: deployment.registry,
+      token: deployment.token,
+      decimals: TOKEN_DECIMALS,
+    };
+    renderHubConnectorToml(chain, HUB_ADDRESS);
+    renderStationConnectorToml(chain, PLACEHOLDER_STATION_APEX);
+
+    await up(NODE_SERVICES);
+
+    hub = await readSelfDescription(`${HUB_EDGE_URL}/ilp`);
+    station = await readSelfDescription(`${STATION_EDGE_URL}/ilp`);
+  }, 900_000);
 
   afterEach((context) => {
     if (context.task.result?.state === 'fail') failed = true;
@@ -138,16 +276,31 @@ describe('the devnet', () => {
   });
 
   it('mines per transaction, so nothing in a run ever waits on a clock', async () => {
-    // The chain runs with no `--block-time`, which means a transaction waits on
-    // ITSELF. Asserted rather than trusted: with one block per transaction and
-    // nothing else touching this chain, the height after the replay IS the
-    // number of transactions the replay sent.
+    // The chain runs with NO `--block-time`, and that is two claims rather than
+    // one: a clock mines nothing, and a transaction mines itself. Both are
+    // checked, because either alone would pass on a chain doing the other — and
+    // both are checked against the height before and after a transaction of the
+    // run's own, rather than against a count of the ones setup happened to
+    // send, which is a number every later slice of this epic changes.
     const clients = await chainClients(CHAIN_RPC_URL);
+    const idle = await clients.publicClient.getBlockNumber();
+
+    await new Promise((slept) => setTimeout(slept, IDLE_OBSERVATION_MS));
 
     expect(
       await clients.publicClient.getBlockNumber(),
-      `the devnet chain is ${String(await clients.publicClient.getBlockNumber())} blocks in after ${String(REPLAY_TRANSACTIONS)} transactions — one block per transaction is what "no block time" means, and a mining interval would make every run's duration a function of a clock`
-    ).toBe(BigInt(REPLAY_TRANSACTIONS));
+      `the devnet chain mined a block while nothing was happening — with a block time, every run's duration becomes a function of a clock rather than of the work it does`
+    ).toBe(idle);
+
+    // And one transaction is one block. Zero value to the account that sends
+    // it: the cheapest transaction there is, and the run wants nothing from it
+    // but the block.
+    await fundGas(CHAIN_RPC_URL, anvilAccount(0).address, 0n);
+
+    expect(
+      await clients.publicClient.getBlockNumber(),
+      `one transaction did not produce exactly one block — a transaction is supposed to wait on itself here`
+    ).toBe(idle + 1n);
   });
 
   it('is answered by the anvil in the digest-pinned image', async () => {
@@ -212,4 +365,287 @@ describe('the devnet', () => {
       `the devnet's token does not report ${String(TOKEN_DECIMALS)} decimals`
     ).toBe(TOKEN_DECIMALS);
   });
+
+  // ── Both nodes, describing themselves ──────────────────────────────────────
+
+  it('generates every credential a run needs, and commits none of them', () => {
+    // The repository gains no credential literal — not a signer key, not a
+    // settlement key, not a bearer token, not the operator seed, not the
+    // station's stream key, and not anvil's own well-known keys either. All of
+    // it is fresh material per run, in a directory git ignores, and the bundle
+    // guard holds the other half: the compose file mounts exactly these paths
+    // and no committed devnet file carries a 64-hex run.
+    for (const file of GENERATED_FILES) {
+      const path = resolve(WORK_DIR, file);
+      expect(existsSync(path), `${file} was not generated`).toBe(true);
+      // World-readable, because a bind mount keeps its HOST ownership inside
+      // the container and these are read by two images running as two
+      // different unprivileged users.
+      expect(
+        statSync(path).mode & 0o004,
+        `${file} is not readable by the container that mounts it`
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("derives the operator write key's public half with the app's own ed25519 handling", () => {
+    // Nothing shells into another repo's binary to learn a keyid. The driver
+    // calls the slot app's own signer, so the allowlist a run writes into the
+    // hub's connector is the allowlist that app's signatures are actually
+    // verified against — rather than a value learned some other way and hoped
+    // to be the same one.
+    expect(
+      credentials.hub.operatorKeyid,
+      `the hub's keyid is "${credentials.hub.operatorKeyid}", which is not the hex public half of an ed25519 key`
+    ).toMatch(/^[0-9a-f]{64}$/);
+
+    expect(
+      createWriteSigner(credentials.hub.operatorWriteKey).keyid,
+      `the allowlist the connector holds does not name the seed the slot app was mounted`
+    ).toBe(credentials.hub.operatorKeyid);
+
+    expect(
+      readFileSync(resolve(WORK_DIR, 'hub/operator-write.keys'), 'utf8').trim(),
+      `the hub connector's allowlist does not hold the slot app's public half — every write the app signs would be refused`
+    ).toBe(credentials.hub.operatorKeyid);
+  });
+
+  it('funds both settlement keys with gas and the token they will front', async () => {
+    // A hub fronts collateral toward every broadcaster it admits, and a
+    // station has to be able to redeem what it was paid. Neither key existed
+    // before this run, so neither had anything behind it.
+    const clients = await chainClients(CHAIN_RPC_URL);
+
+    for (const [node, settlementAddress] of [
+      ['hub', credentials.hub.settlementAddress],
+      ['station', credentials.station.settlementAddress],
+    ] as const) {
+      expect(
+        await clients.publicClient.getBalance({ address: settlementAddress }),
+        `the ${node}'s settlement key ${settlementAddress} holds no gas, so it can open no channel and redeem nothing`
+      ).toBe(GAS_PER_NODE);
+
+      expect(
+        await tokenBalance(CHAIN_RPC_URL, deployment.token, settlementAddress),
+        `the ${node}'s settlement key holds none of the token it settles in`
+      ).toBe(TOKEN_PER_NODE);
+    }
+  });
+
+  it('boots both nodes from configuration nothing under deploy/ supplied', () => {
+    // The two shipped bundles' `connector.toml`s are an operator's files,
+    // frozen by their own guards and pointed at a public chain. The devnet
+    // renders its own from the templates beside it, and reads neither of
+    // theirs — in either direction.
+    for (const [node, path] of [
+      ['hub', HUB_CONNECTOR_TOML],
+      ['station', STATION_CONNECTOR_TOML],
+    ] as const) {
+      const rendered = readFileSync(path, 'utf8');
+
+      expect(
+        rendered,
+        `the ${node}'s rendered configuration still holds an unfilled placeholder`
+      ).not.toMatch(AN_UNFILLED_PLACEHOLDER);
+      // The chain repointed at the compose SERVICE, never at the driver's
+      // loopback publish: a container reaching its own host's 127.0.0.1
+      // reaches itself.
+      expect(
+        rendered,
+        `the ${node} is not pointed at the devnet's own chain`
+      ).toContain(`rpc_url = "${CHAIN_URL_ON_THE_COMPOSE_NETWORK}"`);
+      expect(
+        rendered,
+        `the ${node} does not carry this run's replayed registry`
+      ).toContain(`contract_address = "${deployment.registry}"`);
+      expect(
+        rendered,
+        `the ${node} does not carry this run's replayed token`
+      ).toContain(`token_address = "${deployment.token}"`);
+      expect(
+        rendered,
+        `the ${node} does not settle at ${String(TOKEN_DECIMALS)} decimals`
+      ).toContain(`decimals = ${String(TOKEN_DECIMALS)}`);
+
+      // Both nodes are EVM-only. There is no Solana validator in this
+      // topology, so a `[settlement.solana]` table would be a node refusing to
+      // start on a chain it cannot reach.
+      //
+      // Read from the DIRECTIVES, because both templates say in their own
+      // comments that they carry no such table — a check against the whole
+      // file would fail on a configuration that was exactly right.
+      expect(
+        directivesOf(rendered).includes('[settlement.solana]'),
+        `the ${node} declares a Solana settlement, and nothing in this topology answers one`
+      ).toBe(false);
+
+      // Plaintext peer endpoints, because there is no certificate anywhere
+      // here and the two nodes dial each other by compose service name.
+      expect(
+        rendered,
+        `the ${node} refuses plaintext peer endpoints, and every endpoint in this topology is one`
+      ).toContain('peer_allow_plaintext_endpoints = true');
+    }
+  });
+
+  it('has each node publish an endpoint at its own compose service', () => {
+    // A node cannot introspect this: from inside a container it sees 0.0.0.0
+    // and a private network, never the name the other half of the topology
+    // dials it by. It is configuration, and a node that published the wrong
+    // one is a node the hub peers with and cannot reach.
+    expect(hub.httpEndpoint, `the hub publishes "${hub.httpEndpoint}"`).toBe(
+      'http://hub-connector:3000/ilp'
+    );
+    expect(
+      station.httpEndpoint,
+      `the station publishes "${station.httpEndpoint}"`
+    ).toBe('http://station-connector:3000/ilp');
+  });
+
+  it('has each node publish an edge identity, which is what a payload is sealed to', () => {
+    // A payload is sealed to the connector that TERMINATES it, so a node with
+    // no edge identity can be paid for nothing.
+    for (const [name, node] of [
+      ['hub', hub],
+      ['station', station],
+    ] as const) {
+      expect(
+        node.edgeIdentity.publicKey,
+        `the ${name} publishes no edge identity public key`
+      ).not.toBe('');
+      expect(
+        node.edgeIdentity.keyId,
+        `the ${name} publishes no edge identity key id`
+      ).not.toBe('');
+    }
+  });
+
+  it('has each node publish exactly one settlement entry, on the local chain', () => {
+    // Exactly one, because this topology has one chain and no validator: a
+    // second entry would be a node claiming to be a counterparty somewhere
+    // nothing in a run can pay it.
+    for (const [name, node, settlementAddress] of [
+      ['hub', hub, credentials.hub.settlementAddress],
+      ['station', station, credentials.station.settlementAddress],
+    ] as const) {
+      expect(
+        node.settlements.length,
+        `the ${name} publishes ${String(node.settlements.length)} settlement entries — a devnet node settles on one chain`
+      ).toBe(1);
+
+      const settlement = node.settlements[0];
+      expect(settlement?.chain).toBe(EXPECTED_SETTLEMENT_CHAIN);
+      expect(settlement?.decimals).toBe(TOKEN_DECIMALS);
+
+      // The registry, the token and the token network are this run's replay,
+      // and the settlement address is the key the run generated and funded.
+      // Compared case-insensitively: a document spells an address however its
+      // node serialised it, and what is being asserted is which contract.
+      for (const [what, published, expected] of [
+        ['its registry', settlement?.tokenNetworkRegistry, deployment.registry],
+        ['its token', settlement?.tokenAddress, deployment.token],
+        [
+          'its token network',
+          settlement?.tokenNetwork,
+          deployment.tokenNetwork,
+        ],
+        [
+          'its settlement address',
+          settlement?.settlementAddress,
+          settlementAddress,
+        ],
+      ] as const) {
+        expect(
+          String(published).toLowerCase(),
+          `the ${name} publishes ${what} as ${String(published)}, and this run's is ${String(expected)}`
+        ).toBe(String(expected).toLowerCase());
+      }
+    }
+  });
+
+  it('has the hub publish the two priced routes it terminates and nothing else', () => {
+    // A prefix terminated but never advertised is an address no broadcaster
+    // can discover — `GET /ilp` is how a stranger who has only heard of this
+    // hub finds where to buy. One advertised but not terminated is a paid 404.
+    expect(
+      pricedAddresses(hub),
+      `the hub publishes ${JSON.stringify(hub.routes.map((r) => r.prefix))} — the quote and the buy, each beneath its own prefix and neither reachable at the other's price`
+    ).toEqual(byPrefix(EXPECTED_HUB_ROUTES));
+
+    expect(hub.ilpAddresses.slice().sort()).toEqual(
+      EXPECTED_HUB_ROUTES.map((route) => route.prefix).sort()
+    );
+  });
+
+  it('has the station publish its ladder, at the placeholder apex it has not corrected yet', () => {
+    // This is the state a broadcaster's node is in before they pull a quote:
+    // configured at a prefix their hub never granted them. It is what makes
+    // the documented order — quote, configure, restart — something a run can
+    // walk rather than describe, and what makes the refusal at the buy
+    // something it can exercise.
+    expect(
+      pricedAddresses(station),
+      `the station publishes ${JSON.stringify(station.routes.map((r) => r.prefix))}`
+    ).toEqual(
+      byPrefix(
+        EXPECTED_STATION_ROUTES.map((rung) => ({
+          prefix: `${PLACEHOLDER_STATION_APEX}.${rung.rung}`,
+          price: rung.price,
+        }))
+      )
+    );
+
+    // Flat per segment, every one of them: a price is a schedule over the
+    // INBOUND payload and the vibes are in the fulfill, so a slope on a
+    // station route prices asking rather than receiving.
+    for (const route of station.routes) {
+      expect(
+        route.pricePerKib,
+        `the station publishes a slope on ${route.prefix} — every station price is flat per segment`
+      ).toBe(0n);
+    }
+
+    expect(station.ilpAddresses.slice().sort()).toEqual(
+      EXPECTED_STATION_ROUTES.map(
+        (rung) => `${PLACEHOLDER_STATION_APEX}.${rung.rung}`
+      ).sort()
+    );
+  });
 });
+
+/**
+ * The priced addresses a node publishes, BY PREFIX.
+ *
+ * A connector serialises its routes in its own order — sorted by prefix, not
+ * in the order the configuration lists them — and that is its business rather
+ * than a fact worth freezing here. What a run is entitled to assert is the SET
+ * of addresses and what each costs, which is what the hub reads to price its
+ * own routes and what a viber pays.
+ */
+function byPrefix(
+  routes: readonly { prefix: string; price: bigint }[]
+): { prefix: string; price: bigint }[] {
+  return [...routes]
+    .map((route) => ({ prefix: route.prefix, price: route.price }))
+    .sort((a, b) => a.prefix.localeCompare(b.prefix));
+}
+
+function pricedAddresses(
+  node: SelfDescription
+): { prefix: string; price: bigint }[] {
+  return byPrefix(node.routes);
+}
+
+/**
+ * A rendered configuration with its comments removed.
+ *
+ * Both templates explain at length what they must NOT contain — no second
+ * settlement chain, no committed address — so a check for a forbidden string
+ * has to read what the file does rather than what it says about itself.
+ */
+function directivesOf(toml: string): string {
+  return toml
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+}

@@ -47,6 +47,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { GENERATED_FILES } from './credentials.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..');
 
@@ -256,6 +257,40 @@ const EXPECTED_EMPTY_INGEST_TLS = [
   'TOON_INGEST_TLS_KEY',
 ];
 
+// ── The generated configuration ──────────────────────────────────────────────
+
+/**
+ * The two committed templates, and what each must still say after rendering.
+ *
+ * They are TEMPLATES and not copies of the two shipped bundles'
+ * `connector.toml`s: those are an operator's files, frozen by their own
+ * guards, and pointed at the shared TOON devnet's contracts on a public chain.
+ * Every chain value here is a `{{…}}` the driver fills with whatever THIS
+ * run's replay landed at.
+ */
+const TEMPLATES_DIR = `${DEVNET_DIR}/templates`;
+const EXPECTED_TEMPLATES: Record<string, string> = {
+  'hub-connector': 'http://hub-connector:3000/ilp',
+  'station-connector': 'http://station-connector:3000/ilp',
+};
+
+/** Every chain value a template must leave to the run rather than commit. */
+const EXPECTED_PLACEHOLDERS = [
+  '{{CHAIN_RPC_URL}}',
+  '{{REGISTRY_ADDRESS}}',
+  '{{TOKEN_ADDRESS}}',
+  '{{TOKEN_DECIMALS}}',
+];
+
+/** What both templates must say, because a laptop topology has neither. */
+const EXPECTED_TEMPLATE_LINES = ['peer_allow_plaintext_endpoints = true'];
+
+/** A settlement table for a chain nothing in this topology runs. */
+const A_SECOND_CHAIN = '[settlement.solana]';
+
+/** An address literal. A template that carried one would be pinned to a chain it did not deploy. */
+const AN_ADDRESS_LITERAL = /"0x[0-9a-fA-F]{40}"/;
+
 // ── The settlement contracts ─────────────────────────────────────────────────
 
 /**
@@ -375,6 +410,22 @@ function readCompose(relativePath: string): DockerCompose {
 
 function servicesOf(relativePath: string): Record<string, ComposeService> {
   return readCompose(relativePath).services ?? {};
+}
+
+/**
+ * A file with its comments removed.
+ *
+ * Every file in this bundle explains at length what it must never contain —
+ * "there is no certificate in a laptop topology", "every chain value here is
+ * the run's to fill" — so a check for a forbidden string has to read what the
+ * file DOES, not what it says about itself. `#` opens a comment in YAML and
+ * TOML alike, which is why one helper serves both.
+ */
+function directivesOf(relativePath: string): string {
+  return readFile(relativePath)
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
 }
 
 /**
@@ -968,6 +1019,83 @@ describe('devnet bundle', () => {
           `${file}: spawns "${String(binary)}". The only binary a devnet run may execute is ${THE_ONLY_BINARY} — a forge, an anvil or a cast on the host is a fourth thing to install and a second way for two machines to disagree.`
         ).toBe(THE_ONLY_BINARY);
       }
+    }
+  });
+
+  // ── The generated configuration ────────────────────────────────────────────
+
+  it('mounts exactly the files the driver generates, and no others', () => {
+    // A bind mount with no file behind it is created by the daemon as a
+    // DIRECTORY, and the node then fails reading it as a file — three layers
+    // away from the missing generator. So the compose file's `./run/` mounts
+    // and the driver's own manifest are held to each other here.
+    const mounted = Object.values(servicesOf(COMPOSE_PATH))
+      .flatMap((definition) => definition.volumes ?? [])
+      .filter((mount) => mount.startsWith(WORK_DIR_MOUNT_PREFIX))
+      .map((mount) => mount.slice(WORK_DIR_MOUNT_PREFIX.length).split(':')[0]);
+
+    for (const mount of mounted) {
+      expect(
+        [...GENERATED_FILES],
+        `${COMPOSE_PATH}: mounts ./run/${String(mount)}, which nothing generates. Docker creates a missing bind source as a DIRECTORY, so the node fails reading it as a file rather than saying what is absent.`
+      ).toContain(mount);
+    }
+
+    // And the other direction: a generated file nothing mounts is a credential
+    // written for nobody, which usually means a mount was renamed on one side.
+    for (const generated of GENERATED_FILES) {
+      expect(
+        mounted,
+        `${WORK_DIR_MOUNT_PREFIX}${generated} is generated but mounted by no service`
+      ).toContain(generated);
+    }
+  });
+
+  it('commits a template for each node, and leaves every chain value to the run', () => {
+    for (const [template, endpoint] of Object.entries(EXPECTED_TEMPLATES)) {
+      const path = `${TEMPLATES_DIR}/${template}.toml`;
+      expect(
+        committedDevnetFiles(),
+        `${path}: the devnet renders both connector configurations from committed templates`
+      ).toContain(path);
+
+      const contents = readFile(path);
+
+      // The chain's addresses are wherever THIS run's replay landed them, so a
+      // template that carried one would be a devnet pinned to a chain it did
+      // not deploy — which is the failure the whole replay exists to avoid.
+      for (const placeholder of EXPECTED_PLACEHOLDERS) {
+        expect(
+          contents,
+          `${path}: does not leave ${placeholder} to the run`
+        ).toContain(placeholder);
+      }
+      expect(
+        directivesOf(path),
+        `${path}: names an address literal — every chain value here is the run's to fill`
+      ).not.toMatch(AN_ADDRESS_LITERAL);
+
+      // Each node names its own endpoint at its own compose service: a node
+      // cannot introspect that, and one that published the wrong one is a node
+      // the other half peers with and cannot reach.
+      expect(
+        contents,
+        `${path}: does not publish its endpoint at its own compose service`
+      ).toContain(`http_endpoint = "${endpoint}"`);
+
+      for (const line of EXPECTED_TEMPLATE_LINES) {
+        expect(contents, `${path}: does not declare \`${line}\``).toContain(
+          line
+        );
+      }
+
+      // EVM only. There is no Solana validator in this topology, so a second
+      // settlement table is a node refusing to start on a chain nothing
+      // answers — and both shipped bundles document dropping it as supported.
+      expect(
+        directivesOf(path).includes(A_SECOND_CHAIN),
+        `${path}: declares ${A_SECOND_CHAIN}, and nothing in this topology answers one`
+      ).toBe(false);
     }
   });
 
