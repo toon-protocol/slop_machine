@@ -73,6 +73,19 @@ sibling repo is either right here or loudly wrong. Then it tears everything down
 so a second run starts where the first did. A failure prints every node's logs first, so a red CI
 job is diagnosable without re-running it locally.
 
+Both nodes then boot from **generated** configuration. Every credential a run needs — both
+connectors' signer and settlement keys, both bearer tokens and allowlists, the slot app's operator
+signing seed and the station's stream key — is fresh material written into `./run/`, and both
+`connector.toml` files are rendered there from the templates in [`templates/`](templates/): the
+chain repointed at the compose service, this run's replayed registry and token addresses at six
+decimals, EVM only, plaintext peer endpoints allowed, and each node's endpoint named at its own
+compose service. The two settlement keys are funded on chain with gas and minted the token they
+will front, and each node's self-description is then read back and asserted.
+
+The station is rendered first at a **placeholder apex it was never granted**, which is the state a
+broadcaster's node is in before they pull a quote — and what makes the documented order (quote,
+configure, restart) something a run walks rather than describes.
+
 The prerequisite is **Docker and this repository's own toolchain, and nothing else** — no account,
 no faucet, no testnet, no real money, and no Foundry, Rust or submodules. anvil runs in the pinned
 image; the only binary a run ever executes on the host is `docker`. With no daemon answering, the

@@ -1,0 +1,128 @@
+# =============================================================================
+# The devnet's STATION connector — RENDERED, never run as it stands, and
+# rendered TWICE in a run.
+# =============================================================================
+# `deploy/devnet/config.ts` fills every `{{…}}` below and writes the result
+# into `deploy/devnet/run/station/connector.toml`, which git ignores and the
+# compose file mounts.
+#
+# `{{STATION_APEX}}` IS THE POINT OF RENDERING IT TWICE. `deploy/README.md`
+# tells a broadcaster to pull a quote BEFORE editing their `connector.toml`,
+# because the prefix they are reachable at is the one their hub grants and
+# `demo` is a placeholder that was never theirs to choose. A run walks that
+# order rather than describing it: it renders this file at a placeholder apex,
+# boots, quotes, and re-renders at the granted prefix and restarts — and a
+# purchase made in between is refused exactly as a real hub refuses a station
+# that is not at the prefix it was granted.
+#
+# It is a template and NOT a copy of `deploy/connector.toml`. That file is a
+# broadcaster's, frozen by its own guard to the `demo` placeholder and pointed
+# at the shared TOON devnet's contracts on a public chain. Nothing under
+# `deploy/` or `deploy/hub/` is edited or read as the devnet's own
+# configuration, in either direction.
+# =============================================================================
+
+# The one listener. The compose file publishes it on 127.0.0.1:3001 — a
+# DIFFERENT host port from the hub's, because two connectors share a machine
+# here, while both still listen on 3000 inside their own container.
+client_edge_addr = "0.0.0.0:3000"
+
+# The claim journal, and on this node it is what a run reads to prove the
+# broadcaster was actually paid. It survives the restart the documented order
+# requires, which is the other reason it is a named volume rather than nothing.
+state_dir = "/app/state"
+
+# This node ACCEPTS a peering: the hub dials it, so peer carriages ride this
+# same listener, told apart from clients by authentication rather than by port.
+# Without this the hub's forwarded packets have nowhere to arrive.
+peer_expose = "http"
+
+# The hub dials `http://station-connector:3000/ilp`, a container port with no
+# TLS terminator in front of it, and the hub's own config says the same thing
+# from the other side. There is no certificate in a laptop topology.
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── What this station says about itself ──────────────────────────────────────
+# This is the document the HUB READS on a purchase. Every route the hub writes
+# is priced from what is published here plus the hub's own carriage fee, so a
+# broadcaster declares no price list to the hub and there is no second
+# declaration to drift from this one.
+#
+# A prefix terminated but never advertised is an address no viber can discover;
+# one advertised but not terminated is a paid 404. These are the three routes
+# below and nothing else.
+[node]
+addresses = [
+  "{{STATION_APEX}}.now",
+  "{{STATION_APEX}}.audio",
+  "{{STATION_APEX}}.480p",
+]
+http_endpoint = "http://station-connector:3000/ilp"
+
+# ── The station's *now* ──────────────────────────────────────────────────────
+# Where the live edge is. Its own route at its own low price, outside
+# `/segments` entirely and beneath no rung, so a viber re-syncing is never
+# charged a segment's price and no segment is reachable at this one's.
+[[routes]]
+prefix = "{{STATION_APEX}}.now"
+handler_url = "http://station-origin:3100/now"
+price = 50
+
+# ── One route per rung, at that rung's price ─────────────────────────────────
+# The devnet's ladder is two rungs, one of them sound only — ordinary
+# configuration, so that a broadcaster's four real rungs never have to be
+# encoded on a laptop to prove that a rung is an address and an address is a
+# price. `TOON_RUNGS` in `../docker-compose.yml` and these routes are ONE PAIR:
+# a rung with no route is unsellable, and a route naming a rung the origin does
+# not offer is a paid 404.
+#
+# THE HANDLER URL IS THE DISCIPLINE. Each terminates at `/segments/<rung>`, and
+# an envelope's target resolves strictly beneath the route's own handler path
+# and can never replace any part of it — so a packet paying the audio price
+# reaches audio segments and nothing else, and `/health` and `/encode` are
+# reachable at no price at all because they have no route here.
+#
+# `per_kib` is set on no route, as on no station route anywhere: a price is a
+# schedule over the INBOUND payload, and the vibes are in the fulfill.
+[[routes]]
+prefix = "{{STATION_APEX}}.audio"
+handler_url = "http://station-origin:3100/segments/audio"
+price = 200
+
+[[routes]]
+prefix = "{{STATION_APEX}}.480p"
+handler_url = "http://station-origin:3100/segments/480p"
+price = 1000
+
+# ── Getting paid ─────────────────────────────────────────────────────────────
+# THE BROADCASTER IS THE OPERATOR. This settlement key is theirs, the channel
+# the hub opens is against them, and a viber's payments accrue to them
+# directly. The driver generates it per run and funds it with gas and with the
+# token, so that the claim a run proves advanced can also be redeemed on chain.
+#
+# Both addresses are where THIS RUN's replay landed them, and `decimals` is
+# read back off the token itself by the connector at boot, which refuses to
+# start if the two disagree.
+[settlement.evm]
+rpc_url = "{{CHAIN_RPC_URL}}"
+contract_address = "{{REGISTRY_ADDRESS}}"
+token_address = "{{TOKEN_ADDRESS}}"
+decimals = {{TOKEN_DECIMALS}}
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# EVM only: no `[settlement.solana]` table and no validator in this topology.
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# A station's own, which its broadcaster owns — NOT the hub's. The hub never
+# writes here; it writes to its own routing table. This surface is how the
+# broadcaster reads what their node holds: the peering the hub established, the
+# channel behind it, and the claims a viber has spent. A run uses the read half
+# and nothing else.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"
