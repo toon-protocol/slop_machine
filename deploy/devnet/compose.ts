@@ -283,21 +283,30 @@ export async function removeContainer(container: string): Promise<void> {
 }
 
 /**
- * Restart one service, and wait for it to be healthy again.
+ * Restart ONE service, and wait for it to be healthy again.
  *
  * This is the third step of the documented broadcaster order — quote,
  * configure, RESTART — and it is a restart rather than a recreate because that
  * is what an operator does: the configuration is a bind mount, so the file the
  * node re-reads at boot is the file that was just rewritten under it.
  *
- * The wait is not optional. A restart returns as soon as the container is
- * running, and a connector that is running has not necessarily read its config,
- * resolved its token network against the chain, or bound its listener — so
- * asserting against it too early is asserting against the node that was.
+ * `--no-deps` ON BOTH, and it is load-bearing. `docker compose restart`
+ * restarts a service's dependencies too, and the station's connector depends on
+ * its origin — so restarting the connector took the ORIGIN down with it,
+ * dropping a live RTMP publish mid-run. The broadcaster's ffmpeg saw a broken
+ * pipe and stopped, the station went off the air, and the symptom arrived much
+ * later as a *now* reporting `live: false` beside segments that were still on
+ * disk. A broadcaster reconfiguring their connector does not expect their
+ * uplink to be cut.
+ *
+ * The wait is not optional either. A restart returns as soon as the container
+ * is running, and a connector that is running has not necessarily read its
+ * config, resolved its token network against the chain, or bound its listener
+ * — so asserting against it too early is asserting against the node that was.
  */
 export async function restart(service: string): Promise<void> {
-  await compose(['restart', service]);
-  await compose(['up', '-d', '--wait', service]);
+  await compose(['restart', '--no-deps', service]);
+  await compose(['up', '-d', '--wait', '--no-deps', service]);
 }
 
 /**
