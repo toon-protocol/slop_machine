@@ -34,7 +34,10 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > prices one route per rung and one for `/now`, and the origin — on exactly three published ports,
 > and the segment port is not one of them. Every merge to `main` publishes
 > `ghcr.io/toon-protocol/station-origin`, so a fresh box brings a station up with `docker compose up
-> -d` and no local build. There is still no devnet node.
+> -d` and no local build. And **`pnpm test:devnet` now runs the whole product on one machine** — a
+> hub and a station side by side on a local chain — ending with a viber having paid for a
+> broadcaster's vibes across the hop and the broadcaster having redeemed the money on chain. It
+> needs Docker and this repository's own toolchain, and no account, faucet, testnet or real money.
 > See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it, and
 > [`deploy/README.md`](./deploy/README.md) for how to bring a station up.
 

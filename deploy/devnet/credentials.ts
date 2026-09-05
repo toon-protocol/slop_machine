@@ -116,6 +116,17 @@ export interface HubCredentials extends NodeCredentials {
 /** The station's credentials, which include the one thing only a station has. */
 export interface StationCredentials extends NodeCredentials {
   /**
+   * The BROADCASTER'S OWN operator write seed, and it lives nowhere on the
+   * station.
+   *
+   * `deploy/connector.toml` says this out loud: on a station the private half
+   * "does not live on this box at all — you keep it wherever you sign from".
+   * The station's connector holds only the ALLOWLIST of public halves. Here
+   * the driver is the broadcaster, so it keeps the seed in memory and signs
+   * from there — which is how a run redeems what its station was paid.
+   */
+  operatorWriteKey: string;
+  /**
    * The broadcaster's stream key, checked on the RTMP publish before a byte is
    * transcoded. A location and never a value: the origin reads it from a
    * mounted file, and a run pushes vibes with it.
@@ -170,6 +181,7 @@ export function generateCredentials(): DevnetCredentials {
     settlementKey: stationSettlement.key,
     settlementAddress: stationSettlement.address,
     bearerToken: randomHex32(),
+    operatorWriteKey: randomHex32(),
     streamKey: randomHex32(),
   };
 
@@ -186,14 +198,14 @@ export function generateCredentials(): DevnetCredentials {
   write(resolve(STATION_DIR, 'signer.key'), station.signerKey);
   write(resolve(STATION_DIR, 'settlement.key'), station.settlementKey);
   write(resolve(STATION_DIR, 'operator-bearer.token'), station.bearerToken);
-  // A station's own allowlist. Nothing in a run signs a write against this
-  // node — the hub writes to its OWN table — but an `[operator]` section
-  // naming a file that is missing or empty is a refuse-to-start, and the read
-  // half of this surface is how a run asks the broadcaster's own connector
-  // what it holds.
+  // A station's own allowlist — public halves, and the seed that matches it is
+  // the broadcaster's, held above rather than mounted anywhere. The HUB never
+  // writes here; it writes to its own table. What a run signs against this
+  // node is the one write a broadcaster makes for themselves: redeeming what
+  // their station was paid.
   write(
     resolve(STATION_DIR, 'operator-write.keys'),
-    createWriteSigner(randomHex32()).keyid
+    createWriteSigner(station.operatorWriteKey).keyid
   );
   write(resolve(STATION_DIR, 'stream.key'), station.streamKey);
 
