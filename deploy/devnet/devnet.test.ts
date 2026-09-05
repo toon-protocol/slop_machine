@@ -58,9 +58,17 @@ import {
   down,
   logs,
   requireDockerDaemon,
+  restart,
   up,
   connectorPinOfRecord,
 } from './compose.js';
+import {
+  generatePayerKey,
+  openPayer,
+  type Payer,
+  type PayerKey,
+} from './payer.js';
+import { startBroadcasting, waitForVibes } from './vibes.js';
 
 /** The chain's own RPC, on loopback. Nothing in this topology is reachable off-box. */
 const CHAIN_RPC_URL = 'http://127.0.0.1:8545';
@@ -161,6 +169,40 @@ const NODE_SERVICES = [
 const GAS_PER_NODE = 10n ** 18n; // one ether
 const TOKEN_PER_NODE = 1_000_000_000n; // a thousand of a six-decimal token
 
+// ── The broadcaster ──────────────────────────────────────────────────────────
+
+/**
+ * What the broadcaster's payer is given.
+ *
+ * The deposit covers a quote and a slot with room to spare — an under-funded
+ * channel refuses a packet for a reason that has nothing to do with what a run
+ * is proving, and this chain's money is play money.
+ */
+const BROADCASTER_FUNDING = {
+  gas: 10n ** 18n,
+  token: 1_000_000_000n,
+  deposit: 100_000_000n,
+};
+
+/** The two rungs a station is asked to be holding vibes at before anything is bought. */
+const LADDER = ['audio', '480p'];
+
+/**
+ * How long the encoders are given to produce a first segment at every rung.
+ *
+ * Segments are two seconds here, so this is many times over what it takes —
+ * it is a bound on a failure, not an expectation. What it actually covers is
+ * the uplink connecting and the origin accepting the stream key.
+ */
+const FIRST_SEGMENT_TIMEOUT_MS = 60_000;
+
+/** What the hub charges for a quote, and what it charges for a slot. */
+const EXPECTED_QUOTE_PRICE = 50n;
+const EXPECTED_SLOT_PRICE = 1_000_000n;
+
+/** The fixed segment duration the devnet configures its origin with. */
+const EXPECTED_SEGMENT_SECONDS = 2;
+
 /** The chain, as the document a node publishes names it. */
 const EXPECTED_SETTLEMENT_CHAIN = `evm:${String(EXPECTED_CHAIN_ID)}`;
 
@@ -169,7 +211,12 @@ describe('the devnet', () => {
   let credentials: DevnetCredentials;
   let chain: ChainSettings;
   let hub: SelfDescription;
+  let stationAtPlaceholder: SelfDescription;
   let station: SelfDescription;
+  let liveEdge: Awaited<ReturnType<typeof waitForVibes>>;
+  let broadcasterKey: PayerKey;
+  let broadcaster: Payer;
+  let quote: Quote;
   /** Set by the first failure, so a red run leaves the logs behind and a green one does not. */
   let failed = false;
 
@@ -227,6 +274,43 @@ describe('the devnet', () => {
     await up(NODE_SERVICES);
 
     hub = await readSelfDescription(`${HUB_EDGE_URL}/ilp`);
+    // The station as it is BEFORE the documented order is walked: configured
+    // at a placeholder apex its hub never granted it, which is the state every
+    // broadcaster's node is in before they pull a quote.
+    stationAtPlaceholder = await readSelfDescription(`${STATION_EDGE_URL}/ilp`);
+
+    // The broadcaster's vibes go in before anything is bought: a station with
+    // no ingest publishes a ladder it is holding nothing at, and a slot bought
+    // for one would be a slot for an address that answers 404.
+    await startBroadcasting(credentials.station.streamKey);
+    liveEdge = await waitForVibes({
+      rungs: LADDER,
+      timeoutMs: FIRST_SEGMENT_TIMEOUT_MS,
+    });
+
+    // The broadcaster's own payer, and its one channel — with the HUB. That is
+    // the whole reason a hub exists: a channel is derived from its two
+    // participants, so paying each station directly would be an on-chain
+    // transaction, gas and locked capital per broadcaster.
+    broadcasterKey = generatePayerKey();
+    broadcaster = await openPayer({
+      who: 'broadcaster',
+      connectorUrl: HUB_EDGE_URL,
+      rpcUrl: CHAIN_RPC_URL,
+      token: deployment.token,
+      key: broadcasterKey,
+      funding: BROADCASTER_FUNDING,
+    });
+
+    // ── The documented order: quote, configure, restart ─────────────────────
+    //
+    // `deploy/README.md` tells a broadcaster to pull a quote BEFORE editing
+    // their own `connector.toml`, because the prefix they are reachable at is
+    // the one the hub grants. Executing that order rather than describing it is
+    // what makes the instruction testable.
+    quote = await pullQuote(broadcaster);
+    renderStationConnectorToml(chain, quote.prefix);
+    await restart('station-connector');
     station = await readSelfDescription(`${STATION_EDGE_URL}/ilp`);
   }, 900_000);
 
@@ -235,6 +319,8 @@ describe('the devnet', () => {
   });
 
   afterAll(async () => {
+    await broadcaster?.client.close();
+
     // A red CI job has to be diagnosable without re-running it locally, and by
     // the time anybody reads it the containers are gone — so the logs go into
     // the run's own output before anything is torn down.
@@ -497,8 +583,8 @@ describe('the devnet', () => {
       'http://hub-connector:3000/ilp'
     );
     expect(
-      station.httpEndpoint,
-      `the station publishes "${station.httpEndpoint}"`
+      stationAtPlaceholder.httpEndpoint,
+      `the station publishes "${stationAtPlaceholder.httpEndpoint}"`
     ).toBe('http://station-connector:3000/ilp');
   });
 
@@ -507,7 +593,7 @@ describe('the devnet', () => {
     // no edge identity can be paid for nothing.
     for (const [name, node] of [
       ['hub', hub],
-      ['station', station],
+      ['station', stationAtPlaceholder],
     ] as const) {
       expect(
         node.edgeIdentity.publicKey,
@@ -526,7 +612,7 @@ describe('the devnet', () => {
     // nothing in a run can pay it.
     for (const [name, node, settlementAddress] of [
       ['hub', hub, credentials.hub.settlementAddress],
-      ['station', station, credentials.station.settlementAddress],
+      ['station', stationAtPlaceholder, credentials.station.settlementAddress],
     ] as const) {
       expect(
         node.settlements.length,
@@ -584,8 +670,8 @@ describe('the devnet', () => {
     // walk rather than describe, and what makes the refusal at the buy
     // something it can exercise.
     expect(
-      pricedAddresses(station),
-      `the station publishes ${JSON.stringify(station.routes.map((r) => r.prefix))}`
+      pricedAddresses(stationAtPlaceholder),
+      `the station publishes ${JSON.stringify(stationAtPlaceholder.routes.map((r) => r.prefix))}`
     ).toEqual(
       byPrefix(
         EXPECTED_STATION_ROUTES.map((rung) => ({
@@ -598,18 +684,141 @@ describe('the devnet', () => {
     // Flat per segment, every one of them: a price is a schedule over the
     // INBOUND payload and the vibes are in the fulfill, so a slope on a
     // station route prices asking rather than receiving.
-    for (const route of station.routes) {
+    for (const route of stationAtPlaceholder.routes) {
       expect(
         route.pricePerKib,
         `the station publishes a slope on ${route.prefix} — every station price is flat per segment`
       ).toBe(0n);
     }
 
-    expect(station.ilpAddresses.slice().sort()).toEqual(
+    expect(stationAtPlaceholder.ilpAddresses.slice().sort()).toEqual(
       EXPECTED_STATION_ROUTES.map(
         (rung) => `${PLACEHOLDER_STATION_APEX}.${rung.rung}`
       ).sort()
     );
+  });
+
+  // ── Vibes, a payer, and the documented order ───────────────────────────────
+
+  it("takes a broadcaster's vibes in, encoded by the origin image's own ffmpeg", () => {
+    // A generated test pattern, pushed over RTMP by the ffmpeg inside the
+    // station origin's own image — so the devnet introduces no image to encode
+    // with, and the origin's own encoders are what cut what a viber will buy.
+    expect(
+      liveEdge.live,
+      `the station's own *now* does not report an open publish, so nothing is being broadcast: ${JSON.stringify(liveEdge)}`
+    ).toBe(true);
+
+    expect(
+      liveEdge.segmentSeconds,
+      `the station cuts ${String(liveEdge.segmentSeconds)}-second segments, and the devnet configures ${String(EXPECTED_SEGMENT_SECONDS)}`
+    ).toBe(EXPECTED_SEGMENT_SECONDS);
+
+    for (const rung of LADDER) {
+      const held = liveEdge.rungs.find((entry) => entry.rung === rung);
+      expect(
+        held?.sequence,
+        `the station holds no segment at "${rung}" — a slot bought for a ladder holding nothing is a slot for an address that answers 404`
+      ).not.toBeNull();
+    }
+  });
+
+  it("opens and funds the broadcaster's channel toward the hub", async () => {
+    // ONE channel, with the hub — which is the whole reason a hub exists. A
+    // channel is derived from its two participants, so paying every station
+    // directly would mean an on-chain transaction, gas and locked capital per
+    // broadcaster.
+    const state = await broadcaster.client.channel.state({ onChain: true });
+
+    expect(
+      state.depositTotal,
+      `the broadcaster's channel holds ${String(state.depositTotal)} on chain, and the run locked ${String(BROADCASTER_FUNDING.deposit)}`
+    ).toBe(BROADCASTER_FUNDING.deposit);
+
+    expect(
+      state.channelId,
+      `the channel the client reports and the channel it opened are not the same`
+    ).toBe(broadcaster.channelId);
+
+    // The other participant is the HUB's settlement address — the key this run
+    // generated and funded, not the hub's ILP signer, which holds no money.
+    expect(
+      state.counterparty.toLowerCase(),
+      `the broadcaster's channel is against ${state.counterparty}, and the hub settles at ${credentials.hub.settlementAddress}`
+    ).toBe(credentials.hub.settlementAddress.toLowerCase());
+  });
+
+  it('answers a PAID quote at the hub, and names the prefix it would grant', () => {
+    // The cheap address, and the first thing a broadcaster does. It is paid
+    // like everything else the hub terminates — the run's channel is what pays
+    // for it — and what comes back is the address the hub would grant, which
+    // the broadcaster then writes into their own configuration.
+    expect(
+      quote.paid,
+      `the quote cost ${String(quote.paid)} — the hub prices it at ${String(EXPECTED_QUOTE_PRICE)}, and an answer that cost nothing did not come through the connector`
+    ).toBe(EXPECTED_QUOTE_PRICE);
+
+    expect(quote.hubAddress).toBe(HUB_ADDRESS);
+    expect(quote.slotPrice).toBe(EXPECTED_SLOT_PRICE);
+    expect(
+      quote.hasCapacity,
+      `the hub says it has no capacity, so nothing can be bought on it`
+    ).toBe(true);
+
+    // THE HANDLE IS THE HUB'S TO ASSIGN. It is derived from the payer the hub's
+    // own connector verified, so it is not a name the broadcaster picked and
+    // not one anybody else can take.
+    expect(
+      quote.prefix,
+      `the hub would grant "${quote.prefix}", which is not beneath its own apex`
+    ).toBe(`${HUB_ADDRESS}.${quote.label}`);
+    expect(
+      quote.prefix,
+      `the hub would grant the placeholder prefix the station was already configured at, which would make the whole documented order a no-op`
+    ).not.toBe(PLACEHOLDER_STATION_APEX);
+  });
+
+  it('re-renders the station at the granted prefix and restarts it', () => {
+    // The second and third steps of the documented order. A station still
+    // saying `demo` publishes nothing beneath the prefix its hub granted, so
+    // the hub's forwarded routes and the station's own terminations would name
+    // different prefixes and every packet the hub carried would arrive
+    // somewhere that connector does not terminate.
+    const rendered = readFileSync(STATION_CONNECTOR_TOML, 'utf8');
+
+    expect(
+      rendered,
+      `the station's configuration was not re-rendered at the prefix the hub granted`
+    ).toContain(`"${quote.prefix}.now"`);
+    expect(
+      rendered.includes(`${PLACEHOLDER_STATION_APEX}.`),
+      `the station's configuration still names the placeholder apex it was never granted`
+    ).toBe(false);
+  });
+
+  it('has the station publish beneath the granted prefix after the restart', () => {
+    // Read back off the node itself rather than off the file: the point of the
+    // restart is that the running connector now terminates what its
+    // configuration says, and this is the document the HUB will read on the
+    // purchase.
+    expect(
+      pricedAddresses(station),
+      `after the restart the station publishes ${JSON.stringify(station.routes.map((r) => r.prefix))}, and the hub granted ${quote.prefix}`
+    ).toEqual(
+      byPrefix(
+        EXPECTED_STATION_ROUTES.map((rung) => ({
+          prefix: `${quote.prefix}.${rung.rung}`,
+          price: rung.price,
+        }))
+      )
+    );
+
+    for (const address of station.ilpAddresses) {
+      expect(
+        address.startsWith(`${quote.prefix}.`),
+        `the station still advertises "${address}", which is not beneath the prefix its hub granted`
+      ).toBe(true);
+    }
   });
 });
 
@@ -648,4 +857,60 @@ function directivesOf(toml: string): string {
     .split('\n')
     .filter((line) => !line.trim().startsWith('#'))
     .join('\n');
+}
+
+/** What a hub answers at its cheap address, plus what the answer cost. */
+interface Quote {
+  prefix: string;
+  label: string;
+  hubAddress: string;
+  slotPrice: bigint;
+  slotPeriodSeconds: number;
+  hasCapacity: boolean;
+  /** What the connector actually charged for it — read off the claim, not asserted into it. */
+  paid: bigint;
+}
+
+/**
+ * Pull a paid quote through the hub.
+ *
+ * This is the first thing a broadcaster does and the first paid packet in a
+ * run. The destination is the hub's own quote prefix; nothing is sealed to
+ * anybody else, because the hub TERMINATES this address rather than forwarding
+ * it.
+ */
+async function pullQuote(payer: Payer): Promise<Quote> {
+  const answer = await payer.client.send(`${HUB_ADDRESS}.slot.quote`, {
+    method: 'GET',
+  });
+
+  if (!answer.fulfilled) {
+    throw new Error(
+      `the hub refused a paid quote: ${answer.code} ${answer.message}`
+    );
+  }
+  if (answer.status !== 200) {
+    throw new Error(
+      `the hub's quote answered ${String(answer.status)}: ${answer.text()}`
+    );
+  }
+
+  const body = answer.json<{
+    prefix: string;
+    label: string;
+    hubAddress: string;
+    slotPrice: number;
+    slotPeriodSeconds: number;
+    hasCapacity: boolean;
+  }>();
+
+  return {
+    prefix: body.prefix,
+    label: body.label,
+    hubAddress: body.hubAddress,
+    slotPrice: BigInt(body.slotPrice),
+    slotPeriodSeconds: body.slotPeriodSeconds,
+    hasCapacity: body.hasCapacity,
+    paid: answer.claim?.amount ?? 0n,
+  };
 }
