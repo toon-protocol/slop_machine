@@ -21,6 +21,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Address } from 'viem';
@@ -79,7 +80,15 @@ import {
   type Payer,
   type PayerKey,
 } from './payer.js';
-import { startBroadcasting, waitForVibes } from './vibes.js';
+import {
+  segmentDigest,
+  startBroadcasting,
+  stationNow,
+  stopBroadcasting,
+  uplinkLogs,
+  waitForVibes,
+  type StationNow,
+} from './vibes.js';
 
 /** The chain's own RPC, on loopback. Nothing in this topology is reachable off-box. */
 const CHAIN_RPC_URL = 'http://127.0.0.1:8545';
@@ -214,6 +223,44 @@ const EXPECTED_SLOT_PRICE = 1_000_000n;
 /** The fixed segment duration the devnet configures its origin with. */
 const EXPECTED_SEGMENT_SECONDS = 2;
 
+// ── The viber ────────────────────────────────────────────────────────────────
+
+/**
+ * What the viber's payer is given. The same shape as the broadcaster's and for
+ * the same reason: an under-funded channel refuses a packet for a reason that
+ * has nothing to do with what a run is proving.
+ */
+const VIBER_FUNDING = {
+  gas: 10n ** 18n,
+  token: 1_000_000_000n,
+  deposit: 100_000_000n,
+};
+
+/**
+ * The two rungs the viber buys at, and they are two on purpose.
+ *
+ * A rung being its own address at its own price is the design (ADR 0002), and
+ * a run that pulled once would exercise neither half of it. These are the
+ * cheap one, carrying only sound, and a dearer one with a picture.
+ */
+const FIRST_RUNG = 'audio';
+const SECOND_RUNG = '480p';
+
+/**
+ * A rung the station does not offer. The hub wrote one route per address the
+ * station PUBLISHES, so this is an address nothing in the topology carries.
+ */
+const A_RUNG_THE_STATION_DOES_NOT_OFFER = '720p';
+
+/**
+ * A sequence no station has ever held — far past the live edge of a broadcast
+ * that has been running for seconds, and far past the window either way.
+ */
+const A_SEQUENCE_THE_STATION_DOES_NOT_HOLD = 999_999;
+
+/** MPEG-TS packets begin with this byte, every 188 of them. */
+const MPEG_TS_SYNC_BYTE = 0x47;
+
 // ── The purchase ─────────────────────────────────────────────────────────────
 
 /**
@@ -252,7 +299,10 @@ describe('the devnet', () => {
   let hub: SelfDescription;
   let stationAtPlaceholder: SelfDescription;
   let station: SelfDescription;
-  let liveEdge: Awaited<ReturnType<typeof waitForVibes>>;
+  /** The station's *now* the moment it first held a segment at every rung. */
+  let firstVibes: StationNow;
+  /** And where its live edge is by the time a viber goes looking. */
+  let liveEdge: StationNow;
   let broadcasterKey: PayerKey;
   let broadcaster: Payer;
   let quote: Quote;
@@ -261,6 +311,10 @@ describe('the devnet', () => {
   let paidForTheSlot: bigint;
   let carriedRoutes: CarriedRoute[];
   let carriedPeerings: CarriedPeering[];
+  let viber: Payer;
+  let now: PaidPull;
+  const segments: BoughtSegment[] = [];
+  let missingSegment: PaidPull;
   /** Set by the first failure, so a red run leaves the logs behind and a green one does not. */
   let failed = false;
 
@@ -344,7 +398,7 @@ describe('the devnet', () => {
     // no ingest publishes a ladder it is holding nothing at, and a slot bought
     // for one would be a slot for an address that answers 404.
     await startBroadcasting(credentials.station.streamKey);
-    liveEdge = await waitForVibes({
+    firstVibes = await waitForVibes({
       rungs: LADDER,
       timeoutMs: FIRST_SEGMENT_TIMEOUT_MS,
     });
@@ -401,6 +455,61 @@ describe('the devnet', () => {
       HUB_EDGE_URL,
       credentials.hub.bearerToken
     );
+
+    // ── A viber ─────────────────────────────────────────────────────────────
+    //
+    // A different party from the broadcaster, with its own money — and, like
+    // the broadcaster's, exactly ONE channel, with the hub.
+    viber = await openPayer({
+      who: 'viber',
+      connectorUrl: HUB_EDGE_URL,
+      rpcUrl: CHAIN_RPC_URL,
+      token: deployment.token,
+      key: generatePayerKey(),
+      funding: VIBER_FUNDING,
+    });
+
+    // Where the live edge is, from the station's own side, so a run buys a
+    // sequence that exists rather than one it hoped for.
+    liveEdge = await stationNow();
+
+    // The station's *now*, PAID FOR and across the hop: what a viber pulls to
+    // start at the live edge instead of at the beginning.
+    // Sealed to the STATION's edge identity: a payload is sealed to the
+    // connector that TERMINATES it, and the hub is a hop that cannot open it.
+    // No hop may name that key on another node's behalf, which is why it comes
+    // off the station's own self-description.
+    const sealTo = station.edgeIdentity.publicKey;
+    now = await pullThroughTheHub(viber, sealTo, `${quote.prefix}.now`);
+
+    // And the vibes themselves, at two rungs, each at that rung's own price.
+    for (const rung of [FIRST_RUNG, SECOND_RUNG]) {
+      const sequence = sequenceHeldAt(liveEdge, rung);
+      const answer = await pullThroughTheHub(
+        viber,
+        sealTo,
+        `${quote.prefix}.${rung}`,
+        `${String(sequence)}.ts`
+      );
+      segments.push({
+        rung,
+        sequence,
+        answer,
+        // What the STATION holds at that address, hashed on the station's own
+        // side — the segment port is published on no interface, so there is no
+        // other way to have the file and no reason to want one.
+        held: await segmentDigest(rung, sequence),
+      });
+    }
+
+    // A sequence the station does not hold: a paid answer that is not vibes,
+    // and says so.
+    missingSegment = await pullThroughTheHub(
+      viber,
+      sealTo,
+      `${quote.prefix}.${FIRST_RUNG}`,
+      `${String(A_SEQUENCE_THE_STATION_DOES_NOT_HOLD)}.ts`
+    );
   }, 900_000);
 
   afterEach((context) => {
@@ -409,6 +518,7 @@ describe('the devnet', () => {
 
   afterAll(async () => {
     await broadcaster?.client.close();
+    await viber?.client.close();
 
     // A red CI job has to be diagnosable without re-running it locally, and by
     // the time anybody reads it the containers are gone — so the logs go into
@@ -417,7 +527,15 @@ describe('the devnet', () => {
       console.log(
         `[devnet] the run failed; every node's logs follow\n${await logs()}`
       );
+      // The uplink is not part of the compose project, so its log is not in
+      // that one — and "the station held no vibes" is usually a question about
+      // exactly this container.
+      console.log(
+        `[devnet] the broadcaster's uplink said:\n${await uplinkLogs()}`
+      );
     }
+    // It is not part of the project either, so `down` does not reap it.
+    await stopBroadcasting();
     // Everything, volumes included, so a second run starts from the same place
     // as the first.
     await down();
@@ -798,17 +916,17 @@ describe('the devnet', () => {
     // station origin's own image — so the devnet introduces no image to encode
     // with, and the origin's own encoders are what cut what a viber will buy.
     expect(
-      liveEdge.live,
-      `the station's own *now* does not report an open publish, so nothing is being broadcast: ${JSON.stringify(liveEdge)}`
+      firstVibes.live,
+      `the station's own *now* does not report an open publish, so nothing is being broadcast: ${JSON.stringify(firstVibes)}`
     ).toBe(true);
 
     expect(
-      liveEdge.segmentSeconds,
-      `the station cuts ${String(liveEdge.segmentSeconds)}-second segments, and the devnet configures ${String(EXPECTED_SEGMENT_SECONDS)}`
+      firstVibes.segmentSeconds,
+      `the station cuts ${String(firstVibes.segmentSeconds)}-second segments, and the devnet configures ${String(EXPECTED_SEGMENT_SECONDS)}`
     ).toBe(EXPECTED_SEGMENT_SECONDS);
 
     for (const rung of LADDER) {
-      const held = liveEdge.rungs.find((entry) => entry.rung === rung);
+      const held = firstVibes.rungs.find((entry) => entry.rung === rung);
       expect(
         held?.sequence,
         `the station holds no segment at "${rung}" — a slot bought for a ladder holding nothing is a slot for an address that answers 404`
@@ -1128,6 +1246,161 @@ describe('the devnet', () => {
       expect(stationRoute?.pricePerKib).toBe(0n);
     }
   });
+
+  // ── A viber pays for vibes, through the hub ────────────────────────────────
+
+  it("opens and funds the viber's channel toward the hub", async () => {
+    // ONE channel, with the hub, exactly like the broadcaster's — and this is
+    // the case the hub exists for. Without it a viber sampling a station they
+    // just found would need an on-chain transaction, gas and locked capital
+    // with that broadcaster before hearing a second of them.
+    const state = await viber.client.channel.state({ onChain: true });
+
+    expect(
+      state.depositTotal,
+      `the viber's channel holds ${String(state.depositTotal)} on chain`
+    ).toBe(VIBER_FUNDING.deposit);
+    expect(state.counterparty.toLowerCase()).toBe(
+      credentials.hub.settlementAddress.toLowerCase()
+    );
+
+    // A DIFFERENT channel from the broadcaster's: two parties, two channels,
+    // one hub.
+    expect(
+      state.channelId,
+      `the viber and the broadcaster hold the same channel, which would make them the same party`
+    ).not.toBe(broadcaster.channelId);
+  });
+
+  it("buys the station's *now* through the hub, at its own cheap price", () => {
+    // What a viber pulls to start at the live edge instead of at the
+    // beginning — and it is priced apart from the segments on purpose, so
+    // re-syncing is never charged a segment's price and no segment is ever
+    // reachable at this address's price.
+    expect(
+      now.status,
+      `the *now* answered ${String(now.status)} across the hop: ${now.text.slice(0, 200)}`
+    ).toBe(200);
+
+    const nowPrice = priceOf('now');
+    expect(
+      now.paid,
+      `the *now* cost ${String(now.paid)} across the hop, and the station prices it at ${String(nowPrice - EXPECTED_PEERING_FEE)} plus the hub's carriage of ${String(EXPECTED_PEERING_FEE)}`
+    ).toBe(nowPrice);
+
+    // And it is the STATION's own report, come back through the hub: the live
+    // edge at every rung, with the fixed duration a flat price is a rate over.
+    const reported = JSON.parse(now.text) as StationNow;
+    expect(reported.live).toBe(true);
+    expect(reported.segmentSeconds).toBe(EXPECTED_SEGMENT_SECONDS);
+    expect(
+      reported.rungs.map((rung) => rung.rung).sort(),
+      `the *now* reports ${JSON.stringify(reported.rungs.map((r) => r.rung))}`
+    ).toEqual([...LADDER].sort());
+  });
+
+  it('buys a segment at one rung and a second at another, each at its own price', () => {
+    expect(
+      segments.map((segment) => segment.rung),
+      `the run bought at ${JSON.stringify(segments.map((s) => s.rung))} — two rungs, because a rung being its own address at its own price is the whole design`
+    ).toEqual([FIRST_RUNG, SECOND_RUNG]);
+
+    for (const segment of segments) {
+      expect(
+        segment.answer.status,
+        `the ${segment.rung} segment answered ${String(segment.answer.status)}: ${segment.answer.text.slice(0, 200)}`
+      ).toBe(200);
+
+      expect(
+        segment.answer.paid,
+        `a ${segment.rung} segment cost ${String(segment.answer.paid)} across the hop, and that rung is carried at ${String(priceOf(segment.rung))}`
+      ).toBe(priceOf(segment.rung));
+    }
+
+    // The dearer rung costs more, which is what makes a budget a control: a
+    // viber climbs and drops rungs to stay inside one.
+    const [cheap, dear] = segments;
+    expect(
+      dear?.answer.paid,
+      `the ${String(dear?.rung)} rung does not cost more than ${String(cheap?.rung)}, so choosing a rung is not choosing a price`
+    ).toBeGreaterThan(cheap?.answer.paid ?? 0n);
+  });
+
+  it('returns each segment byte for byte as the station encoded it', () => {
+    // Not "a 200 came back". A paid packet that returned an error page, a
+    // truncated body or somebody else's rung would all be 200s, and the whole
+    // point of the run is that a viber got the vibes they paid for.
+    //
+    // Compared by digest against what is on the STATION's disk, taken from the
+    // station's own side: the segment port is published on no interface, so
+    // there is no other way to have the file and no reason to want one.
+    for (const segment of segments) {
+      expect(
+        segment.answer.body.length,
+        `the ${segment.rung} segment came back empty`
+      ).toBeGreaterThan(0);
+
+      expect(
+        createHash('sha256').update(segment.answer.body).digest('hex'),
+        `the ${segment.rung} segment at sequence ${String(segment.sequence)} came back as ${String(segment.answer.body.length)} bytes that are not what the station holds at that address`
+      ).toBe(segment.held);
+
+      // And it is vibes rather than something that merely matched: an MPEG-TS
+      // stream begins with its own sync byte.
+      expect(
+        segment.answer.body[0],
+        `the ${segment.rung} segment does not begin with the MPEG-TS sync byte`
+      ).toBe(MPEG_TS_SYNC_BYTE);
+    }
+  });
+
+  it('carries no rung the station does not offer', async () => {
+    // The hub wrote one route per address the station PUBLISHES, so a rung
+    // that is not on this station's ladder is an address nothing in the
+    // topology carries — and the hub says so by pricing no route for it, which
+    // is an answer rather than a failure.
+    expect(
+      await viber.client.price(
+        `${quote.prefix}.${A_RUNG_THE_STATION_DOES_NOT_OFFER}`
+      ),
+      `the hub prices a route for "${A_RUNG_THE_STATION_DOES_NOT_OFFER}", which this station does not offer — a viber would pay to reach nothing`
+    ).toBeNull();
+
+    // While the rungs it does offer are priced, so the check above is about
+    // this rung rather than about the lookup.
+    expect(
+      await viber.client.price(`${quote.prefix}.${FIRST_RUNG}`),
+      `the hub prices no route for a rung the station publishes`
+    ).toBe(priceOf(FIRST_RUNG));
+  });
+
+  it('answers a sequence the station no longer holds as a miss, not as vibes', () => {
+    // A viber whose sequence has gone re-syncs from the *now*; one whose RUNG
+    // has gone falls back to another. They are told apart by name, which is
+    // what makes a player able to do the right one — and neither is silently
+    // accepted in place of vibes.
+    //
+    // It is a PAID answer, like every refusal at a paid address: the connector
+    // fulfils on any complete answer whatever its status.
+    expect(
+      missingSegment.status,
+      `a sequence the station does not hold answered ${String(missingSegment.status)}`
+    ).toBe(404);
+    expect(
+      (JSON.parse(missingSegment.text) as { error?: string }).error,
+      `the miss does not name itself, so a player cannot tell it from a rung that has gone`
+    ).toBe('unknown_segment');
+    expect(
+      missingSegment.paid,
+      `the miss cost ${String(missingSegment.paid)} and the rung is carried at ${String(priceOf(FIRST_RUNG))}`
+    ).toBe(priceOf(FIRST_RUNG));
+
+    // And it is not vibes: nothing in that body could be played.
+    expect(
+      missingSegment.body[0],
+      `a segment the station does not hold came back beginning like an MPEG-TS stream`
+    ).not.toBe(MPEG_TS_SYNC_BYTE);
+  });
 });
 
 /**
@@ -1272,4 +1545,82 @@ async function attemptBuy(payer: Payer): Promise<BuyAttempt> {
     body: answer.json<unknown>(),
     paid: answer.claim?.amount ?? 0n,
   };
+}
+
+/** One paid answer that crossed the hop. */
+interface PaidPull {
+  status: number;
+  body: Uint8Array;
+  text: string;
+  /** What the connector charged — read off the claim, never asserted into it. */
+  paid: bigint;
+}
+
+/** One segment a viber bought, and what the station holds at that address. */
+interface BoughtSegment {
+  rung: string;
+  sequence: number;
+  answer: PaidPull;
+  /** The SHA-256 of the file on the station's own disk. */
+  held: string;
+}
+
+/**
+ * Pay for one request that crosses the hub to the station.
+ *
+ * Two things make this different from paying the hub itself. The destination
+ * is a prefix the hub FORWARDS rather than terminates, so the payload is
+ * sealed to the connector that terminates it — `sealTo` is the station's own
+ * edge identity, taken off its own self-description, because no hop may name
+ * that key on another node's behalf. And the amount is whatever the hub prices
+ * the forwarded route at, which the client reads from the hub itself: a run
+ * that supplied the figure would be asserting its own arithmetic rather than
+ * the hub's.
+ */
+async function pullThroughTheHub(
+  payer: Payer,
+  sealTo: string,
+  destination: string,
+  target?: string
+): Promise<PaidPull> {
+  const answer = await payer.client.send(
+    destination,
+    { method: 'GET', ...(target === undefined ? {} : { target }) },
+    { sealTo }
+  );
+
+  if (!answer.fulfilled) {
+    throw new Error(
+      `${destination} was refused by ${answer.refusedBy}: ${answer.code} ${answer.message}`
+    );
+  }
+
+  return {
+    status: answer.status,
+    body: answer.body,
+    text: answer.text(),
+    paid: answer.claim?.amount ?? 0n,
+  };
+}
+
+/** What the hub charges a viber to cross the hop to one of the station's addresses. */
+function priceOf(label: string): bigint {
+  const rung = EXPECTED_STATION_ROUTES.find(
+    (candidate) => candidate.rung === label
+  );
+  if (rung === undefined) {
+    throw new Error(`the devnet's station has no address called "${label}"`);
+  }
+  return rung.price + EXPECTED_PEERING_FEE;
+}
+
+/** The newest sequence the station holds at one rung, from its own *now*. */
+function sequenceHeldAt(edge: StationNow, rung: string): number {
+  const held = edge.rungs.find((candidate) => candidate.rung === rung);
+  if (held?.sequence === null || held?.sequence === undefined) {
+    throw new Error(
+      `the station holds nothing at rung "${rung}": ${JSON.stringify(edge)}`
+    );
+  }
+  return held.sequence;
 }

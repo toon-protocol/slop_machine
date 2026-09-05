@@ -6,11 +6,17 @@
  * introduces no image to encode with, and the encoder a run pushes through is
  * the encoder a station ships.
  *
- * It runs as its own container on the compose network rather than inside the
- * origin's, because a broadcaster's uplink is not part of their origin: it
- * dials `rtmp://station-origin:1935/live/<stream key>`, which is exactly the
- * Server/Stream Key pair OBS asks for, and the origin checks that key on the
- * RTMP `publish` command before a byte is transcoded.
+ * It runs as its own container on the project's network — BESIDE the compose
+ * project rather than inside it — because a broadcaster's uplink is not part
+ * of their origin: it dials `rtmp://station-origin:1935/live/<stream key>`,
+ * which is exactly the Server/Stream Key pair OBS asks for, and the origin
+ * checks that key on the RTMP `publish` command before a byte is transcoded.
+ *
+ * Beside rather than inside for a concrete reason. As a `docker compose run`
+ * of the origin's own service it was a SECOND container of that service, and
+ * compose reconciles a project back to one container per service: it restarted
+ * the origin underneath a live broadcast, which showed up as a station that
+ * had gone off the air for no reason anything in the run had done.
  *
  * Plain RTMP, not RTMPS: there is no certificate in a laptop topology, the
  * origin says so loudly at boot, and the whole exchange happens on a private
@@ -18,7 +24,14 @@
  * the wire in clear, which is why the shipped station bundle mounts one.
  */
 
-import { compose, execIn } from './compose.js';
+import {
+  containerIdOf,
+  execIn,
+  inspect,
+  logsOf,
+  removeContainer,
+  runBeside,
+} from './compose.js';
 
 /** The origin's own service, whose image carries the encoder. */
 const ORIGIN_SERVICE = 'station-origin';
@@ -81,22 +94,43 @@ function uplinkArguments(streamKey: string): string[] {
 /**
  * Start the broadcaster's uplink, detached, and leave it running.
  *
- * `--no-deps`, because the origin is already up and this container wants
- * nothing else started on its behalf; no published port, because a broadcaster
- * pushing vibes listens for nothing.
+ * The image and the network are read off the origin's own container rather
+ * than named here: the image is whatever this checkout built, and the network
+ * is the project's. No published port — a broadcaster pushing vibes listens
+ * for nothing.
  */
 export async function startBroadcasting(streamKey: string): Promise<void> {
-  await compose([
-    'run',
-    '--detach',
-    '--no-deps',
-    '--name',
-    UPLINK_CONTAINER,
-    '--entrypoint',
-    'ffmpeg',
-    ORIGIN_SERVICE,
-    ...uplinkArguments(streamKey),
-  ]);
+  const origin = await containerIdOf(ORIGIN_SERVICE);
+  const image = await inspect(origin, '{{.Config.Image}}');
+  const network = await inspect(
+    origin,
+    '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}'
+  );
+
+  await runBeside({
+    name: UPLINK_CONTAINER,
+    image,
+    network,
+    // The image's CMD is the origin itself; naming a command replaces it, so
+    // this container runs the encoder and nothing else.
+    command: ['ffmpeg', ...uplinkArguments(streamKey)],
+  });
+}
+
+/** What the uplink has said — the other half of a failure that mentions vibes. */
+export function uplinkLogs(): Promise<string> {
+  return logsOf(UPLINK_CONTAINER);
+}
+
+/**
+ * Take the uplink away.
+ *
+ * It is not part of the compose project, so `down` does not reap it — and a
+ * container left running against a network that is being removed is the one
+ * piece of a torn-down devnet that could survive into the next run.
+ */
+export function stopBroadcasting(): Promise<void> {
+  return removeContainer(UPLINK_CONTAINER);
 }
 
 /** The station's own report of where its live edge is, from inside the node. */
@@ -158,4 +192,34 @@ export async function waitForVibes(options: {
     }
     await new Promise((waited) => setTimeout(waited, 1_000));
   }
+}
+
+/**
+ * The SHA-256 of a segment the station holds, computed inside the origin's own
+ * container.
+ *
+ * This is what makes "byte-for-byte" a claim rather than a hope. A run cannot
+ * carry the file out — the segment port is published on no interface, which is
+ * the whole point of it — so the comparison is made against a digest of what
+ * is on the station's disk, taken from the station's own side.
+ *
+ * `sha256sum` is busybox's, which ships in the origin's alpine base; its output
+ * is the digest, two spaces, and the path.
+ */
+export async function segmentDigest(
+  rung: string,
+  sequence: number
+): Promise<string> {
+  const said = await execIn(ORIGIN_SERVICE, [
+    'sha256sum',
+    `/data/segments/${rung}/${String(sequence)}.ts`,
+  ]);
+  const digest = said.trim().split(/\s+/)[0] ?? '';
+
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    throw new Error(
+      `the station holds no readable segment ${String(sequence)} at rung "${rung}" — its own disk answered ${JSON.stringify(said)}`
+    );
+  }
+  return digest;
 }

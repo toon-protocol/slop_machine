@@ -168,24 +168,14 @@ export async function up(services: string[]): Promise<void> {
 }
 
 /**
- * Run a command inside one SERVICE's container.
+ * The one running container of one service, by the labels the daemon writes.
  *
- * Deliberately not `docker compose exec <service>`. A run also starts a
- * ONE-OFF container in this project — the broadcaster's uplink, which is the
- * origin's own image with ffmpeg as its entrypoint — and a service name then
- * names two containers. Asking compose to pick left the wrong one, and the
- * symptom was `connection refused` on a port that was demonstrably listening
- * in the other.
- *
- * So the container is found by the labels the daemon itself writes, including
- * the one that says which kind it is, and the command runs against exactly
- * that id.
+ * `docker compose exec <service>` would do for this, and does not: it resolves
+ * a service name to a container, and the answer has to stay unambiguous while
+ * a run also has containers of its own alongside the project's.
  */
-export async function execIn(
-  service: string,
-  command: string[]
-): Promise<string> {
-  const { stdout: found } = await docker(
+export async function containerIdOf(service: string): Promise<string> {
+  const { stdout } = await docker(
     [
       'ps',
       '--filter',
@@ -200,35 +190,123 @@ export async function execIn(
     { timeoutMs: 30_000 }
   );
 
-  const ids = found.split('\n').filter((id) => id.length > 0);
+  const ids = stdout.split('\n').filter((id) => id.length > 0);
   if (ids.length !== 1) {
     throw new DevnetComposeError(
-      `the devnet holds ${String(ids.length)} running containers for the service "${service}", and a command has to run in exactly one of them. A one-off container — the broadcaster's uplink — shares a service name with the origin, which is why this looks the container up by label rather than asking compose to choose.`
+      `the devnet holds ${String(ids.length)} running containers for the service "${service}", and a command has to run in exactly one of them.`
     );
   }
+  return String(ids[0]);
+}
 
-  const { stdout } = await docker(['exec', String(ids[0]), ...command], {
-    timeoutMs: 60_000,
-  });
+/** Run a command inside one service's container. */
+export async function execIn(
+  service: string,
+  command: string[]
+): Promise<string> {
+  const { stdout } = await docker(
+    ['exec', await containerIdOf(service), ...command],
+    { timeoutMs: 60_000 }
+  );
   return stdout;
 }
 
+/** One fact about a container, in the daemon's own template language. */
+export async function inspect(
+  container: string,
+  format: string
+): Promise<string> {
+  const { stdout } = await docker(['inspect', '--format', format, container], {
+    timeoutMs: 30_000,
+  });
+  return stdout.trim();
+}
+
 /**
- * Restart one service, and wait for it to be healthy again.
+ * Start a container of this run's OWN — beside the compose project rather than
+ * inside it.
+ *
+ * The broadcaster's uplink is the one thing a run adds to the topology, and it
+ * belongs to no service. It was a `docker compose run` of the origin's service
+ * once, and that made a service name resolve to two containers: compose then
+ * reconciled the project back to one container per service and RESTARTED the
+ * origin underneath a live broadcast, which showed up as a station that had
+ * gone off the air for no reason anything in the run had done.
+ *
+ * So it is an ordinary container, on the project's own network, from the
+ * origin's own image — which is still what makes "the devnet introduces no
+ * image to encode with" true.
+ */
+export async function runBeside(options: {
+  name: string;
+  image: string;
+  network: string;
+  command: string[];
+}): Promise<void> {
+  await docker(
+    [
+      'run',
+      '--detach',
+      '--name',
+      options.name,
+      '--network',
+      options.network,
+      options.image,
+      ...options.command,
+    ],
+    { timeoutMs: 120_000 }
+  );
+}
+
+/** What a container of this run's own has said, for a failure that needs it. */
+export async function logsOf(container: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await docker(['logs', container], {
+      timeoutMs: 60_000,
+    });
+    return `${stdout}${stderr}`;
+  } catch (cause) {
+    return `the logs of ${container} could not be collected: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`;
+  }
+}
+
+/** Stop and remove a container of this run's own. Never throws: teardown is not a test. */
+export async function removeContainer(container: string): Promise<void> {
+  try {
+    await docker(['rm', '--force', container], { timeoutMs: 60_000 });
+  } catch {
+    // Already gone, or never started. Either way there is nothing to remove
+    // and nothing a failure here would tell anybody.
+  }
+}
+
+/**
+ * Restart ONE service, and wait for it to be healthy again.
  *
  * This is the third step of the documented broadcaster order — quote,
  * configure, RESTART — and it is a restart rather than a recreate because that
  * is what an operator does: the configuration is a bind mount, so the file the
  * node re-reads at boot is the file that was just rewritten under it.
  *
- * The wait is not optional. A restart returns as soon as the container is
- * running, and a connector that is running has not necessarily read its config,
- * resolved its token network against the chain, or bound its listener — so
- * asserting against it too early is asserting against the node that was.
+ * `--no-deps` ON BOTH, and it is load-bearing. `docker compose restart`
+ * restarts a service's dependencies too, and the station's connector depends on
+ * its origin — so restarting the connector took the ORIGIN down with it,
+ * dropping a live RTMP publish mid-run. The broadcaster's ffmpeg saw a broken
+ * pipe and stopped, the station went off the air, and the symptom arrived much
+ * later as a *now* reporting `live: false` beside segments that were still on
+ * disk. A broadcaster reconfiguring their connector does not expect their
+ * uplink to be cut.
+ *
+ * The wait is not optional either. A restart returns as soon as the container
+ * is running, and a connector that is running has not necessarily read its
+ * config, resolved its token network against the chain, or bound its listener
+ * — so asserting against it too early is asserting against the node that was.
  */
 export async function restart(service: string): Promise<void> {
-  await compose(['restart', service]);
-  await compose(['up', '-d', '--wait', service]);
+  await compose(['restart', '--no-deps', service]);
+  await compose(['up', '-d', '--wait', '--no-deps', service]);
 }
 
 /**
