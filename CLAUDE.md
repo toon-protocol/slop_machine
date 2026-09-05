@@ -248,7 +248,9 @@ operator key creates the **peering** and writes the routes that make their stati
 [#38](https://github.com/toon-protocol/slop_machine/issues/38) and
 [#39](https://github.com/toon-protocol/slop_machine/issues/39) are what exists, and they are **the
 boot, the quote, the buy, the routes, the renewal, the lapse, the boot reconciliation and the
-operator's roster address**.
+operator's roster address**; [#40](https://github.com/toon-protocol/slop_machine/issues/40) and
+[#41](https://github.com/toon-protocol/slop_machine/issues/41) are the hub bundle that deploys it
+and the guard that holds the bundle still. **That closes the epic** — nothing in #32 is outstanding.
 
 It takes the origin's shape rather than inventing one: it exports
 `startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
@@ -523,9 +525,13 @@ The hub deploy bundle is [`deploy/hub/`](deploy/hub/) (#40) — see
 [the deploy bundles](#the-deploy-bundles) below. The **complete surface a hub's `connector.toml`
 has to agree with** is four paths on the app port: `/quote` and `/buy` are **priced**, each strictly
 beneath its own prefix and never the other's; `/health` and `/roster` are **unpriced and must never
-be routed at all**. What does not exist yet is the guard that holds that still (#41), so
-`deploy/hub/` is checked today only by `docker compose config` and by the station guard's
-whole-repository rules.
+be routed at all**. [`deploy/hub/bundle.test.ts`](deploy/hub/bundle.test.ts) (#41) is what holds
+that still, and it is the one guard in this repo that does not compare two literals: connector ADR
+0067 assigns the check that a declared `request` shape matches what the app serves to **the app's
+own repository**, so the guard **boots the real slot app** and speaks HTTP at it — the declared
+method reaches the declared path, no other method does, the declared body key is the one the buy
+actually reads, and `/health` and `/roster` are addresses the app really serves, which is what makes
+"give them no route" a rule about something rather than a rule about nothing.
 
 **A signer that outlives its own process.** The connector's replay cache keys on the signature
 bytes and ed25519 is deterministic, so an identical base is an identical, already-spent credential
@@ -595,6 +601,18 @@ image** is the announcement surface: a station being *reachable* is what the slo
 station being *found* is what the announcement carries. This repo publishes no relay image and only
 pulls one.
 
+**Each bundle has its own guard, and they are siblings.**
+[`deploy/bundle.test.ts`](deploy/bundle.test.ts) guards the station's and
+[`deploy/hub/bundle.test.ts`](deploy/hub/bundle.test.ts) guards the hub's. Both read the **real**
+committed files rather than fixtures, check **every file set an operator is told to run** rather
+than only the base compose file, and keep **every expected value a literal in the test** — so a
+reverted fix fails the suite instead of quietly agreeing with itself. `vitest.config.ts`'s include
+list reaches `deploy/*.test.ts` **and** `deploy/hub/*.test.ts`, so both run in `pnpm test`. The two
+things a hub guard adds over a station's: it fails on **RTMP anywhere at all** — port, service,
+path, or a directive naming the protocol — because a hub carries no vibes of its own and has no
+uplink to front; and it boots the real slot app to check the declared `request` shapes against the
+surface actually served.
+
 **Connector configuration is bundle work, not application code.** `deploy/connector.toml` terminates
 **five routes** — one per rung at that rung's price, plus one for the station's *now* at its own low
 price:
@@ -652,14 +670,14 @@ and what the Watchtower overlay follows, so `docker compose up -d` on a fresh bo
 image. This repo publishes those two app images and no others — never a connector.
 
 **What is still design:** the slot app boots, quotes, sells a slot, peers, routes, renews, lapses,
-reconciles at boot and shows the operator its roster, and `deploy/hub/` deploys all of it
-([#40](https://github.com/toon-protocol/slop_machine/issues/40)) — but **the hub bundle's guard
-([#41](https://github.com/toon-protocol/slop_machine/issues/41)) is not written yet**, so nothing
-holds its ports, its routes or its declared request shapes still the way
-[`deploy/bundle.test.ts`](deploy/bundle.test.ts) holds the station's. `vitest.config.ts`'s include
-list and `format`/`format:check` already reach `deploy/hub/*.ts`, so that guard is one file with no
-config change behind it. There is no devnet node. Do not infer other commands from the sibling
-repos.
+reconciles at boot and shows the operator its roster; `deploy/hub/` deploys all of it
+([#40](https://github.com/toon-protocol/slop_machine/issues/40)); and
+[`deploy/hub/bundle.test.ts`](deploy/hub/bundle.test.ts)
+([#41](https://github.com/toon-protocol/slop_machine/issues/41)) holds its ports, its routes and its
+declared request shapes still, the way
+[`deploy/bundle.test.ts`](deploy/bundle.test.ts) holds the station's. **Epic
+[#32](https://github.com/toon-protocol/slop_machine/issues/32) is complete** — all nine of #33–#41
+are merged. There is no devnet node. Do not infer other commands from the sibling repos.
 
 What does exist, all run from the repo root:
 
