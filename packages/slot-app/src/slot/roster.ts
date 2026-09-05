@@ -32,6 +32,16 @@
  * and no test knows the file's name, its shape or that there is a file at
  * all, and every reader goes on asking the four questions above.
  *
+ * **A slot also records the addresses it was granted at, and where they point
+ * — and that is not the connector's table restated here.** The connector's
+ * table is what the hub is carrying *now*; this is what the broadcaster
+ * *bought*, which is the only thing that can say whether what is being carried
+ * is right. A hub that came back to find a row missing and had nothing to
+ * compare against could only re-read the broadcaster's own connector to find
+ * out what it owed them — and a station that happened to be down while its hub
+ * rebooted would lose the addresses it had already paid for. So the terms of
+ * the purchase live with the purchase.
+ *
  * @module
  */
 
@@ -44,6 +54,25 @@ import {
   writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
+
+/**
+ * One address the hub granted a slot, and what it granted it at.
+ *
+ * Recorded rather than re-derived, because re-deriving it means reading the
+ * broadcaster's own connector again — and a station that is down while the hub
+ * boots would then lose the addresses it had already paid for. The prices are
+ * decimal strings of base units for the same reason they are `bigint`
+ * everywhere else: a `u64` rounded through a double is an address priced under
+ * what the station itself terminates at.
+ */
+export interface GrantedRoute {
+  /** The ILP prefix, beneath the granted one. */
+  prefix: string;
+  /** What the hub charges to carry it: the station's price plus carriage. */
+  price: string;
+  /** The station's own slope, carried across unchanged. Absent where flat. */
+  pricePerKib?: string;
+}
 
 /** One slot, as the hub records it. */
 export interface Slot {
@@ -67,6 +96,27 @@ export interface Slot {
    * hub's capital for ever.
    */
   lapsesAt: number;
+  /**
+   * The station connector's self-description URL the purchase named.
+   *
+   * Kept because a hub that comes back to find its own connector missing a row
+   * this slot paid for has to be able to write it again, and that write names
+   * the URL. Absent on a slot recorded by a version of this app that did not
+   * reconcile at boot; such a slot is left as it is until its next renewal.
+   */
+  stationUrl?: string;
+  /**
+   * The chain the connector stated the broadcaster paid on, where it stated
+   * one — what the hub settles this admission over, and therefore what a
+   * rewrite of it names rather than guessing between two shared chains.
+   */
+  chain?: string;
+  /**
+   * The addresses the hub granted this slot and what it granted them at: the
+   * hub's own record of what its connector should be carrying for this
+   * broadcaster until the slot lapses.
+   */
+  routes?: GrantedRoute[];
 }
 
 /** What a reader — and, from the buy onward, a writer — may ask the roster. */
@@ -272,7 +322,8 @@ function readSlots(path: string): Slot[] {
   }
 
   return record.slots.map((slot: unknown, index: number) => {
-    const { payer, label, lapsesAt } = slot as Record<string, unknown>;
+    const { payer, label, lapsesAt, stationUrl, chain, routes } =
+      slot as Record<string, unknown>;
     if (
       typeof payer !== 'string' ||
       typeof label !== 'string' ||
@@ -282,7 +333,67 @@ function readSlots(path: string): Slot[] {
         `the roster at ${path} holds something that is not a slot at position ${String(index)}`
       );
     }
-    return { payer, label, lapsesAt };
+    return {
+      payer,
+      label,
+      lapsesAt,
+      // The three the hub needs to make good on the slot at boot. Optional,
+      // because a slot recorded before they existed is still a slot somebody
+      // paid for — but validated where present, on the same fail-closed terms
+      // as the rest: half a record is worse than none, since it would be acted
+      // on rather than skipped.
+      ...(stationUrl === undefined
+        ? {}
+        : { stationUrl: text(path, index, 'stationUrl', stationUrl) }),
+      ...(chain === undefined
+        ? {}
+        : { chain: text(path, index, 'chain', chain) }),
+      ...(routes === undefined
+        ? {}
+        : { routes: grantedRoutes(path, index, routes) }),
+    };
+  });
+}
+
+function text(
+  path: string,
+  index: number,
+  field: string,
+  value: unknown
+): string {
+  if (typeof value !== 'string') {
+    throw new SlotRosterError(
+      `the roster at ${path} holds a slot at position ${String(index)} whose ${field} is not text`
+    );
+  }
+  return value;
+}
+
+/** The granted addresses off one slot, or a refusal to read the roster. */
+function grantedRoutes(
+  path: string,
+  index: number,
+  value: unknown
+): GrantedRoute[] {
+  if (!Array.isArray(value)) {
+    throw new SlotRosterError(
+      `the roster at ${path} holds a slot at position ${String(index)} whose granted addresses are not a list`
+    );
+  }
+  return value.map((entry: unknown) => {
+    const { prefix, price, pricePerKib } = entry as Record<string, unknown>;
+    if (typeof prefix !== 'string' || typeof price !== 'string') {
+      throw new SlotRosterError(
+        `the roster at ${path} holds a slot at position ${String(index)} with an address that names no prefix and price`
+      );
+    }
+    return {
+      prefix,
+      price,
+      ...(pricePerKib === undefined
+        ? {}
+        : { pricePerKib: text(path, index, 'pricePerKib', pricePerKib) }),
+    };
   });
 }
 

@@ -170,3 +170,48 @@ export function deriveHandleLabel(
 export function grantedPrefix(hubAddress: string, label: string): string {
   return `${hubAddress}.${label}`;
 }
+
+/**
+ * The shape of every label this derivation can produce, and of no other.
+ *
+ * Twelve lower-case hex characters, lengthened four at a time to the sixty-four
+ * of a whole SHA-256 digest, with the suffixed form a digest collision would
+ * reach. Nothing else is a label this hub granted.
+ */
+const HANDLE_LABEL = /^[0-9a-f]{12}(?:[0-9a-f]{4}){0,13}(?:-[0-9]{1,4})?$/;
+
+/**
+ * Whether `label` is one this hub could have derived and granted.
+ *
+ * **This is a fence, and the reason it is in this module rather than in the
+ * code that uses it.** The one thing a hub reconciles against its own
+ * connector at boot is an address space *it hands out*, and every address in
+ * that space is the hub's own address followed by a label {@link
+ * deriveHandleLabel} produced. A hub operator's own hand-written peering, or
+ * one their config file owns, cannot be mistaken for one of them: `apex-relay`
+ * is not a digest, and nothing here will ever say it is.
+ *
+ * It answers about a *shape*, never about who holds what — the roster answers
+ * that, and both questions have to be asked before anything is removed.
+ */
+export function isHandleLabel(label: string): boolean {
+  return HANDLE_LABEL.test(label);
+}
+
+/**
+ * The label a prefix sits beneath, where that prefix is inside the address
+ * space this hub grants — `undefined` otherwise.
+ *
+ * `g.hub.abcdef012345.now` beneath `g.hub` is `abcdef012345`. `g.hub.demo` is
+ * nothing: `demo` is not a label this hub derives, so the row is somebody
+ * else's — an operator's own reservation, most likely — and this hub has no
+ * business acting on it. So is anything outside the hub's address entirely.
+ */
+export function grantedLabelIn(
+  hubAddress: string,
+  prefix: string
+): string | undefined {
+  if (!prefix.startsWith(`${hubAddress}.`)) return undefined;
+  const label = prefix.slice(hubAddress.length + 1).split('.')[0] ?? '';
+  return isHandleLabel(label) ? label : undefined;
+}

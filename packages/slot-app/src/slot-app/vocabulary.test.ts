@@ -24,12 +24,19 @@
  * the third: a module may *explain* the distinction at length, and does, but
  * a fused word is wrong wherever it is written.
  *
- * `src/buy/`, `src/lapse/` and `src/slot-app/` are exempt from the first two
- * rules and only they are — the three places where a slot and a peering meet
- * in one breath. The buy is where a slot is bought and a peering created; the
- * lapse is where a slot ends and the peering behind it is released; the app is
- * where both are wired up. Being the join is exactly why all three are held to
- * rule three like everything else.
+ * `src/buy/`, `src/lapse/`, `src/reconcile/` and `src/slot-app/` are exempt
+ * from the first two rules and only they are — the four places where a slot
+ * and a peering meet in one breath. The buy is where a slot is bought and a
+ * peering created; the lapse is where a slot ends and the peering behind it is
+ * released; the reconciliation is where the record of the first is made to
+ * agree with the table of the second; the app is where all of it is wired up.
+ * Being the join is exactly why all four are held to rule three like
+ * everything else.
+ *
+ * And the exemption is **named rather than inferred**, by the last block
+ * below: a directory nobody listed would otherwise be a directory neither of
+ * the first two rules reaches, so a new module could quietly become a fifth
+ * exemption by existing.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -172,5 +179,38 @@ describe('a slot is never a peering, in the code and not only in prose', () => {
     for (const file of files) {
       expect(file.name).not.toMatch(/slot[^/]*peer|peer[^/]*slot/i);
     }
+  });
+
+  it('holds no module these rules do not reach', () => {
+    // Rules one and two are keyed on a directory, so a directory nobody
+    // listed is a directory neither of them applies to. The exemption a join
+    // module gets is therefore written down here, and a new one has to be
+    // added on purpose rather than acquired by being new.
+    const listed = new Set([
+      // The slot's own side: no peer, no channel.
+      'slot',
+      'quote',
+      // The peering's own side: no slot, no roster.
+      'peering',
+      // The joins, exempt from both and held to rule three like everything
+      // else: where a slot is bought and a peering created, where a slot ends
+      // and its peering is released, where the record of the one is made to
+      // agree with the table of the other, and where all of it is wired up.
+      'buy',
+      'lapse',
+      'reconcile',
+      'slot-app',
+      // Neither side: signing a write, and reading a mounted credential.
+      'operator',
+    ]);
+
+    const directories = new Set(
+      files
+        .map((file) => file.name)
+        .filter((name) => name.includes('/'))
+        .map((name) => name.slice(0, name.indexOf('/')))
+    );
+
+    expect([...directories].sort()).toEqual([...listed].sort());
   });
 });

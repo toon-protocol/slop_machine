@@ -18,6 +18,7 @@ export {
   DEFAULT_HOST,
   DEFAULT_DATA_DIR,
   HEALTH_ROUTE_PATH,
+  ROSTER_ROUTE_PATH,
   QUOTE_ROUTE_PREFIX,
   BUY_ROUTE_PREFIX,
 } from './slot-app/slot-app.js';
@@ -85,7 +86,25 @@ export {
   openSlotRoster,
   SlotRosterError,
 } from './slot/roster.js';
-export type { Slot, SlotRoster } from './slot/roster.js';
+export type { Slot, GrantedRoute, SlotRoster } from './slot/roster.js';
+
+// The roster address: who holds a slot and when each lapses, for the hub
+// operator. Unpriced, and it has no route on the hub's connector and never may.
+export { rosterRoutes } from './slot/roster-view.js';
+export type {
+  RosterView,
+  RosterEntry,
+  RosterViewDependencies,
+} from './slot/roster-view.js';
+
+// Boot reconciliation: the roster and the connector's own tables, made to
+// agree — what a crash left unwritten written, what the roster does not hold
+// taken back out, and what lapsed while the process was down torn down at once.
+export { reconcileAtBoot } from './reconcile/reconcile.js';
+export type {
+  Reconciled,
+  ReconcileDependencies,
+} from './reconcile/reconcile.js';
 
 // The lapse: a slot nobody renewed, taken back out by the hub itself — every
 // route first, then the peering, then the roster row, because the connector
@@ -104,12 +123,15 @@ export type { LapseDependencies, LapseTicker } from './lapse/lapse.js';
 export {
   establishPeering,
   releasePeering,
+  readCarriedPeerings,
   PeeringError,
 } from './peering/peering.js';
 export type {
   EstablishedPeering,
   PeeringChannel,
   PeeringFailure,
+  PeeringReadDependencies,
+  CarriedPeering,
 } from './peering/peering.js';
 export {
   DEFAULT_PEERING_FEE,
@@ -135,6 +157,7 @@ export {
   writeForwardedRoutes,
   retireForwardedRoutes,
   withdrawForwardedRoutes,
+  readCarriedRoutes,
   ForwardedRouteError,
 } from './peering/routes.js';
 export type {
@@ -167,6 +190,8 @@ export {
   readPayerKey,
   deriveHandleLabel,
   grantedPrefix,
+  isHandleLabel,
+  grantedLabelIn,
 } from './slot/handle.js';
 
 // The hub's two operator credentials. Both are mounted files named by path,

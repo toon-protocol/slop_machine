@@ -46,10 +46,12 @@ _Avoid_: username, name, vanity name, alias, slug
 
 ## Roster
 
-Who holds a slot on a hub, and when each one lapses. The hub's own record of
-what it sold, kept apart from the connector's peer and route tables, which are
-the record of what the hub *did* about it. The roster is what the hub's cap is
-measured against.
+Who holds a slot on a hub, when each one lapses, and at what addresses. The
+hub's own record of what it **sold**, kept apart from the connector's peer and
+route tables, which are the record of what the hub *did* about it — and made to
+agree with them at boot, since a crash between two writes leaves the two
+disagreeing and only the roster can say which is right. The roster is what the
+hub's cap is measured against.
 _Avoid_: registry, directory, peer list, membership (a slot is bought, not
 joined)
 

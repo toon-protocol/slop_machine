@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, routes, renews and lapses
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, routes, renews, lapses and reconciles
 
 This repository is a pnpm workspace with two packages, one per toon app it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -32,8 +32,9 @@ tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image publishe
 to `main`. The slot app is the newer and by far the smaller of the two — see
 [the slot app](#the-slot-app) below for exactly what it does today, which is boot, quote a slot,
 and sell one — peering with the broadcaster's station, routing every address it sells, treating a
-second purchase as a renewal of the first, and **taking a slot nobody renewed back out on its own
-initiative**.
+second purchase as a renewal of the first, **taking a slot nobody renewed back out on its own
+initiative**, and **making its own connector's routing table agree with its roster at boot** so a
+crash between two writes, or a hand-edit, is never a permanent disagreement.
 
 What the station origin does today ([#5](https://github.com/toon-protocol/slop_machine/issues/5),
 [#6](https://github.com/toon-protocol/slop_machine/issues/6),
@@ -243,9 +244,11 @@ operator key creates the **peering** and writes the routes that make their stati
 [#34](https://github.com/toon-protocol/slop_machine/issues/34),
 [#35](https://github.com/toon-protocol/slop_machine/issues/35),
 [#36](https://github.com/toon-protocol/slop_machine/issues/36),
-[#37](https://github.com/toon-protocol/slop_machine/issues/37) and
-[#38](https://github.com/toon-protocol/slop_machine/issues/38) are what exists, and they are **the
-boot, the quote, the buy, the routes, the renewal and the lapse**.
+[#37](https://github.com/toon-protocol/slop_machine/issues/37),
+[#38](https://github.com/toon-protocol/slop_machine/issues/38) and
+[#39](https://github.com/toon-protocol/slop_machine/issues/39) are what exists, and they are **the
+boot, the quote, the buy, the routes, the renewal, the lapse, the boot reconciliation and the
+operator's roster address**.
 
 It takes the origin's shape rather than inventing one: it exports
 `startSlotApp(config): Promise<SlotAppInstance>` mirroring `startOrigin`, resolves flags over
@@ -256,7 +259,17 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   "service": "slot-app", "version": string, "timestamp": number}`. It requires no payment header and
   reads none. It is **unpriced, has no route on the hub's connector and never may** — the app port is
   published on no interface, so unpriced never means free to the internet. It is not a claim about
-  the roster or about the hub's capacity; those are separate addresses and are not written yet.
+  the roster or about the hub's capacity; the roster is the address beneath it and the capacity is
+  the quote's.
+- `GET /roster` on the app port — **who holds a slot and when each lapses**, so a hub operator does
+  not read their own database by hand. `200 application/json`, `Cache-Control: no-store`, carrying
+  `{"hubAddress": string, "slotCap": number, "slotsHeld": number, "slots": [{"payer": string,
+  "label": string, "prefix": string, "lapsesAt": number}], "timestamp": number}`, soonest to lapse
+  first. **Unpriced on exactly `/health`'s terms**: it reads no payment header and requires none —
+  there is no connector in front of it to state one — and it **has no route on the hub's connector
+  and never may**, which is what keeps a hub operator's diagnostics off the internet and off sale.
+  It is a view of the **roster**, not of the connector's routing table: what the hub sold rather
+  than what it is carrying, and where the two disagree it is this record that says which is right.
 - `GET /quote` on the app port — **paid**, at a floor price, and beneath **its own connector
   prefix**, never the buy's, so neither address is ever reachable at the other's price. `200
   application/json`, `Cache-Control: no-store`, carrying `{"prefix": string, "label": string,
@@ -395,13 +408,43 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   is the hub's claim that routes and a peering behind it may still exist, so a teardown that failed
   leaves the slot standing, logs it, and the next sweep tries again — never a peering the hub has
   forgotten it is funding. The **first sweep is one interval after boot, never at boot**: tearing
-  down what lapsed while the process was down needs the connector's own tables read first, and that
-  is #39's job.
+  down what lapsed while the process was down needs the connector's own tables read first, so it is
+  the boot reconciliation below that does it, using this same `sweep()`.
 - **The roster is durable and read back at boot.** It lives in `TOON_DATA_DIR`, is written whole
   through a temporary file that is flushed and renamed over, and `record` returns only once the
   slot is on disk. A roster the app cannot read is a `SlotRosterError` and a non-zero exit, never a
   silent start from empty: a hub that re-admitted everybody it already holds would front the
-  collateral twice and lapse nothing it promised.
+  collateral twice and lapse nothing it promised. A slot also records **what it was granted** — the
+  station URL the purchase named, the chain the connector stated, and every address written with
+  the price it was written at (decimal strings, because a `u64` through a double is a route priced
+  under the station's own termination). That is not the connector's table restated: it is what the
+  broadcaster *bought*, which is the only thing that can say whether what the hub is carrying is
+  right. Without it, a boot that found a row missing could only re-read the broadcaster's own
+  connector — and a station that happened to be down while its hub rebooted would lose the
+  addresses it had already paid for. The three fields are optional on disk, so a slot recorded
+  before they existed still reads; such a slot is left alone until its next renewal records them.
+- **At boot the app reconciles the connector's own tables against the roster**, before the port
+  binds and before it can take a purchase (`packages/slot-app/src/reconcile/reconcile.ts`). In
+  order: **read** the hub's own `GET /peers` and `GET /routes/peers` over the bearer-gated read
+  surface; **tear down what lapsed while the process was down**, through the lapse's own `sweep()`
+  and therefore in the lapse's own order, because *downtime must not extend anybody's slot*;
+  **write back** what a live slot bought and the connector is not carrying — the peering
+  re-established first where it is gone, since a route cannot forward to a peering the table does
+  not hold, then every granted address the table is missing, points at the wrong peering, or holds
+  at the wrong price; and **take back out** every row the roster does not hold, routes before the
+  peering, through the same `withdrawForwardedRoutes` and `releasePeering` a lapse uses. It
+  **never throws**: a hub whose own connector is still coming up boots anyway, says so, and
+  reconciles next time — the ticker still lapses what is past its time, and a renewal still
+  rewrites its own rows.
+- **The removals at boot are fenced three times, and each fence stands alone.** "The connector
+  holds what the roster does not" is, read literally, an instruction to delete the hub operator's
+  own rows, so: **source** — only a row the connector itself reports as `runtime` is ever a
+  candidate, and a `config` row is never *asked* about, because a fence that consists of being
+  refused a `409` is not a fence; **shape** — only a label this hub could itself have derived
+  (`isHandleLabel`, twelve to sixty-four lower-case hex, the suffixed form included) and only a
+  prefix inside the address space that label is granted, so `g.hub.demo` and a hand-written
+  `apex-relay-2` are both none of this app's business; **the roster** — only a label no live slot
+  holds. Both the source fence and the shape fence have a test that fails when it is removed.
 - Configuration: `--slot-port`/`TOON_SLOT_PORT`, `--host`/`TOON_SLOT_HOST`,
   `--data-dir`/`TOON_DATA_DIR`. Port `0` binds an ephemeral port, which is how the suite runs slot
   apps side by side. **The port is configuration, not a constant.**
@@ -456,27 +499,33 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 below just because it is the app that reaches back into a connector's operator surface: no claim
 validation, no settlement key, no payment-header parsing, no pricing logic.
 
-The boot reconciliation against the connector's own tables (#39) and the hub deploy bundle (#40)
-**do not exist**. Nothing checks the connector's peers and routes against the roster, so a crash
-between two writes, or a hand-edit, leaves the two disagreeing until something rewrites the row —
-and because the first sweep is one interval after boot rather than at it, a slot that lapsed while
-the process was down keeps its routes and its peering until that tick. There is no `deploy/hub/`.
+The hub deploy bundle (#40) **does not exist**: there is no `deploy/hub/`, so nothing yet writes
+the `connector.toml` that prices `/quote` and `/buy`, and nothing yet asserts that the app's
+unpriced addresses have no route (#41). The **complete surface a hub's `connector.toml` has to
+agree with** is four paths on the app port: `/quote` and `/buy` are **priced**, each strictly
+beneath its own prefix and never the other's; `/health` and `/roster` are **unpriced and must never
+be routed at all**.
 
-**A known gap the signer inherits, and #39 will meet head-on.** `write-signature.ts` guarantees a
-fresh signature per attempt by remembering, *in that process*, which bases it has signed in which
-second. A restarted app does not remember what its predecessor signed, so an identical write
-repeated inside one second of a restart is refused by the connector as a replay. Nothing in the buy
-or the lapse hits it today (both wait out a second on retry, and a fresh boot rarely repeats a write
-that fast), but boot reconciliation repeats exactly the writes the previous process may have just
-made.
+**A signer that outlives its own process.** The connector's replay cache keys on the signature
+bytes and ed25519 is deterministic, so an identical base is an identical, already-spent credential
+— and that cache lives in the connector, which does not restart when the app does. Boot
+reconciliation repeats exactly the writes the previous process may just have made, so
+`write-signature.ts` treats **the second a signer was built in as already spent**: nothing the
+predecessor signed can carry a `created` later than that, so the first write of a process signs at
+the next second onward. The cost is bounded and paid once — at most one second, on the first write
+only — and `write-signature.ts`'s own suite proves a chain of fresh signers never repeats a
+signature.
 
 **Vocabulary is enforced by a test, not only by prose.**
 `packages/slot-app/src/slot-app/vocabulary.test.ts` reads the package's own source: `src/slot/` and
 `src/quote/` name no peer and no channel in code, `src/peering/` names no slot and no roster, and
 **nothing anywhere fuses the two words** into a `slotPeering`, a `peer_slot` or a `slot-peering`.
-`src/buy/`, `src/lapse/` and `src/slot-app/` are the only modules exempt from the first two rules,
-because being the join between a slot and a peering is what they are for: the buy makes them, the
-lapse ends one and releases the other, and the app wires both up.
+`src/buy/`, `src/lapse/`, `src/reconcile/` and `src/slot-app/` are the only modules exempt from the
+first two rules, because being the join between a slot and a peering is what they are for: the buy
+makes them, the lapse ends one and releases the other, the reconciliation makes the record of the
+first agree with the table of the second, and the app wires all of it up. **The exemption is named
+rather than inferred**: a fifth block asserts the exact set of directories under `src/`, so a new
+module cannot quietly become a fifth exemption by being new.
 
 ### The deploy bundle
 
@@ -538,12 +587,12 @@ keeping an immutable `:sha-<short>` tag. `:release` is what `deploy/docker-compo
 and what the Watchtower overlay follows, so `docker compose up -d` on a fresh box pulls a real
 image. This repo publishes those two app images and no others — never a connector.
 
-**What is still design:** the slot app boots, quotes, sells a slot, peers, routes, renews and lapses,
-but the boot reconciliation and the unpriced `/roster`
+**What is still design:** the slot app boots, quotes, sells a slot, peers, routes, renews, lapses,
+reconciles at boot and shows the operator its roster, but the hub deploy bundle and its guard
 ([#32](https://github.com/toon-protocol/slop_machine/issues/32)'s remaining slices,
-[#39](https://github.com/toon-protocol/slop_machine/issues/39) onward) are not written yet, there
-is no hub deploy bundle, and there is no devnet node. Do not infer other commands from the sibling
-repos.
+[#40](https://github.com/toon-protocol/slop_machine/issues/40) and
+[#41](https://github.com/toon-protocol/slop_machine/issues/41)) are not written yet, so there is no
+`deploy/hub/`, and there is no devnet node. Do not infer other commands from the sibling repos.
 
 What does exist, all run from the repo root:
 
@@ -598,12 +647,18 @@ Nothing reaches into the data directory's layout, the RTMP chunk parser, the str
 the segmenter, the `ffmpeg` argument construction, the slot app's credential reading or its roster;
 all of them must stay rewritable without touching a test. The slot app's quote suite is the same
 shape: a payer goes in as a header and a prefix comes back, and it never learns how one becomes the
-other. **`packages/slot-app/src/slot/handle.test.ts` is the one deliberate exception in the repo**,
-and its own header says why: the collision path it covers cannot be reached over HTTP until a roster
-writer exists (#35), it is the path that decides whether "there is no *that handle is taken*
-refusal" is true rather than intended, and it would otherwise run for the first time on a real hub
-against a broadcaster who paid. It takes the narrowest seam available — one pure function of a payer
-key and a predicate — and asserts no digest. The suite's ladder is ordinary configuration — two
+other. There are **exactly two deliberate exceptions in the repo**, and each says
+why in its own header. `packages/slot-app/src/slot/handle.test.ts`: the collision path it covers
+cannot be reached over HTTP until a roster writer exists (#35), it is the path that decides whether
+"there is no *that handle is taken* refusal" is true rather than intended, and it would otherwise
+run for the first time on a real hub against a broadcaster who paid. It takes the narrowest seam
+available — one pure function of a payer key and a predicate — and asserts no digest.
+`packages/slot-app/src/operator/write-signature.test.ts`: the guarantee it holds is that a
+**restarted** process never re-emits a signature its predecessor spent, and over HTTP that failure
+appears only when a restart happens to land inside one second of the write it repeats — a test that
+usually passed for the wrong reason. It asserts over the three header values a signer hands out and
+nothing else, and `reconcile.test.ts` still covers the same rule end to end by restarting the real
+app with no pause at all. The suite's ladder is ordinary configuration — two
 small rungs, one of them sound only — so a broadcaster's four real rungs never have to be encoded to
 prove the ladder works. **No credential literal belongs in this repository, not even a test's**: the
 slot app's suite mints throwaway credentials per boot and mounts them at real files in a temporary

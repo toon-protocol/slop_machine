@@ -88,7 +88,10 @@
  * @module
  */
 
-import type { PeeringDependencies } from './peering.js';
+import type {
+  PeeringDependencies,
+  PeeringReadDependencies,
+} from './peering.js';
 import type { PublishedRoute } from './station-description.js';
 
 /** Where on the operator surface a forwarded route is written. */
@@ -221,10 +224,7 @@ export interface ForwardedRouteRequest {
  * never on a bearer token, and this app does not invent a shortcut: the
  * `DELETE` below is signed with the write key exactly as the `POST` is.
  */
-export interface ForwardedRouteDependencies extends PeeringDependencies {
-  /** The mounted operator bearer token. Read-gating only, never a write. */
-  bearerToken: string;
-}
+export type ForwardedRouteDependencies = PeeringReadDependencies;
 
 /** One row the hub's own routing table holds right now, as this hub reads it. */
 export interface CarriedRoute {
@@ -246,6 +246,17 @@ export interface CarriedRoute {
    * app may take back out and one it may never touch.
    */
   source: string;
+  /**
+   * What the hub charges to carry it, in the operator's own two spellings — a
+   * bare integer for a flat price, a `{ base, per_kib }` table for one with a
+   * slope (connector ADR 0065).
+   *
+   * `undefined` where the row carried no price this app could read, which is
+   * not the same as a row priced at nothing: a removal needs a prefix and
+   * nothing else, and a reconciliation that could not read a price leaves the
+   * row alone rather than rewriting it on a guess.
+   */
+  price?: number | { base: number; per_kib: number };
 }
 
 /**
@@ -561,7 +572,7 @@ export async function withdrawForwardedRoutes(
  * that document comes from a host the buyer named, and this one comes from
  * the hub's own connector on the hub's own network.
  */
-async function readCarriedRoutes(
+export async function readCarriedRoutes(
   deps: ForwardedRouteDependencies
 ): Promise<CarriedRoute[]> {
   const target = new URL(`${deps.policy.operatorUrl}${ROUTES_READ_PATH}`);
@@ -659,9 +670,25 @@ function readRows(said: string): CarriedRoute[] {
       prefix,
       peerId: typeof peerId === 'string' ? peerId : '',
       source,
+      ...readPrice((entry as Record<string, unknown>)['price']),
     });
   }
   return rows;
+}
+
+/**
+ * A row's price, in whichever of the two spellings it arrived in, or nothing
+ * at all where it is neither.
+ *
+ * Nothing here refuses: a price this app cannot read is a price it will not
+ * compare against, and the row keeps every other use it had.
+ */
+function readPrice(stated: unknown): { price?: CarriedRoute['price'] } {
+  if (typeof stated === 'number') return { price: stated };
+  if (typeof stated !== 'object' || stated === null) return {};
+  const { base, per_kib: perKib } = stated as Record<string, unknown>;
+  if (typeof base !== 'number' || typeof perKib !== 'number') return {};
+  return { price: { base, per_kib: perKib } };
 }
 
 /**

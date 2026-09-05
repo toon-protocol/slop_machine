@@ -57,6 +57,14 @@
  *
  * And the verb a **lapse** needs, on the other address:
  *
+ *   - **`GET /peers`** and **`GET /routes/peers`** answer what this hub is
+ *     peered with and what it carries, each row saying whether the operator's
+ *     **config file** owns it or it was written at runtime. Bearer-gated and
+ *     nothing else, exactly as the connector splits its two gates — and
+ *     seeded with config rows by {@link FakeOperatorSurfaceOptions}, because
+ *     an app that reconciles its own rows against a hub's table has to be
+ *     shown a table with somebody else's rows in it.
+ *
  *   - **`DELETE /peers/:id`** removes a peering, signature-gated, refusing in
  *     `remove_runtime_peer`'s own order: `409` for a row the config file
  *     owns, `404` for one it never held, and `409 PeerInUse` for one a
@@ -180,6 +188,26 @@ export interface FakeOperatorSurfaceOptions {
    */
   writeDelayMs?: number;
   /**
+   * Rows the hub operator's **own configuration file** owns, as the reads
+   * report them: `source: "config"`, never `runtime`.
+   *
+   * A real connector's table holds both kinds and says which each is, and the
+   * difference is the difference between a row this app may take back out and
+   * one it may never touch. A fake that could only ever report runtime rows
+   * would let an app that removes anything it does not recognise pass — and
+   * that app would delete the operator's own reservations on a real hub.
+   *
+   * Anything named here is also `409` to a write or a removal, exactly as the
+   * real table refuses one, without having to be named twice.
+   */
+  configuredRoutes?: readonly {
+    prefix: string;
+    peer_id: string;
+    price: number;
+  }[];
+  /** Peerings the operator's own configuration file owns, on the same terms. */
+  configuredPeerings?: readonly { id: string }[];
+  /**
    * Whether a prefix is one the hub operator's **own configuration file**
    * owns.
    *
@@ -259,7 +287,15 @@ export async function startFakeOperatorSurface(
   const refused: RefusedWrite[] = [];
   const peerings = new Map<string, FakePeering>();
   const forwarded = new Map<string, FakeForwardedRoute>();
-  const configOwns = options.configOwns ?? (() => false);
+  const configuredRoutes = options.configuredRoutes ?? [];
+  const configuredPeerings = options.configuredPeerings ?? [];
+  const stated = options.configOwns ?? (() => false);
+  // A name the config file owns, whichever table it is in: the predicate a
+  // suite passed, or a row it seeded the reads with.
+  const configOwns = (name: string): boolean =>
+    stated(name) ||
+    configuredRoutes.some((route) => route.prefix === name) ||
+    configuredPeerings.some((peering) => peering.id === name);
   // Keyed on the signature itself, exactly as the connector's write auth is:
   // ed25519 is deterministic, so an identical parameter set is an identical
   // signature and is the same spent credential.
@@ -453,15 +489,44 @@ export async function startFakeOperatorSurface(
     if (presented !== `Bearer ${options.bearerToken}`) {
       return c.text('missing or wrong bearer token', 401);
     }
-    return c.json(
-      [...forwarded.values()].map((route) => ({
+    return c.json([
+      // Config-file rows first, as a real table lists them: they are the
+      // operator's own, they are `409` to every write, and an app reading this
+      // table has to be able to tell them apart from its own.
+      ...configuredRoutes.map((route) => ({ ...route, source: 'config' })),
+      ...[...forwarded.values()].map((route) => ({
         ...route,
-        // Every row this fake holds was written at runtime. A config row is
-        // the operator's own and this surface never invents one: what it has
-        // to say about them is the `409` below.
         source: 'runtime',
-      }))
-    );
+      })),
+    ]);
+  });
+
+  // `GET /peers`: who this hub is peered with, config and runtime alike. The
+  // read half of the same table `POST /peers` writes, and behind the same
+  // bearer gate every other read is — a signature buys nothing here.
+  //
+  // It answers `PeerView`'s own fields and no more: the id, the terms, and
+  // which of the two kinds of row it is. The channel behind a peering is
+  // `GET /channels`' business on a real connector and is not restated here.
+  surface.get('/peers', (c) => {
+    const presented = c.req.header('authorization');
+    if (presented !== `Bearer ${options.bearerToken}`) {
+      return c.text('missing or wrong bearer token', 401);
+    }
+    return c.json([
+      ...configuredPeerings.map((peering) => ({
+        id: peering.id,
+        fee: 0,
+        max_packet_amount: 0,
+        source: 'config',
+      })),
+      ...[...peerings.values()].map((peering) => ({
+        id: peering.id,
+        fee: peering.fee,
+        max_packet_amount: peering.max_packet_amount,
+        source: 'runtime',
+      })),
+    ]);
   });
 
   surface.delete('/routes/peers/:prefix', async (c) => {

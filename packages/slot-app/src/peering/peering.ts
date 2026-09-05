@@ -37,6 +37,12 @@
  * about the caller's node and will say the same thing however many times it
  * is asked, and retrying it only burns the packet's deadline.
  *
+ * **And one read beside them**, {@link readCarriedPeerings}: a bearer-gated
+ * `GET /peers`, which is how a hub that has just come back finds out who it
+ * is actually peered with rather than assuming its own durable record is
+ * still true. A read is the bearer token and nothing else, exactly as a write
+ * is the signature and nothing else.
+ *
  * **And one write that undoes it**, {@link releasePeering}: a signed
  * `DELETE /peers/:id`. Establishing a peering opens a channel the hub fronts
  * collateral toward, so releasing it is the act that brings that collateral
@@ -55,6 +61,14 @@ import type { WriteSigner } from '../operator/write-signature.js';
 const PEERS_WRITE_PATH = '/peers';
 
 /**
+ * Where the peerings this hub already holds are read.
+ *
+ * The same address as the write, on the other verb — and behind the other
+ * gate: a read is the bearer token and nothing else (connector ADR 0008).
+ */
+const PEERS_READ_PATH = '/peers';
+
+/**
  * A local label, as the operator surface will accept one in a path.
  *
  * Checked before a label is ever put in a URL. A label carrying a `/` or a
@@ -71,6 +85,9 @@ const RETRY_BACKOFF_MS = [200, 500];
 
 /** How long to wait for the operator surface, in milliseconds. */
 const WRITE_TIMEOUT_MS = 20_000;
+
+/** How long to wait for a read of the hub's own table, in milliseconds. */
+const READ_TIMEOUT_MS = 10_000;
 
 /** Which side a failed peering write is about. */
 export type PeeringFailure =
@@ -134,6 +151,136 @@ export interface PeeringDependencies {
   };
   /** The signer for the mounted operator write key. */
   signer: WriteSigner;
+}
+
+/**
+ * What reading the hub's own table needs beyond what writing it does: the
+ * credential that gates a **read**.
+ *
+ * A separate interface from {@link PeeringDependencies} because the two
+ * credentials gate opposite halves of the surface and neither substitutes for
+ * the other — a bearer token buys nothing on a write, and a signature buys
+ * nothing on a read.
+ */
+export interface PeeringReadDependencies extends PeeringDependencies {
+  /** The mounted operator bearer token. Read-gating only, never a write. */
+  bearerToken: string;
+}
+
+/** One peering the hub holds right now, as this hub reads it back. */
+export interface CarriedPeering {
+  /** The hub's own local label for it. */
+  localLabel: string;
+  /**
+   * `runtime` for a row written over the operator surface, `config` for one
+   * the hub operator's own file owns.
+   *
+   * Read rather than assumed: it is the difference between a row this app may
+   * release and one it may never touch.
+   */
+  source: string;
+}
+
+/**
+ * Every peering the hub's own connector holds, config and runtime alike, each
+ * saying which it is.
+ *
+ * Bearer-gated, because it is a read, and retried on the same terms a write
+ * is: a connector still coming up while its own app boots is exactly the
+ * transient failure a retry is for.
+ *
+ * @throws PeeringError with `failure: 'hub'` — every way a read of the hub's
+ * own table can fail is about the hub.
+ */
+export async function readCarriedPeerings(
+  deps: PeeringReadDependencies
+): Promise<CarriedPeering[]> {
+  const target = new URL(`${deps.policy.operatorUrl}${PEERS_READ_PATH}`);
+  let lastError: PeeringError | undefined;
+
+  for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 500);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${deps.bearerToken}`,
+        },
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = new PeeringError(
+        'hub',
+        "the hub's own operator surface could not be reached",
+        error instanceof Error ? error.message : String(error)
+      );
+      continue;
+    }
+
+    const said = await response.text();
+
+    if (response.ok) return readRows(said);
+
+    if (response.status < 500) {
+      // 401 is the bearer token, which is the hub operator's mount to fix and
+      // says the same thing however many times it is asked.
+      throw new PeeringError(
+        'hub',
+        `the hub's operator surface refused to say who it peers with, with ${String(response.status)}`,
+        said.trim()
+      );
+    }
+
+    lastError = new PeeringError(
+      'hub',
+      `the hub's operator surface answered ${String(response.status)} when asked who it peers with`,
+      said.trim()
+    );
+  }
+
+  throw (
+    lastError ?? new PeeringError('hub', "the hub's own table was never read")
+  );
+}
+
+/**
+ * The rows out of that answer, ignoring anything this app cannot read.
+ *
+ * Ignoring rather than refusing, and deliberately the opposite choice from the
+ * one the station's own document gets: a row this app cannot read is a row it
+ * will not act on, which is the safe direction on a table it shares with the
+ * hub operator's own hand.
+ */
+function readRows(said: string): CarriedPeering[] {
+  let answered: unknown;
+  try {
+    answered = JSON.parse(said);
+  } catch {
+    throw new PeeringError(
+      'hub',
+      "the hub's operator surface answered something that is not JSON when asked who it peers with"
+    );
+  }
+  if (!Array.isArray(answered)) {
+    throw new PeeringError(
+      'hub',
+      "the hub's operator surface answered something that is not a table of peerings"
+    );
+  }
+
+  const rows: CarriedPeering[] = [];
+  for (const entry of answered) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { id, source } = entry as Record<string, unknown>;
+    if (typeof id !== 'string' || typeof source !== 'string') continue;
+    rows.push({ localLabel: id, source });
+  }
+  return rows;
 }
 
 /** What one peering is established for. */

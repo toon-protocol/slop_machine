@@ -17,25 +17,58 @@ Issues [#33](https://github.com/toon-protocol/slop_machine/issues/33),
 [#34](https://github.com/toon-protocol/slop_machine/issues/34),
 [#35](https://github.com/toon-protocol/slop_machine/issues/35),
 [#36](https://github.com/toon-protocol/slop_machine/issues/36),
-[#37](https://github.com/toon-protocol/slop_machine/issues/37) and
-[#38](https://github.com/toon-protocol/slop_machine/issues/38): the app comes up from its bundled
+[#37](https://github.com/toon-protocol/slop_machine/issues/37),
+[#38](https://github.com/toon-protocol/slop_machine/issues/38) and
+[#39](https://github.com/toon-protocol/slop_machine/issues/39): the app comes up from its bundled
 entrypoint on a configured port, holds the hub's two operator credentials, answers liveness from
 inside the node, **quotes a slot**, and **sells one — establishing the peering and writing one
 forwarded route per address the station sells, before it answers**. **Buying again is renewing**:
 the same handle, one slot rather than two, the lapse extended, and the hub's routing table brought
 back into line with what the station publishes today. **A slot nobody renews lapses**, and the hub
-takes its routes and its peering back out on its own initiative.
+takes its routes and its peering back out on its own initiative. **At boot the app reconciles** its
+own connector's tables against the roster, and shows the hub operator that roster at an unpriced
+address.
 
-| Surface       | Port             | Paid                | What it is                                         |
-| ------------- | ---------------- | ------------------- | -------------------------------------------------- |
-| `GET /health` | `TOON_SLOT_PORT` | **never**           | Liveness, for a supervisor **inside** the node      |
-| `GET /quote`  | `TOON_SLOT_PORT` | yes, a floor price  | What a slot costs, and which prefix you'd be granted |
-| `POST /buy`   | `TOON_SLOT_PORT` | yes, the slot price | Buy a slot — or renew it: be peered, then be told so |
+| Surface        | Port             | Paid                | What it is                                          |
+| -------------- | ---------------- | ------------------- | --------------------------------------------------- |
+| `GET /health`  | `TOON_SLOT_PORT` | **never**           | Liveness, for a supervisor **inside** the node       |
+| `GET /roster`  | `TOON_SLOT_PORT` | **never**           | Who holds a slot and when each lapses, for the operator |
+| `GET /quote`   | `TOON_SLOT_PORT` | yes, a floor price  | What a slot costs, and which prefix you'd be granted |
+| `POST /buy`    | `TOON_SLOT_PORT` | yes, the slot price | Buy a slot — or renew it: be peered, then be told so |
 
 `/health` is process liveness — "is the slot app up enough to answer". It is not a claim about the
 roster, about the hub's capacity, or about whether anybody holds a slot. It sits outside every
 prefix the hub's connector routes and **must never acquire one**: the app port is published on no
-interface, so "unpriced" here means "in-node", never "free to the internet".
+interface, so "unpriced" here means "in-node", never "free to the internet". `/roster` sits beside
+it on exactly those terms, and the same sentence applies to it word for word.
+
+### `GET /roster`
+
+Who holds a slot on this hub and when each one lapses, so a hub operator does not read their own
+database by hand. It reads **no payment header and requires none** — there is no connector in front
+of this address to state one — and it answers `200 application/json`, `Cache-Control: no-store`:
+
+```json
+{
+  "hubAddress": "g.toon.slopmachine",
+  "slotCap": 100,
+  "slotsHeld": 1,
+  "slots": [
+    {
+      "payer": "evm:0x…",
+      "label": "9f2c1a4b7e05",
+      "prefix": "g.toon.slopmachine.9f2c1a4b7e05",
+      "lapsesAt": 1764547200000
+    }
+  ],
+  "timestamp": 1761955200000
+}
+```
+
+Soonest to lapse first, because the row an operator came to look at is usually the next one to go.
+It is a view of the **roster** — what the hub sold — and not of the connector's routing table, which
+is what the hub is carrying; the two are made to agree at boot, and where they disagree in between
+it is this record that says which of them is right.
 
 ### `GET /quote`
 
@@ -286,16 +319,48 @@ what makes a lapse testable in real time rather than against a fake clock — th
 off: a hub that never reclaims a dead station's peering only ever commits more collateral.
 
 The **first sweep is one interval after boot, never at boot.** Tearing down what lapsed while the
-process was down needs the connector's own tables read first, and that is the boot reconciliation
-([#39](https://github.com/toon-protocol/slop_machine/issues/39)), which is next under the spec in
-[#32](https://github.com/toon-protocol/slop_machine/issues/32).
+process was down needs the connector's own tables read first, so the boot reconciliation below does
+it — with those tables in hand, and through this same teardown.
+
+### At boot, the roster and the routing table are made to agree
+
+They are two records of one fact, and a crash between two writes — or a hub operator editing their
+own table by hand — leaves them disagreeing. So before the port binds, and before the app can take
+a purchase:
+
+1. **read** the hub's own `GET /peers` and `GET /routes/peers`, bearer-gated;
+2. **tear down what lapsed while the process was down**, through the lapse's own sweep and in the
+   lapse's own order — **downtime does not extend anybody's slot**;
+3. **write back** what a live slot bought and the connector is not carrying: the peering
+   re-established first where it has gone, then every granted address the table is missing, points
+   at the wrong peering, or holds at the wrong price;
+4. **take back out** every row the roster does not hold — routes first, then the peering, exactly
+   as a lapse does, because it is the same act: tearing down a slot that is not on the roster
+   because a crash landed between the peering write and the roster write.
+
+A removal here is a destructive write against a table every broadcaster on the hub shares and the
+operator writes to by hand, so it is **fenced three times**, and each fence stands alone: the row
+must be `source: "runtime"` (a config row is never even asked about — being refused a `409` is not
+a fence); its label must be one this hub could itself have **derived**, and its prefix inside the
+address space that label is granted (so `g.hub.demo` and a hand-written `apex-relay-2` are none of
+the app's business); and no live slot may hold that label.
+
+**It never refuses to boot.** A hub whose own connector is still coming up says so in its log and
+carries on: the ticker still lapses what is past its time, a renewal still rewrites its own rows,
+and the next boot reconciles.
+
+An **accepted signature is spent**, and the connector's replay cache outlives this app — so a
+restarted process treats the second it was born in as already spent, and its first write signs at
+the next second onward. Without that, a reconciliation repeating a write its predecessor made
+moments earlier would be refused as a replay.
 
 ## The two operator credentials
 
 The app holds the hub's **operator write key** (an ed25519 seed whose public half sits on the
 connector's `write_keys` allowlist, and which signature-gates every operator write the app makes)
-and the hub's **operator bearer token** (which gates the reads — today, asking the connector what
-its routing table already carries, so a renewal knows which rows to take back out).
+and the hub's **operator bearer token** (which gates the reads — asking the connector who it peers
+with and what its routing table already carries, so a renewal knows which rows to take back out and
+a boot knows what it is missing).
 
 Both arrive as **mounted files, named by path**:
 
