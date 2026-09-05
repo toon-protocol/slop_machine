@@ -1,0 +1,20 @@
+# Everything this topology needs that the shipped bundles hold as a COMMITTED
+# file is generated per run instead, and lands here.
+#
+# Both `connector.toml`s, both connectors' signer and settlement keys, both
+# bearer tokens and allowlists, the hub's operator signing seed, and the
+# station's stream key. They are generated rather than committed for two
+# reasons and each is sufficient on its own:
+#
+#   * NO CREDENTIAL LITERAL BELONGS IN THIS REPOSITORY, not even a devnet's.
+#     A key that is committed once is a key that is grep-able for ever, and a
+#     reader who finds one here learns that committing one is normal. The
+#     bundle guard beside this file fails on a 64-hex run in any committed
+#     devnet file, which is the shape of every one of those credentials.
+#   * The addresses in a rendered `connector.toml` are the ones the settlement
+#     contracts landed at on THIS run's chain. A committed copy would be a
+#     second source of truth for a value the chain decides.
+#
+# `run/` is also what makes teardown honest: it is deleted with the containers,
+# so a second run starts where the first did.
+run/

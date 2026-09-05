@@ -1,0 +1,310 @@
+# =============================================================================
+# The slop machine DEVNET: a hub and a station, side by side, on a local chain.
+# =============================================================================
+#
+#   station-origin ──vibes──▶ station-connector ◀──carries── hub-connector
+#         :3100  :1935              :3000                        :3000
+#                                                                  │
+#                                                            hub-slot-app
+#                                                                :3200
+#
+#   chain  :8545   anvil. The contracts are deployed onto it by the driver.
+#
+# THIS IS A THIRD BUNDLE AND A SIBLING OF THE OTHER TWO, NOT A VARIANT OF
+# EITHER. `../docker-compose.yml` runs one broadcaster's station and
+# `../hub/docker-compose.yml` runs one hub operator's hub; this file is the
+# only place in the repository where both node shapes are described together,
+# because proving a viber's packet crosses a hub to reach a broadcaster needs
+# both of them and a chain to settle on.
+#
+# NOTHING IN `deploy/` OR `deploy/hub/` IS EDITED TO MAKE THIS WORK. The
+# station bundle's apex is frozen to the `demo` placeholder by its own guard
+# and both bundles publish the same connector edge port; a devnet that edited
+# either would be fighting two guards to prove a third thing. Every value this
+# topology needs that those bundles hold as a committed file — both
+# `connector.toml`s, every key, the stream key — is GENERATED at run time into
+# ./run/, which git ignores.
+#
+# ── The ports invariant, which is a third set of numbers on purpose ──────────
+# NOTHING IS REACHABLE OFF-BOX. Not two doors, as a hub has, and not three, as
+# a station has: ZERO. There is no Caddy here, no certificate and no public
+# name — a laptop topology terminates no TLS — so every publish is
+# 127.0.0.1-qualified and exists only so the driver in this directory can
+# speak to what it is driving:
+#
+#   chain               127.0.0.1:8545   the JSON-RPC the driver deploys onto
+#   hub-connector       127.0.0.1:3000   the hub's client edge
+#   station-connector   127.0.0.1:3001   the station's client edge
+#
+# TWO CONNECTORS NOW SHARE A MACHINE, so those host ports are DISTINCT while
+# both containers keep the same 3000 inside. That is the whole reason this
+# bundle cannot be assembled out of the other two overlays: they publish the
+# same host port, each frozen by its own guard.
+#
+# And the two rules the shipped bundles are held to hold here unchanged, for
+# the same reason and with no local-topology exception:
+#
+#   THE SLOT APP'S PORT (3200) AND THE ORIGIN'S SEGMENT PORT (3100) ARE
+#   PUBLISHED ON NO INTERFACE, IN ANY FORM, NOT EVEN ON LOOPBACK.
+#
+# Both are payment-oblivious: /quote, /buy, /health and /roster answer on one
+# and /segments, /now, /health and /encode on the other, none of them with any
+# notion of a payment. A devnet that published either would be proving the
+# paid path over a topology that had a free door in it, and it is the one
+# habit that would then look normal in a bundle an operator runs.
+#
+# The RTMP ingest port belongs to the STATION HALF and to nothing else: a hub
+# carries no vibes of its own. It is `expose:`d rather than published, because
+# the vibes are pushed by an ffmpeg inside the origin's own image, on this
+# network — the devnet introduces no image to encode with.
+#
+# ── Running it ───────────────────────────────────────────────────────────────
+#   pnpm test:devnet
+#
+# There is deliberately no `docker compose up -d` recipe here. The chain has to
+# be up and the contracts deployed before either connector will boot — both are
+# fail-closed on their settlement config — and every credential and both
+# `connector.toml`s are generated. DEVNET_CONNECTOR_IMAGE has no default for
+# the same reason: the driver reads the pin of record out of
+# `../docker-compose.yml` and passes it in, so the devnet runs the connector
+# the bundles pin WITHOUT a third copy of that pin to drift.
+# =============================================================================
+
+name: slopmachine-devnet
+
+services:
+  # ── The chain ──────────────────────────────────────────────────────────────
+  #
+  # anvil, PINNED BY DIGEST. The tag beside it is for a reader; the digest is
+  # what is fetched, so a foundry release cannot change what "the devnet's
+  # chain" means underneath a green run.
+  #
+  # Chain id 31337 and ten funded accounts, which is what makes the settlement
+  # contracts land at the deterministic addresses the rest of the fleet
+  # commits — a configuration copied from a sibling repo is then either right
+  # here or loudly wrong.
+  #
+  # NO `--block-time`. A block per transaction means a transaction waits on
+  # ITSELF rather than on a clock, so the run is bounded by the work it does
+  # and not by a mining interval. The image's entrypoint is `/bin/sh -c`, so
+  # the command is one string.
+  chain:
+    image: ghcr.io/foundry-rs/foundry:v1.4.0@sha256:f6a3fd201ae617fdc67bf7b3db9abdca7678e2589e15eda6bc84f88eb5239e04
+    command: 'anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10 --silent'
+    ports:
+      # Loopback only, like everything else here. The driver deploys the
+      # settlement contracts over this and reads balances back over it.
+      - '127.0.0.1:8545:8545'
+    healthcheck:
+      # `cast` ships in this image, so the chain is asked the one question that
+      # matters — is it answering RPC — rather than merely having an open port.
+      # 127.0.0.1, never localhost: inside a container "localhost" can resolve
+      # to ::1, where nothing is listening.
+      test: ['CMD-SHELL', 'cast block-number --rpc-url http://127.0.0.1:8545 || exit 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 2s
+    # A devnet failure must be VISIBLE. Every service here is `restart: "no"`,
+    # unlike the shipped bundles' `unless-stopped`: a container that crash-loops
+    # in a run hides its own first error behind twenty later ones, and the
+    # driver's job is to leave the logs of what actually happened behind.
+    restart: 'no'
+
+  # ── The hub ────────────────────────────────────────────────────────────────
+  #
+  # `hub-connector`, not `connector`. A BARE `connector` APPEARS NOWHERE IN
+  # THIS FILE and may not: two of them are running, they hold different keys,
+  # they terminate different prefixes and they are reached on different host
+  # ports. A service name that does not say which node it belongs to is a log
+  # line nobody can place and a `docker compose exec` into the wrong box.
+  hub-connector:
+    # The pin of record lives in `../docker-compose.yml`'s connector `image:`,
+    # and `../bundle.test.ts` fails the build if a connector build is named
+    # anywhere else in this repository. So this is a REQUIRED variable with no
+    # default rather than a third copy: the driver reads that pin and passes it
+    # in, and the devnet therefore runs exactly the connector the two shipped
+    # bundles pin, with nothing here that can drift away from it.
+    image: ${DEVNET_CONNECTOR_IMAGE:?the driver passes the pin from deploy/docker-compose.yml — run `pnpm test:devnet` rather than `docker compose up`}
+    volumes:
+      # GENERATED, not committed: the chain repointed at the anvil service, the
+      # replayed registry and token addresses, this hub's four routes, and its
+      # own key paths. ./run/ is gitignored — see ./.gitignore.
+      - ./run/hub/connector.toml:/app/config/connector.toml:ro
+      - ./run/hub/signer.key:/app/data/signer.key:ro
+      - ./run/hub/settlement.key:/app/data/settlement.key:ro
+      # The bearer token gates the operator surface's READS; operator-write.keys
+      # is the ALLOWLIST of public halves allowed to sign a write, and the slot
+      # app's own public half is what the driver writes into it. The PRIVATE
+      # seed (operator-signing.key) is mounted into the slot app and NEVER here.
+      - ./run/hub/operator-bearer.token:/app/data/operator-bearer.token:ro
+      - ./run/hub/operator-write.keys:/app/data/operator-write.keys:ro
+      - hub_connector_state:/app/state
+    ports:
+      # The hub's client edge, on loopback. This is where the driver's payer
+      # sends a paid quote and a paid buy, and where the hub's own routing
+      # table is read back over the operator surface.
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 3s
+    depends_on:
+      chain:
+        condition: service_healthy
+      hub-slot-app:
+        condition: service_healthy
+    restart: 'no'
+
+  # The hub's admission desk. Built from THIS CHECKOUT, like the hub bundle's
+  # local overlay builds it and for the same reason: running your own change is
+  # the point. The devnet introduces no published image.
+  #
+  # DELIBERATELY NO `depends_on` ON hub-connector, even though it writes to it:
+  # the connector depends on this app being healthy, and the app tolerates a
+  # connector that is not up yet — its boot reconciliation says so in the log
+  # and tries again. A `depends_on` here would be a cycle compose refuses.
+  hub-slot-app:
+    build:
+      context: ../..
+      dockerfile: packages/slot-app/Dockerfile
+    environment:
+      TOON_SLOT_PORT: '3200' # the admission desk — PRIVATE, never published
+      TOON_DATA_DIR: /data
+      TOON_HUB_ADDRESS: g.toon.slopmachine
+      # The admission policy, at the placeholder numbers — the same pair rule
+      # as the hub bundle's: this price is what the quote reports and the floor
+      # the buy checks the connector's own stated X-TOON-Amount against, and
+      # the buy ROUTE in the generated connector.toml is what charges.
+      TOON_SLOT_PRICE: '1000000'
+      TOON_SLOT_PERIOD_SECONDS: '2592000'
+      TOON_SLOT_CAP: '100'
+      TOON_LAPSE_SWEEP_SECONDS: '60'
+      # The hub's own connector on this network, never a loopback publish: a
+      # container reaching its own host's 127.0.0.1 reaches itself.
+      TOON_OPERATOR_URL: http://hub-connector:3000
+      TOON_PEERING_FEE: '20'
+      TOON_PEERING_MAX_PACKET_AMOUNT: '10000000'
+      # A laptop topology has no certificate anywhere, so the station connector
+      # this hub is asked to read describes itself over http. The hub bundle's
+      # own local overlay relaxes the same rule for the same reason; nothing on
+      # a box with a public name should.
+      TOON_ALLOW_PLAINTEXT_STATION_URLS: 'true'
+      # Both operator credentials are LOCATIONS, never values. There is no
+      # variable carrying either literal and none may appear here.
+      TOON_OPERATOR_WRITE_KEY_FILE: /run/secrets/operator-signing.key
+      TOON_OPERATOR_BEARER_TOKEN_FILE: /run/secrets/operator-bearer.token
+    volumes:
+      # Generated per run into ./run/, which git ignores. The private seed goes
+      # here and only here; the connector above gets the ALLOWLIST of public
+      # halves instead.
+      - ./run/hub/operator-signing.key:/run/secrets/operator-signing.key:ro
+      - ./run/hub/operator-bearer.token:/run/secrets/operator-bearer.token:ro
+      - hub_slot_app_data:/data
+    expose:
+      # `expose:`, never `ports:`. /quote, /buy, /health and /roster all answer
+      # here with no notion of a payment, so the only route to a slot is a paid
+      # packet through hub-connector.
+      - '3200'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3200/health || exit 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 2s
+    restart: 'no'
+
+  # ── The station ────────────────────────────────────────────────────────────
+  #
+  # The broadcaster's own node, and the counterparty the hub carries packets
+  # to. Its connector.toml is generated twice in a run: once at a placeholder
+  # prefix, and again at the prefix the hub's quote said it would GRANT —
+  # which is the order `../README.md` tells a broadcaster to walk, executed
+  # rather than described.
+  station-connector:
+    image: ${DEVNET_CONNECTOR_IMAGE:?the driver passes the pin from deploy/docker-compose.yml — run `pnpm test:devnet` rather than `docker compose up`}
+    volumes:
+      - ./run/station/connector.toml:/app/config/connector.toml:ro
+      - ./run/station/signer.key:/app/data/signer.key:ro
+      - ./run/station/settlement.key:/app/data/settlement.key:ro
+      # A station's operator surface is what its own broadcaster peers through.
+      # The hub never writes here — it writes to its OWN table — so this holds
+      # the bearer token and an allowlist, and no private seed either.
+      - ./run/station/operator-bearer.token:/app/data/operator-bearer.token:ro
+      - ./run/station/operator-write.keys:/app/data/operator-write.keys:ro
+      - station_connector_state:/app/state
+    ports:
+      # The station's client edge, on loopback and on a DIFFERENT HOST PORT
+      # from the hub's. Both containers still listen on 3000; two connectors
+      # sharing a machine is the whole reason these two numbers differ.
+      - '127.0.0.1:3001:3000'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 3s
+    depends_on:
+      chain:
+        condition: service_healthy
+      station-origin:
+        condition: service_healthy
+    restart: 'no'
+
+  # The origin, built from this checkout. It ships the ffmpeg it supervises,
+  # which is also the ffmpeg that PUSHES the test pattern into its own ingest —
+  # so the devnet needs no image of its own to encode with.
+  station-origin:
+    build:
+      context: ../..
+      dockerfile: packages/station-origin/Dockerfile
+    environment:
+      TOON_SEGMENT_PORT: '3100' # vibes out — PRIVATE, never host-published
+      TOON_INGEST_PORT: '1935' # vibes in — on this network only
+      TOON_DATA_DIR: /data
+      # A deliberately small ladder, one rung of it sound only. Two rungs are
+      # what the run needs — the ladder being separately addressed and
+      # separately priced is the design, and one rung would exercise neither —
+      # and a broadcaster's four real rungs do not have to be encoded on a
+      # laptop to prove that.
+      TOON_RUNGS: 'audio:64k,480p:480:600k:64k'
+      # Short segments and a short window: a devnet wants a live edge within
+      # seconds of ingest starting, and a window it can hold in a container.
+      TOON_SEGMENT_SECONDS: '2'
+      TOON_RETAIN_SEGMENTS: '20'
+      TOON_INGEST_IDLE_SECONDS: '30'
+      # A location, never a value. Generated per run into ./run/.
+      TOON_STREAM_KEY_FILE: /run/secrets/stream.key
+      # Empty, not absent: PLAIN RTMP. There is no certificate in a laptop
+      # topology and nothing to terminate, and the origin refuses to start on a
+      # certificate without a key, so both go together. The origin says loudly
+      # at boot that ingest is unencrypted, which here is the truth.
+      TOON_INGEST_TLS_CERT: ''
+      TOON_INGEST_TLS_KEY: ''
+    volumes:
+      - ./run/station/stream.key:/run/secrets/stream.key:ro
+      - station_origin_data:/data
+    expose:
+      # NEITHER of these is ever published. The segment port is the
+      # payment-oblivious surface, and the ingest port carries the
+      # broadcaster's own publish, which arrives from an ffmpeg on this network.
+      - '3100'
+      - '1935'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 2s
+    restart: 'no'
+
+volumes:
+  # No volume for the chain: anvil holds its state in memory, so a run that is
+  # torn down with `--volumes` starts the next one from the same place as this
+  # one whether or not anything here is named.
+  hub_connector_state:
+  hub_slot_app_data:
+  station_connector_state:
+  station_origin_data:
