@@ -293,7 +293,7 @@ services:
       # anybody must look broken rather than look fine.
       #
       # `operator-signing.key` is the app's PRIVATE ed25519 seed. It is
-      # deliberately NOT called `operator-signing.key`, because
+      # deliberately NOT called `operator-write.key`, because
       # `operator-write.keys` — mounted into the connector above — is a
       # different artifact living in this same directory: the allowlist of
       # PUBLIC halves that a hub operator hand-edits to revoke authority. Two
