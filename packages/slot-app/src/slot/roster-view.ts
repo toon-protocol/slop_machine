@@ -23,8 +23,13 @@
  * anything.
  *
  * What it answers is the question a hub operator would otherwise answer by
- * reading a database by hand: who is admitted, at what address, and until
- * when. It is a **view of the roster**, not of the connector's routing table —
+ * reading a database by hand: who is admitted, at what address, until when,
+ * and **what this hub has funded for them**. That last is the whole reason
+ * the roster records a channel at all: `slotCap` bounds a balance-sheet
+ * commitment, and an operator who could only multiply two configured numbers
+ * together would be reading their intention rather than their exposure.
+ *
+ * It is a **view of the roster**, not of the connector's routing table —
  * what the hub sold rather than what it is carrying. The two are made to agree
  * at boot (`../reconcile/reconcile.ts`), and where they disagree in between it
  * is this record that says which of them is right.
@@ -66,6 +71,26 @@ export interface RosterEntry {
    * where it passed while the hub was down.
    */
   lapsesAt: number;
+  /**
+   * The payment channel this hub funded for that broadcaster, or `null` for a
+   * slot recorded before the buy funded anything.
+   *
+   * This is the hub operator's own money, and the identifier they would need
+   * to close and settle it: a lapse stops the carriage and leaves the deposit
+   * where it is (ADR 0003's third amendment), so reclaiming capital from a
+   * station that went away is a deliberate act against this identifier.
+   */
+  channelId: string | null;
+  /**
+   * What that channel held when the slot was last written, in the settlement
+   * token's smallest unit, as a decimal string — or `null` beside a `null`
+   * {@link RosterEntry.channelId}.
+   *
+   * Summed across the rows, this is the commitment `slotCap` bounds: the
+   * number an operator would otherwise compute from their own configuration
+   * and hope was right.
+   */
+  collateral: string | null;
 }
 
 /** What the hub operator reads at {@link ROSTER_ROUTE_PATH}. */
@@ -120,6 +145,12 @@ export function rosterRoutes(deps: RosterViewDependencies): Hono {
           label: slot.label,
           prefix: grantedPrefix(policy.hubAddress, slot.label),
           lapsesAt: slot.lapsesAt,
+          // `null` rather than absent, and rather than `0`: a slot recorded
+          // before the buy funded anything is a slot whose funding this hub
+          // does not know, which is a different fact from a channel holding
+          // nothing. It is left that way until its next renewal.
+          channelId: slot.channelId ?? null,
+          collateral: slot.collateral ?? null,
         }))
         .sort((one, other) => one.lapsesAt - other.lapsesAt),
       timestamp: Date.now(),

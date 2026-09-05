@@ -267,8 +267,12 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
 - `GET /roster` on the app port — **who holds a slot and when each lapses**, so a hub operator does
   not read their own database by hand. `200 application/json`, `Cache-Control: no-store`, carrying
   `{"hubAddress": string, "slotCap": number, "slotsHeld": number, "slots": [{"payer": string,
-  "label": string, "prefix": string, "lapsesAt": number}], "timestamp": number}`, soonest to lapse
-  first. **Unpriced on exactly `/health`'s terms**: it reads no payment header and requires none —
+  "label": string, "prefix": string, "lapsesAt": number, "channelId": string | null, "collateral":
+  string | null}], "timestamp": number}`, soonest to lapse first. **`channelId` and `collateral` are
+  the hub's own money** — which channel it funded for that broadcaster and what was in it when the
+  slot was last written — so the commitment `TOON_SLOT_CAP` bounds is a number an operator reads
+  rather than computes, and the identifier they would need to close and settle a channel behind a
+  station that went away. Both are `null` on a slot recorded before the buy funded anything. **Unpriced on exactly `/health`'s terms**: it reads no payment header and requires none —
   there is no connector in front of it to state one — and it **has no route on the hub's connector
   and never may**, which is what keeps a hub operator's diagnostics off the internet and off sale.
   It is a view of the **roster**, not of the connector's routing table: what the hub sold rather
@@ -443,7 +447,11 @@ environment over defaults the same way, and bundles to `dist/cli.js` behind its 
   broadcaster *bought*, which is the only thing that can say whether what the hub is carrying is
   right. Without it, a boot that found a row missing could only re-read the broadcaster's own
   connector — and a station that happened to be down while its hub rebooted would lose the
-  addresses it had already paid for. The three fields are optional on disk, so a slot recorded
+  addresses it had already paid for. **It also records the payment channel the hub funded for that
+  broadcaster and what is in it** (a decimal string, for the same reason a price is): the hub's own
+  capital is in that channel, a lapse leaves the deposit where it is, and nothing else in the app
+  remembers which one — so this is what a reclaim, and a hub operator reading their own roster,
+  have to act on. The five fields are optional on disk, so a slot recorded
   before they existed still reads; such a slot is left alone until its next renewal records them.
 - **At boot the app reconciles the connector's own tables against the roster**, before the port
   binds and before it can take a purchase (`packages/slot-app/src/reconcile/reconcile.ts`). In
@@ -574,7 +582,9 @@ signature.
 
 **Vocabulary is enforced by a test, not only by prose.**
 `packages/slot-app/src/slot-app/vocabulary.test.ts` reads the package's own source: `src/slot/` and
-`src/quote/` name no peer and no channel in code, `src/peering/` names no slot and no roster, and
+`src/quote/` name no peer and no channel in code — with **one named identifier exempt and no other**,
+`channelId`, because a slot records the channel the hub funded for that broadcaster and the exemption
+is pinned by a block of its own — `src/peering/` names no slot and no roster, and
 **nothing anywhere fuses the two words** into a `slotPeering`, a `peer_slot` or a `slot-peering`.
 `src/buy/`, `src/lapse/`, `src/reconcile/` and `src/slot-app/` are the only modules exempt from the
 first two rules, because being the join between a slot and a peering is what they are for: the buy

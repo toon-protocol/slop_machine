@@ -14,7 +14,7 @@
  * reaches inside the funding module, and nothing asserts that a function was
  * called.
  *
- * The four things this pins down:
+ * The five things this pins down:
  *
  *   - the channel behind the peering **holds what the hub's collateral policy
  *     fronts**, and it is funded **before the first route is written** — a
@@ -32,7 +32,12 @@
  *   - a funding that fails is a **named, paid refusal about the hub's own
  *     node**, leaves the peering standing, writes no route, records no slot,
  *     and is followed by a retry that costs no second channel and no second
- *     deposit.
+ *     deposit;
+ *   - and the slot **records the channel it funded and what is in it**, so the
+ *     commitment `TOON_SLOT_CAP` bounds is a number the hub operator's own
+ *     roster address reports rather than one they compute from two configured
+ *     figures and hope is right. A renewal keeps the same channel and reports
+ *     the top-up; a restart, which reconciles, leaves it exactly as it was.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -248,6 +253,25 @@ async function bought(
     );
   }
   return answered as BoughtBody;
+}
+
+/** The roster address's answer, only as far as this file reads it. */
+interface RosterBody {
+  slots: {
+    payer: string;
+    label: string;
+    lapsesAt: number;
+    channelId: string | null;
+    collateral: string | null;
+  }[];
+}
+
+async function roster(app: SlotAppInstance): Promise<RosterBody> {
+  const res = await fetch(appUrl(app, '/roster'));
+  if (res.status !== 200) {
+    throw new Error(`expected a roster, got ${String(res.status)}`);
+  }
+  return (await res.json()) as RosterBody;
 }
 
 /** Whether the hub is holding a slot for this payer, as the quote reports it. */
@@ -501,5 +525,84 @@ describe('a channel this hub cannot fund', () => {
       [COLLATERAL]
     );
     expect(await holdsSlot(app, payer)).toBe(true);
+  });
+});
+
+// ---------- What the hub committed, where an operator can read it ----------
+
+describe('the slot records the channel the hub funded', () => {
+  it('reports it at the roster, beside what it holds', async () => {
+    const { app, operator } = await boot();
+    const station = await bootStation();
+    const payer = evmPayer();
+    await configured(app, payer, station);
+
+    const purchased = await bought(app, payer, station);
+    const listed = (await roster(app)).slots;
+
+    // The commitment TOON_SLOT_CAP bounds, read rather than computed: which
+    // channel this hub funded for this broadcaster, and how much is in it.
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.channelId).toBe(purchased.peering.channel.id);
+    expect(listed[0]?.collateral).toBe(String(COLLATERAL));
+
+    // And it is the hub's own connector's channel, not a number the app made
+    // up: the same identifier, holding the same amount.
+    expect(
+      operator
+        .channels()
+        .map((channel) => [channel.id, channel.own_deposited] as const)
+    ).toEqual([[listed[0]?.channelId, COLLATERAL]]);
+  });
+
+  it('reports a decimal string, because a commitment is base units', async () => {
+    // The same reason a granted price is a string: an amount is a u128 of
+    // base units, and a hub that round-tripped one through a JSON number
+    // would report a commitment it does not have.
+    const { app } = await boot({ peeringCollateral: 9_007_199_254_740_991 });
+    const station = await bootStation();
+    const payer = evmPayer();
+    await configured(app, payer, station);
+
+    await bought(app, payer, station);
+
+    expect((await roster(app)).slots[0]?.collateral).toBe('9007199254740991');
+  });
+
+  it('keeps the same channel across a renewal, and reports the top-up', async () => {
+    const hub = await boot();
+    const station = await bootStation();
+    const payer = evmPayer();
+    await configured(hub.app, payer, station);
+    const first = await bought(hub.app, payer, station);
+
+    const raised = await hub.reboot({
+      peeringCollateral: COLLATERAL + 250_000,
+    });
+    await configured(raised, payer, station);
+    await bought(raised, payer, station);
+
+    // One slot, the same channel, and the figure the renewal topped it up to.
+    const listed = (await roster(raised)).slots;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.channelId).toBe(first.peering.channel.id);
+    expect(listed[0]?.collateral).toBe(String(COLLATERAL + 250_000));
+  });
+
+  it('survives the restart that reconciles, unchanged', async () => {
+    const hub = await boot();
+    const station = await bootStation();
+    const payer = evmPayer();
+    await configured(hub.app, payer, station);
+    const purchased = await bought(hub.app, payer, station);
+    const before = (await roster(hub.app)).slots;
+
+    // A boot reconciles the connector's tables against the roster. It writes
+    // no roster row, so what the hub funded is what it funded: a boot that
+    // rewrote this would be a boot inventing a commitment.
+    const restarted = await hub.reboot();
+
+    expect((await roster(restarted)).slots).toEqual(before);
+    expect(before[0]?.channelId).toBe(purchased.peering.channel.id);
   });
 });

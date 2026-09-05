@@ -56,7 +56,10 @@
  *      this caller was granted. A write is an upsert, so nothing about step 8
  *      removes a rung a broadcaster dropped, and a row left behind is an
  *      address the hub carries toward a node that no longer terminates it.
- *  10. **The slot, recorded durably, before the answer.** Gas is spent inside
+ *  10. **The slot, recorded durably, before the answer** — including the
+ *      channel the hub funded and what it holds, so the commitment
+ *      `TOON_SLOT_CAP` bounds is a number the roster address reports rather
+ *      than one an operator computes. Gas is spent inside
  *      a paid request here, so a purchase whose answer arrived too late must
  *      be found already done when the broadcaster retries rather than paying
  *      for the same peering twice.
@@ -640,6 +643,14 @@ export function buyRoutes(deps: BuyDependencies): Hono {
         stationUrl: body,
         ...(chain === undefined ? {} : { chain }),
         routes: written.map(granted),
+        // And what the hub funded, in the same act. The hub's own capital is
+        // in that channel and nothing else in this app remembers which one:
+        // a lapse releases the peering and leaves the deposit where it is,
+        // so this is the only record of what a hub operator would close and
+        // settle to get it back — and the number their roster reports rather
+        // than makes them compute.
+        channelId: funded.channelId,
+        collateral: funded.held.toString(),
       });
     } catch (error) {
       // A hub whose disk failed under a paid purchase. Said out loud rather

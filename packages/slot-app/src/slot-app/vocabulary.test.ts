@@ -12,7 +12,9 @@
  *
  *   1. **The slot's own modules never name a peer in code.** `src/slot/` and
  *      `src/quote/` are about what was bought; the connector's tables are
- *      what was done about it, and they are somebody else's module.
+ *      what was done about it, and they are somebody else's module. There is
+ *      **one named identifier exempt from it and no other**, `channelId` —
+ *      see {@link COLLATERAL_IN_THE_SLOTS_OWN_MODULES}.
  *   2. **The peering's own modules never name a slot in code.** `src/peering/`
  *      takes no roster, no price and no period — it establishes a peering and
  *      knows nothing about why.
@@ -33,10 +35,12 @@
  * Being the join is exactly why all four are held to rule three like
  * everything else.
  *
- * And the exemption is **named rather than inferred**, by the last block
- * below: a directory nobody listed would otherwise be a directory neither of
- * the first two rules reaches, so a new module could quietly become a fifth
- * exemption by existing.
+ * And both exemptions are **named rather than inferred**. A directory nobody
+ * listed would otherwise be a directory neither of the first two rules
+ * reaches, so a new module could quietly become a fifth exemption by
+ * existing — the last block pins the set of directories. And the one
+ * identifier rule one allows through is pinned the same way, by its own
+ * block, so a second one has to be argued for rather than acquired.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -107,12 +111,41 @@ function read(path: string): { code: string; whole: string; name: string } {
 }
 
 /** The lines of `text` matching `pattern`, for a failure worth reading. */
+/**
+ * The same code with rule one's single allowed identifier struck out, so what
+ * is left is what the rule actually applies to.
+ */
+function exempt(code: string): string {
+  return COLLATERAL_IN_THE_SLOTS_OWN_MODULES.reduce(
+    (text, allowed) => text.replaceAll(allowed, ''),
+    code
+  );
+}
+
 function offending(text: string, pattern: RegExp): string[] {
   return text
     .split('\n')
     .filter((line) => pattern.test(line))
     .map((line) => line.trim());
 }
+
+/**
+ * The **only** thing the slot's own modules may name a channel, and the only
+ * spelling of it.
+ *
+ * A slot records the payment channel the hub funded for that broadcaster,
+ * because the hub's own capital is in it and nothing else in the app
+ * remembers which one: a lapse releases the peering and leaves the deposit
+ * where it is (ADR 0003's third amendment), so this is what a reclaim, and a
+ * hub operator reading their own roster, would have to act on.
+ *
+ * That is a real widening of rule one and it is written down here rather than
+ * left as a hole in a regular expression. `peer` and `peering` stay banned in
+ * `src/slot/` and `src/quote/` outright — the distinction ADR 0003 turns on is
+ * untouched — and `channel` is admitted only in this identifier, so a
+ * `channelStatus`, a `peerChannel` or a bare `channel` still fails.
+ */
+const COLLATERAL_IN_THE_SLOTS_OWN_MODULES = ['channelId'];
 
 const files = sources().map(read);
 
@@ -136,10 +169,38 @@ describe('a slot is never a peering, in the code and not only in prose', () => {
       // connector's own tables and to the modules that write them. (`route`
       // is not on this list: an HTTP route is Hono's word and means something
       // else entirely.)
+      //
+      // The one exception is struck out of the text before the rule is
+      // applied, rather than punched out of the pattern: what remains of a
+      // line is still checked, so `const channelIdentifier = peering.channel`
+      // fails on both halves.
       expect({
         file: file.name,
-        lines: offending(file.code, /peer|channel/i),
+        lines: offending(exempt(file.code), /peer|channel/i),
       }).toEqual({ file: file.name, lines: [] });
+    }
+  });
+
+  it('lets the slot name exactly one channel, and only where it records one', () => {
+    // The allowance is a list of one, asserted here so that adding a second
+    // is a change to this file with a reason beside it. Without this, rule one
+    // would quietly weaken every time somebody needed a word.
+    expect(COLLATERAL_IN_THE_SLOTS_OWN_MODULES).toEqual(['channelId']);
+
+    // And it really is doing something: the rule still bites in those
+    // modules on anything else, which is what keeps the exemption an
+    // exemption rather than a hole.
+    expect(
+      offending(exempt('const channelId = read();'), /peer|channel/i)
+    ).toEqual([]);
+    for (const collapsed of [
+      'const channel = read();',
+      'const channelStatus = read();',
+      'const peerId = read();',
+    ]) {
+      expect(offending(exempt(collapsed), /peer|channel/i)).toEqual([
+        collapsed,
+      ]);
     }
   });
 
