@@ -111,7 +111,18 @@ const A_STATION_SERVICE = /(^|[-_])(origin|ingest|rtmp)([-_]|$)/i;
 const SLOT_APP_PORT = '3200';
 /** The origin's segment port. The same rule, for the same reason: it serves vibes. */
 const SEGMENT_PORT = '3100';
-/** RTMP ingest. The STATION half's, `expose:`d and never published. */
+/**
+ * RTMP ingest. The STATION half's, and the one publish here that is not the
+ * driver's.
+ *
+ * It is published on loopback so the BROADCASTER'S OWN ENCODER can reach it —
+ * an OBS on this machine is what a broadcaster actually holds, and the shipped
+ * station bundle publishes this same port for this same party. It is not a
+ * free door: ingest is authenticated on the stream key, checked before a byte
+ * is transcoded, and it is the UNPAID direction by design, so there is nothing
+ * behind it to get for free. That is exactly what the two ports above it are
+ * not, which is why they stay unpublished.
+ */
 const RTMP_PORT = '1935';
 /** Both connectors' client edge, INSIDE the container. Both listen on it. */
 const CONNECTOR_EDGE_PORT = '3000';
@@ -120,9 +131,13 @@ const CONNECTOR_EDGE_PORT = '3000';
 const LOOPBACK_PUBLISH_PREFIX = '127.0.0.1:';
 
 /**
- * The whole published set. NOTHING IS REACHABLE OFF-BOX — not two doors as a
- * hub has, not three as a station has, but none — and each of these exists
- * only so the driver can speak to what it is driving.
+ * The whole published set. NOTHING IS REACHABLE OFF-BOX — every entry is
+ * loopback-qualified — and each exists only so somebody on this machine can
+ * reach the one surface they are entitled to.
+ *
+ * Three of them are the DRIVER'S, and the fourth is the BROADCASTER'S: the
+ * ingest their own encoder pushes into. That one is authenticated and unpaid,
+ * which is what keeps it off the list the next guard refuses.
  *
  * The two connector edges are the reason this bundle cannot be assembled out
  * of the two shipped local overlays: they publish the same host port, each
@@ -132,15 +147,17 @@ const EXPECTED_PUBLISHED_PORTS: Record<string, string> = {
   chain: `${LOOPBACK_PUBLISH_PREFIX}8545:8545`,
   'hub-connector': `${LOOPBACK_PUBLISH_PREFIX}3000:${CONNECTOR_EDGE_PORT}`,
   'station-connector': `${LOOPBACK_PUBLISH_PREFIX}3001:${CONNECTOR_EDGE_PORT}`,
+  'station-origin': `${LOOPBACK_PUBLISH_PREFIX}${RTMP_PORT}:${RTMP_PORT}`,
 };
 
 /** What each service keeps on `expose:` — private, but still dialable on this network. */
 const EXPECTED_EXPOSE: Record<string, string[]> = {
   'hub-slot-app': [SLOT_APP_PORT],
-  // The segment port AND the ingest port. The vibes are pushed by an ffmpeg
-  // inside the origin's own image, on this network, so ingest needs no publish
-  // either — and the devnet introduces no image to encode with.
-  'station-origin': [SEGMENT_PORT, RTMP_PORT],
+  // The segment port, and only it. The ingest port is published above rather
+  // than exposed here — a `ports:` entry already reaches this network, so the
+  // run's own ffmpeg still dials `station-origin:1935` over it and the devnet
+  // still introduces no image to encode with.
+  'station-origin': [SEGMENT_PORT],
 };
 
 /** A TLS front's two doors. Neither may be named anywhere: there is no certificate here. */
@@ -646,10 +663,11 @@ describe('devnet bundle', () => {
   });
 
   it('publishes nothing off-box: every publish is loopback-qualified', () => {
-    // A hub publishes two doors and a station three. A devnet publishes NONE:
-    // there is no public name here, nothing to front and nobody to reach it,
-    // and a `ports:` entry with no host IP is internet-reachable even with ufw
-    // locked down, because Docker's iptables chain runs ahead of it.
+    // There is no public name here, nothing to front and nobody off-box to
+    // reach it — and a `ports:` entry with no host IP is internet-reachable
+    // even with ufw locked down, because Docker's iptables chain runs ahead of
+    // it. The broadcaster's ingest is held to this exactly like the driver's
+    // three: an authenticated port is still not one to offer the internet.
     for (const { file, service, entry } of publishedPorts(EVERY_COMPOSE_FILE)) {
       expect(
         entry.startsWith(LOOPBACK_PUBLISH_PREFIX),
@@ -658,7 +676,7 @@ describe('devnet bundle', () => {
     }
   });
 
-  it('publishes exactly the three addresses the driver has to reach', () => {
+  it("publishes exactly the three driver addresses and the broadcaster's ingest", () => {
     const published = Object.fromEntries(
       publishedPorts(EVERY_COMPOSE_FILE).map(({ service, entry }) => [
         service,
@@ -668,7 +686,7 @@ describe('devnet bundle', () => {
 
     expect(
       published,
-      `${COMPOSE_PATH}: the published set is the chain's RPC and the two connector edges, all on loopback, and nothing else`
+      `${COMPOSE_PATH}: the published set is the chain's RPC, the two connector edges and the broadcaster's own ingest, all on loopback, and nothing else`
     ).toEqual(EXPECTED_PUBLISHED_PORTS);
   });
 

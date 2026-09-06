@@ -38,6 +38,10 @@ decisions behind the shape are in [`docs/adr/`](./docs/adr/).
 > hub and a station side by side on a local chain — ending with a viber having paid for a
 > broadcaster's vibes across the hop and the broadcaster having redeemed the money on chain. It
 > needs Docker and this repository's own toolchain, and no account, faucet, testnet or real money.
+> **`pnpm demo` is the same topology with you in it**: point OBS at the station, hit Start
+> Streaming, and a page on loopback plays your own broadcast back one paid packet at a time, with
+> what each rung costs, what the hub keeps for carrying it, and a button that settles the
+> broadcaster's claim on chain while the channel stays open.
 > See [`CLAUDE.md`](./CLAUDE.md) for what exists and how to build and test it, and
 > [`deploy/README.md`](./deploy/README.md) for how to bring a station up.
 

@@ -26,15 +26,15 @@
 # ./run/, which git ignores.
 #
 # ── The ports invariant, which is a third set of numbers on purpose ──────────
-# NOTHING IS REACHABLE OFF-BOX. Not two doors, as a hub has, and not three, as
-# a station has: ZERO. There is no Caddy here, no certificate and no public
-# name — a laptop topology terminates no TLS — so every publish is
-# 127.0.0.1-qualified and exists only so the driver in this directory can
-# speak to what it is driving:
+# NOTHING IS REACHABLE OFF-BOX. There is no Caddy here, no certificate and no
+# public name — a laptop topology terminates no TLS — so every publish is
+# 127.0.0.1-qualified, and each exists only so somebody ON THIS MACHINE can
+# reach the one surface they are entitled to:
 #
 #   chain               127.0.0.1:8545   the JSON-RPC the driver deploys onto
 #   hub-connector       127.0.0.1:3000   the hub's client edge
 #   station-connector   127.0.0.1:3001   the station's client edge
+#   station-origin      127.0.0.1:1935   the broadcaster's own RTMP ingest
 #
 # TWO CONNECTORS NOW SHARE A MACHINE, so those host ports are DISTINCT while
 # both containers keep the same 3000 inside. That is the whole reason this
@@ -53,10 +53,28 @@
 # paid path over a topology that had a free door in it, and it is the one
 # habit that would then look normal in a bundle an operator runs.
 #
-# The RTMP ingest port belongs to the STATION HALF and to nothing else: a hub
-# carries no vibes of its own. It is `expose:`d rather than published, because
-# the vibes are pushed by an ffmpeg inside the origin's own image, on this
-# network — the devnet introduces no image to encode with.
+# THE INGEST PORT IS THE ONE PUBLISH THAT IS NOT THE DRIVER'S, and it belongs
+# to the STATION HALF and to nothing else: a hub carries no vibes of its own.
+# It is published on loopback so that THE BROADCASTER'S OWN ENCODER — an OBS
+# on this machine, which is what a broadcaster actually holds — can reach the
+# ingest it is entitled to. The shipped station bundle publishes this same
+# port for this same party and this same reason; a devnet whose ingest could
+# only be reached from inside its own network would be the one place in the
+# fleet where a broadcaster is not the one supplying the vibes.
+#
+# IT IS NOT A FOURTH FREE DOOR, and the distinction is the whole of why the
+# two ports above it stay unpublished. Ingest is AUTHENTICATED — the origin
+# checks the stream key on the RTMP `publish` command, before a byte is
+# transcoded — and it is the unpaid direction BY DESIGN: supplying vibes costs
+# a broadcaster nothing per second. There is nothing behind this port to get
+# for free, because there is nothing behind it to get at all. The segment port
+# and the slot app, by contrast, hand out the very things a viber and a
+# broadcaster are supposed to pay for, and they have no key on them.
+#
+# The run's own ffmpeg still pushes from INSIDE this network when it is asked
+# to, over the same `station-origin:1935` it always used — the devnet still
+# introduces no image to encode with, and the published port adds a second way
+# in rather than replacing the first.
 #
 # ── Running it ───────────────────────────────────────────────────────────────
 #   pnpm test:devnet
@@ -270,15 +288,16 @@ services:
     restart: 'no'
 
   # The origin, built from this checkout. It ships the ffmpeg it supervises,
-  # which is also the ffmpeg that PUSHES the test pattern into its own ingest —
-  # so the devnet needs no image of its own to encode with.
+  # which is also the ffmpeg that PUSHES the test pattern into its own ingest
+  # when a run asks for one — so the devnet needs no image of its own to encode
+  # with, whether or not a broadcaster is at the keyboard.
   station-origin:
     build:
       context: ../..
       dockerfile: packages/station-origin/Dockerfile
     environment:
       TOON_SEGMENT_PORT: '3100' # vibes out — PRIVATE, never host-published
-      TOON_INGEST_PORT: '1935' # vibes in — on this network only
+      TOON_INGEST_PORT: '1935' # vibes in — authenticated, and published below
       TOON_DATA_DIR: /data
       # A deliberately small ladder, one rung of it sound only. Two rungs are
       # what the run needs — the ladder being separately addressed and
@@ -302,12 +321,21 @@ services:
     volumes:
       - ./run/station/stream.key:/run/secrets/stream.key:ro
       - station_origin_data:/data
+    ports:
+      # The broadcaster's own ingest, on loopback — `rtmp://127.0.0.1:1935/live`
+      # with the generated stream key, which is exactly the Server/Stream Key
+      # pair OBS asks for. Gated on that key before a byte is transcoded, and
+      # never paid: this is the unpaid direction, so there is nothing here to
+      # get for free. Plain RTMP, because a laptop terminates no TLS.
+      - '127.0.0.1:1935:1935'
     expose:
-      # NEITHER of these is ever published. The segment port is the
-      # payment-oblivious surface, and the ingest port carries the
-      # broadcaster's own publish, which arrives from an ffmpeg on this network.
+      # The segment port, and it is never published in any form. It serves the
+      # vibes a viber pays for, with no notion of a payment on it — so the only
+      # route to a segment is a paid packet through station-connector.
+      #
+      # 1935 needs no entry here: `ports:` already reaches this network, and the
+      # run's own ffmpeg dials `station-origin:1935` over it exactly as before.
       - '3100'
-      - '1935'
     healthcheck:
       test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
       interval: 2s

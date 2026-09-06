@@ -613,8 +613,9 @@ its own guard and both bundles publish the same connector edge port, so a devnet
 their local overlays would be fighting two guards to prove a third thing. The one thing it does not
 write for itself is the connector build: `DEVNET_CONNECTOR_IMAGE` is a required variable with no
 default, and the driver reads the pin of record out of `deploy/docker-compose.yml` and passes it
-in, so there is no third copy to drift. It is driven by `pnpm test:devnet` and by nothing else —
-see [the devnet](#the-devnet) below.
+in, so there is no third copy to drift. It is driven by `pnpm test:devnet` and `pnpm demo` and by
+nothing else — the run that proves the paid path and the one that lets a person watch it — see
+[the devnet](#the-devnet) below.
 
 Their **ports invariants are different numbers on purpose**, and the difference is the whole
 distinction between the two nodes:
@@ -623,7 +624,7 @@ distinction between the two nodes:
 | ---------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- |
 | `deploy/`        | **three** — Caddy's 80 and 443, plus the origin's RTMPS ingest 1935 | stock Caddy does not speak RTMP, so a station fronts its own uplink        |
 | `deploy/hub/`    | **two** — Caddy's 80 and 443, and nothing else                      | **a hub carries no vibes of its own**, so it has no uplink to front        |
-| `deploy/devnet/` | **none off-box** — three loopback publishes, and only for the driver | there is no public name and no certificate on a laptop, so nothing is fronted |
+| `deploy/devnet/` | **none off-box** — four loopback publishes: three for the driver, one for the broadcaster's own OBS | there is no public name and no certificate on a laptop, so nothing is fronted |
 
 **No RTMP port, service or path appears anywhere in the hub bundle**, and none may: a hub is never a
 station. In both bundles the connector's client edge is published on `127.0.0.1` only, and every app
@@ -722,7 +723,7 @@ and neither had ever been paid, and because that gap was hiding a defect — est
 routed, on the roster, and carrying nothing. `pnpm test:devnet` is the thing that would have caught
 it on the first pull, and now does.
 
-**One command, and no way to run it by hand.** There is no `docker compose up -d` recipe: the chain
+**Two commands, and no way to run it by hand.** There is no `docker compose up -d` recipe: the chain
 has to be up and the settlement contracts deployed before either connector will boot — both are
 fail-closed on their settlement configuration — and every credential and both `connector.toml` files
 are generated per run. The prerequisite is **Docker and this repository's own toolchain, and nothing
@@ -747,6 +748,38 @@ two rungs compared **byte for byte** against what the station holds; the fee ari
 enforces; and the money — the station's claim advanced by exactly its own price per pull, the
 difference from what the viber paid being exactly the hub's carriage, and the claim **redeemed on
 chain against a still-open channel**, with the token balance asserted to have moved.
+
+**`pnpm demo` is the same topology with a person in it**, and it is the other half of why the devnet
+exists: `pnpm test:devnet` is the *evidence* — every value it expects is a literal, it asserts the
+money on chain, and it goes red — and it is not a thing anybody can watch. The demo asserts nothing.
+It shares the setup, the credentials and the paid requests
+([`deploy/devnet/paid.ts`](deploy/devnet/paid.ts), extracted so that "how a slot is bought" has one
+implementation rather than two that drift silently), and differs in exactly two ways: **the vibes
+come from the broadcaster's own OBS**, and nothing is torn down after the purchase. It walks the
+same order, prints the Server and Stream Key pair OBS asks for, and then a **viber** — a different
+party with its own channel — buys `/now` and every segment as it plays, at both rungs, for as long
+as it is left running. A page on loopback shows the picture arriving, what each rung costs, how that
+splits between the broadcaster and the hub **derived from the two nodes' own published prices**, and
+a button that redeems the station's newest claim on chain while the channel stays open. Ctrl-C
+prints what was paid and tears everything down. `--pattern` swaps OBS for the run's own ffmpeg test
+pattern, so it still runs with nobody at the keyboard.
+
+**No playlist is served from a station, so the demo synthesizes one.** Every `.ts` file
+[`deploy/devnet/player.ts`](deploy/devnet/player.ts) writes into its rolling window arrived as the
+body of a fulfilled packet that spent a claim — a file there is a receipt. That is the client
+daemon's job on a real viber's machine, and the daemon is not in this repo and cannot be, so this is
+the smallest thing that stands where it stands, bound to loopback and taking no setting that could
+move it.
+
+**The devnet publishes the station's ingest port on loopback, and that is the one publish that is
+not the driver's.** It is what OBS connects to, on the same `rtmp://127.0.0.1:1935/live` plus stream
+key pair the shipped station bundle offers the same party. It is **not** a fourth free door and the
+distinction is the whole reason the other two ports stay unpublished: ingest is authenticated on the
+stream key, checked before a byte is transcoded, and it is the unpaid direction by design, so there
+is nothing behind it to get for free. **The slot app's 3200 and the origin's segment port 3100 are
+still published on no interface, in any form, not even on loopback** — they hand out the very things
+a viber and a broadcaster are supposed to pay for and have no key on them, and
+[`deploy/devnet/bundle.test.ts`](deploy/devnet/bundle.test.ts) fails on either.
 
 **The payer is [`toon-client`](https://github.com/toon-protocol/toon-client)**, pinned to an exact
 release and a **development dependency of the devnet only** — a dependency of neither package, in no
@@ -800,8 +833,9 @@ always claimed and never done — had the slot record that channel
 ([#54](https://github.com/toon-protocol/slop_machine/issues/54)), and built **the devnet node**
 (#55–#61). **There is one now**, and it is what proved the rest: `pnpm test:devnet` brings a hub and
 a station up on a local chain and ends with a viber having paid for a broadcaster's vibes across the
-hop and the broadcaster having redeemed the money on chain. Do not infer other commands from the
-sibling repos.
+hop and the broadcaster having redeemed the money on chain. **`pnpm demo` is that same topology with
+a person in it** — point OBS at the station, and a page on loopback plays your own broadcast back
+one paid packet at a time. Do not infer other commands from the sibling repos.
 
 What does exist, all run from the repo root:
 
@@ -825,6 +859,14 @@ pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/
                  # Foundry, Rust or submodules; tears everything down, volumes included, and dumps
                  # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
                  # still and runs in `pnpm test` with no daemon at all
+pnpm demo        # NOT a test and asserts nothing: the same topology with a person in it. Brings
+                 # deploy/devnet/ up, walks quote/configure/restart, buys the slot, prints the OBS
+                 # Server and Stream Key pair, and then leaves a viber buying /now and every segment
+                 # at both rungs while a page on 127.0.0.1:8088 plays them back — the spend, the
+                 # split between broadcaster and hub, and a button that redeems on chain. Ctrl-C
+                 # prints the receipt and tears it all down. `--pattern` uses the run's own ffmpeg
+                 # test pattern instead of OBS, `--port` moves the page. Runs on vite-node, because
+                 # the devnet's modules anchor on import.meta.dirname and a bundle has no directory
 pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key material where
                  # deploy/README.md says to generate the real thing, then builds the build
                  # context and EVERY published image and proves none carries it. Needs a Docker
@@ -960,6 +1002,15 @@ literal in a test. `pnpm test:image` proves that for every image this repo publi
   that reason. The corollary: `segments/` matches a directory of that name anywhere, so **no source
   directory may be called `segments`** — the origin's segmenter is `src/segmenter/`. Rename the
   source, never the rule.
+- **The same collision reaches the toolchain, not only git, and `deploy/devnet/run/` is where it
+  bites.** `pnpm demo` writes the segments a viber bought into that directory, and the format
+  scripts glob `deploy/**/*.ts` — so `tsc`, `eslint` and `prettier` all tried to parse a broadcast
+  as source, and `pnpm format:check` failed by printing binary video into the terminal. That
+  directory is generated all the way down (both `connector.toml`s, every credential, and now the
+  media), so **it is excluded from all three by directory**: `.prettierignore`, `eslint.config.js`'s
+  `ignores`, and `tsconfig.json`'s `exclude`. CI never caught it because CI never runs the demo —
+  only a person who had. Add the exclusion in all three or in none; two out of three is a toolchain
+  that breaks for whoever ran the demo last.
 
 ## Cross-repo dependencies
 

@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:image": "vitest run --config vitest.image.config.ts",
     "test:devnet": "vitest run --config vitest.devnet.config.ts",
+    "demo": "vite-node deploy/devnet/demo.ts --",
     "lint": "eslint .",
     "format": "prettier --write \"packages/*/src/**/*.ts\" \"deploy/**/*.ts\"",
     "format:check": "prettier --check \"packages/*/src/**/*.ts\" \"deploy/**/*.ts\"",
@@ -39,6 +40,7 @@
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.0.0",
     "viem": "^2.56.3",
+    "vite-node": "^3.2.4",
     "vitest": "^3.0.0",
     "yaml": "^2.9.0"
   }

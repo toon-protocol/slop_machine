@@ -20,8 +20,9 @@ a chain to settle on.
                            ╚═══════════════════════════════════════════════════╝
 
      off-box    nothing at all
-     loopback   8545 (the chain), 3000 (the hub's edge), 3001 (the station's edge)
-     neither    3200 (the slot app), 3100 (the segment port), 1935 (ingest)
+     loopback   8545 (the chain), 3000 (the hub's edge), 3001 (the station's edge),
+                1935 (the broadcaster's own RTMP ingest)
+     neither    3200 (the slot app), 3100 (the segment port)
 ```
 
 ## Nothing in `../` or `../hub/` changes
@@ -40,20 +41,26 @@ two shipped bundles pin, with no third copy to drift.
 
 ## Nothing is reachable off-box
 
-Not two doors, as a hub has, and not three, as a station has: **zero**. There is no Caddy here, no
-certificate and no public name — a laptop topology terminates no TLS — so every publish is
-`127.0.0.1`-qualified and exists only so the driver can speak to what it is driving. Two connectors
-share a machine, so their host ports differ (`3000` and `3001`) while both containers keep `3000`
-inside; that is the concrete reason this bundle could not have been assembled from the two overlays.
+There is no Caddy here, no certificate and no public name — a laptop topology terminates no TLS —
+so every publish is `127.0.0.1`-qualified, and each exists only so somebody **on this machine** can
+reach the one surface they are entitled to. Two connectors share a machine, so their host ports
+differ (`3000` and `3001`) while both containers keep `3000` inside; that is the concrete reason
+this bundle could not have been assembled from the two overlays.
 
 The two rules the shipped bundles are held to hold here unchanged, with no local-topology
 exception: **the slot app's port and the origin's segment port are published on no interface, in
-any form, not even on loopback.** Both are payment-oblivious surfaces, and a devnet that published
-either would be proving the paid path over a topology with a free door in it.
+any form, not even on loopback.** Both are payment-oblivious surfaces — they hand out the very
+things a viber and a broadcaster are supposed to pay for, and they have no key on them — so a
+devnet that published either would be proving the paid path over a topology with a free door in it.
 
-The RTMP ingest port belongs to the station half and to nothing else — a hub carries no vibes of
-its own — and it is `expose:`d rather than published, because the vibes are pushed by an ffmpeg
-inside the origin's own image, on this network.
+**The ingest port is the one publish that is not the driver's.** It belongs to the station half and
+to nothing else — a hub carries no vibes of its own — and it is published on loopback so the
+*broadcaster's own encoder* can reach the ingest it is entitled to. An OBS on this machine is what
+a broadcaster actually holds, and the shipped station bundle publishes this same port for this same
+party. It is not a fourth free door: ingest is **authenticated**, on the stream key checked before
+a byte is transcoded, and it is the **unpaid** direction by design — supplying vibes costs a
+broadcaster nothing per second, so there is nothing behind that port to get for free. The run's own
+ffmpeg still pushes from inside this network over the same `station-origin:1935` it always used.
 
 ## Running it
 
@@ -102,6 +109,57 @@ The prerequisite is **Docker and this repository's own toolchain, and nothing el
 no faucet, no testnet, no real money, and no Foundry, Rust or submodules. anvil runs in the pinned
 image; the only binary a run ever executes on the host is `docker`. With no daemon answering, the
 run refuses in one sentence that says so rather than failing somewhere further in.
+
+## Seeing it — `pnpm demo`
+
+The run above is the **evidence**: every value it expects is a literal, it asserts the money on
+chain, and it goes red. It is not a thing you can watch. `pnpm demo` is the other half — the same
+topology, the same credentials and the same paid requests
+([`paid.ts`](paid.ts), shared so that what is demonstrated is the thing that is proved), with two
+differences that are the whole point of it: **the vibes come from your own OBS**, and nothing is
+torn down after the purchase.
+
+```
+pnpm demo
+```
+
+It brings the chain and both nodes up, walks the documented broadcaster order — quote, configure,
+restart — buys the slot, and then prints the Server and Stream Key pair OBS asks for:
+
+```
+  Service      Custom…
+  Server       rtmp://127.0.0.1:1935/live
+  Stream Key   (generated for this run, printed once, never committed)
+```
+
+Set the **keyframe interval to 2 seconds** — the origin cuts 2-second segments on keyframes — and
+hit Start Streaming. Within a couple of seconds the station is on the air, and a page at
+<http://127.0.0.1:8088> is showing your broadcast coming back **one paid packet at a time**:
+
+- a **viber**, a different party with its own channel, buying `/now` and then every segment as it
+  plays, at both rungs;
+- what each rung costs and how that splits — what the station charges to terminate, what the hub
+  keeps for carrying — derived from the two nodes' own published prices rather than from a number
+  the demo holds;
+- a running total of what the viber has spent and what the broadcaster has banked off chain;
+- and a **Redeem on chain** button, which turns the newest claim into money on anvil while the
+  channel stays open and the vibes keep flowing.
+
+Every `.ts` file the page plays arrived as the body of a fulfilled packet that spent a claim, so
+the playlist it plays is one **the station never sent** — no playlist is served from a station,
+which is why the client daemon synthesizes one over loopback and why the smallest possible stand-in
+for it lives in [`player.ts`](player.ts) rather than in either app.
+
+```
+pnpm demo -- --pattern      the run's own ffmpeg test pattern, for nobody at the keyboard
+pnpm demo -- --port 9000    where the page is served
+```
+
+Ctrl-C prints what the viber paid, what the broadcaster earned, what the hub carried it for, and
+tears everything down.
+
+The demo **asserts nothing**. It is here so that a thing which is true can also be seen by somebody
+who has not read the test.
 
 [`bundle.test.ts`](bundle.test.ts) is this bundle's guard, the sibling of
 [`../bundle.test.ts`](../bundle.test.ts) and [`../hub/bundle.test.ts`](../hub/bundle.test.ts). It
