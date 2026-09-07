@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide renders the discovery grid and category browsing from real relay reads, payment-free by test
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide discovers, browses, reads broadcaster pages and vibes live through the playback contract, payment-free by test
 
 This repository is a pnpm workspace with three packages. Two are the toon apps it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -605,7 +605,9 @@ build, no server of its own — the discovery surface of epic
 static files. What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75),
 [#76](https://github.com/toon-protocol/slop_machine/issues/76),
 [#77](https://github.com/toon-protocol/slop_machine/issues/77),
-[#78](https://github.com/toon-protocol/slop_machine/issues/78))
+[#78](https://github.com/toon-protocol/slop_machine/issues/78),
+[#79](https://github.com/toon-protocol/slop_machine/issues/79) — **which completes epic #72's
+feature set**)
 is the dark shell with the four routes — `/` (the discovery grid),
 `/categories`, `/categories/:category` and `/b/:handle` (the broadcaster page; no bare vanity
 URLs, because display names are not unique and the handle is the only identity anybody grants) —
@@ -647,6 +649,31 @@ every clip event is its own clip. The **viber-count slot renders empty**: a visi
 with no value, because no source produces the number yet and a fake figure would be worse than
 none. A handle nobody announced still renders an honest page, and a station with no profile or no
 clips degrades to the handle, the ladder and "No clips yet."
+
+Since #79 the guide **vibes live, hybrid by detection** — epic #72's whole point, and its last
+slice. `src/playback/` is the guide's half of the playback contract (ADR 0005): one provider polls
+`GET /contract/v1/state` on the loopback surface of whatever pays (`VITE_PLAYBACK_URL`, falling
+back to the demo player's own `http://127.0.0.1:8088`) — an answer means a paying side is there
+and the broadcaster page's theater lights up; none answering is the **hosted mode**, where the
+same affordance renders an honest explanation of how to vibe (run the guide beside a paying
+daemon on your own machine), never an error and never a broken player. With the contract present
+a viber clicks **Vibe live** and the guide POSTs `/contract/v1/vibe`, plays the playlist the
+state names for the selected rung, and switches rungs mid-broadcast with `POST /contract/v1/rung`
+— every choice within the budget the paying side owns, which the guide reads and can never set:
+no request it makes carries a budget, and ADR 0005's reserved path refuses one by name. The
+spend, the broadcaster/hub split and each rung's price are the state's own decimal strings
+**rendered verbatim and computed nowhere in the guide**; **Stop vibing** POSTs
+`/contract/v1/stop` and the flat `spent` is what confirms the spend stopped. The media path is
+the one the demo page proves in Chromium — `hls.js`, an ordinary guide dependency (a playlist
+parser is no more payment code than a router is; the payment-free guard still scans everything
+and stays green), held close to the live edge with the native fallback where HLS is built in.
+The paying side's **origin allowlist is the seam working as designed**: a guide origin the
+paying side does not know can neither act nor read and degrades to hosted — the demo wires the
+harness's `http://127.0.0.1:4173` (both loopback spellings) into the player's `allowedOrigins`
+option, on the paying side, where nothing across the line can extend it; and the player grants
+the same allowlisted origins CORS on the playlists and segments the state names, because a
+contract naming locations its own client cannot play would be naming nothing
+(`deploy/devnet/contract.test.ts` holds both by literal).
 
 **`packages/guide/src/guide/payment-free.test.ts` is that guard**, in the style of the slot app's
 vocabulary test: it reads the package's own source and manifest and fails on a payer dependency
@@ -867,7 +894,12 @@ spend totals, playlist locations. Two rules are the point and both are held by l
 (the reserved `/contract/v1/budget` path and any smuggled `budget` key both answer `403
 budget_is_not_yours`, and the budget stands), and the spend-initiating writes check the request's
 `Origin` against the paying side's own allowlist (`403 origin_not_allowed`), because loopback does
-not fence a browser. `deploy/devnet/contract.test.ts` boots the real player standalone — a plain
+not fence a browser. Since #79 **CORS grants follow that same allowlist on the media reads too**:
+an allowlisted origin — the demo wires in the guide harness's `http://127.0.0.1:4173`, both
+loopback spellings — gets `Access-Control-Allow-Origin` on the playlists and segments the state
+names, because the guide plays them with hls.js and the browser holds those fetches to CORS; any
+other origin gets no grant there, exactly as on the contract surface.
+`deploy/devnet/contract.test.ts` boots the real player standalone — a plain
 Node HTTP server, no Docker — and runs in `pnpm test`, named by FILE in `vitest.config.ts` exactly
 as the devnet's bundle guard is; the devnet suite drives the same surface in the full topology,
 with vibing initiated across it and real money underneath.
@@ -972,15 +1004,19 @@ pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/
                  # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
                  # still and runs in `pnpm test` with no daemon at all
 pnpm test:guide  # Playwright, opt-in and NOT part of `pnpm test`: drives the guide's discovery
-                 # grid, category browsing AND the broadcaster page in real Chromium against the
-                 # RUNNING demo — `pnpm demo --pattern` must be up first, and the specs fail fast
-                 # naming that command when the relay is not there. Serves the guide itself (the
-                 # config's own vite web server), asserts the demo station's card live with its
-                 # real two-rung ladder at its real prices, browses by category, clicks through to
-                 # the broadcaster page, and PLAYS the demo's clip for real — the media element's
-                 # currentTime advancing past zero on the free fetch. Writes everything to
-                 # packages/guide/e2e/output/ (gitignored) — never to deploy/devnet/run/.
-                 # Playwright is the GLOBAL on the box, never a dependency
+                 # grid, category browsing, the broadcaster page AND vibing live in real Chromium
+                 # against the RUNNING demo — `pnpm demo --pattern` must be up first, and the
+                 # specs fail fast naming that command when the relay (or, for vibing, the
+                 # playback contract) is not there. Serves the guide itself (the config's own
+                 # vite web server, on the 4173 origin the demo's player allowlists), asserts the
+                 # demo station's card live with its real two-rung ladder at its real prices,
+                 # browses by category, clicks through to the broadcaster page, PLAYS the demo's
+                 # clip for real — the media element's currentTime advancing past zero on the
+                 # free fetch — and then vibes: clicks the live station, starts vibing through
+                 # the contract, sees the picture progress, switches rungs, reads the spend
+                 # growing and the split rendered from state, stops and sees the spend flatten.
+                 # Writes everything to packages/guide/e2e/output/ (gitignored) — never to
+                 # deploy/devnet/run/. Playwright is the GLOBAL on the box, never a dependency
 pnpm demo        # NOT a test and asserts nothing: the same topology with a person in it. Brings
                  # deploy/devnet/ up, walks quote/configure/restart, buys the slot, prints the OBS
                  # Server and Stream Key pair, and then leaves a viber buying /now and every segment

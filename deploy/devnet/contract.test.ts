@@ -50,6 +50,13 @@ const A_RUNG_THE_STATION_DOES_NOT_OFFER = '1080p';
 const A_HOSTILE_ORIGIN = 'http://a-page-the-viber-never-chose.example';
 
 /**
+ * A further origin the paying side chose to trust — the seam `demo.ts` fills
+ * with the guide's own origin. The allowlist is the paying side's own
+ * configuration, so it is handed in here exactly as a demo or a daemon would.
+ */
+const A_TRUSTED_GUIDE_ORIGIN = 'http://127.0.0.1:4173';
+
+/**
  * What the paying side's driver knows, handed in whole — the same seam
  * `demo.ts` fills from its ledger, filled here with literals so every value
  * the contract reports back can be asserted as one.
@@ -125,6 +132,7 @@ describe('the playback contract', () => {
       contract: {
         station: THE_STATION,
         budgetPerSecond: BUDGET_PER_SECOND,
+        allowedOrigins: [A_TRUSTED_GUIDE_ORIGIN],
       },
       state: () => A_DRIVER_STATE,
       redeem: async () => {},
@@ -362,5 +370,50 @@ describe('the playback contract', () => {
 
     // Idempotent, like the vibe.
     expect((await post('/contract/v1/stop')).status).toBe(200);
+  });
+
+  it('grants an allowlisted further origin the writes AND the media reads, and no other origin either', async () => {
+    // The option is the seam demo.ts fills with the guide's own origin: a
+    // web origin the paying side chose to trust both acts on the contract…
+    const write = await post(
+      '/contract/v1/rung',
+      { rung: '480p' },
+      A_TRUSTED_GUIDE_ORIGIN
+    );
+    expect(write.status).toBe(200);
+    expect(write.headers.get('access-control-allow-origin')).toBe(
+      A_TRUSTED_GUIDE_ORIGIN
+    );
+    expect((await state())['rung']).toBe('480p');
+
+    // …and reads the state its poll lives on, with the grant that lets a
+    // browser deliver the answer.
+    const read = await fetch(`${base}/contract/v1/state`, {
+      headers: { origin: A_TRUSTED_GUIDE_ORIGIN },
+    });
+    expect(read.status).toBe(200);
+    expect(read.headers.get('access-control-allow-origin')).toBe(
+      A_TRUSTED_GUIDE_ORIGIN
+    );
+
+    // CORS grants follow the allowlist on reads as well as writes (ADR
+    // 0005), and the playlists the state names are exactly such reads: an
+    // allowlisted guide plays them with hls.js, whose fetches the browser
+    // holds to CORS — without this grant the contract would name locations
+    // its own client cannot play.
+    const playlist = await fetch(`${base}/hls/audio.m3u8`, {
+      headers: { origin: A_TRUSTED_GUIDE_ORIGIN },
+    });
+    expect(playlist.status).toBe(200);
+    expect(playlist.headers.get('access-control-allow-origin')).toBe(
+      A_TRUSTED_GUIDE_ORIGIN
+    );
+
+    // While a page the viber never chose still gets no grant on the media,
+    // exactly as on the contract surface.
+    const denied = await fetch(`${base}/hls/audio.m3u8`, {
+      headers: { origin: A_HOSTILE_ORIGIN },
+    });
+    expect(denied.headers.get('access-control-allow-origin')).toBeNull();
   });
 });

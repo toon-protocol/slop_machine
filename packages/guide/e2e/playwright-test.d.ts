@@ -25,6 +25,7 @@ declare module 'playwright/test' {
     getByRole(role: string, options?: { name?: string | RegExp }): Locator;
     getByText(text: string | RegExp): Locator;
     locator(selector: string): Locator;
+    waitForTimeout(milliseconds: number): Promise<void>;
   }
 
   export interface LocatorExpectations {
@@ -54,6 +55,11 @@ declare module 'playwright/test' {
     toBeGreaterThan(expected: number): Promise<void>;
   }
 
+  export interface ValueExpectations {
+    toBe(expected: unknown): void;
+    toBeGreaterThan(expected: number): void;
+  }
+
   export const test: {
     (name: string, body: (fixtures: { page: Page }) => Promise<void>): void;
     beforeAll(body: () => Promise<void>): void;
@@ -64,6 +70,7 @@ declare module 'playwright/test' {
   export const expect: {
     (subject: Locator): LocatorExpectations;
     (subject: Page): PageExpectations;
+    (subject: number, message?: string): ValueExpectations;
     poll(
       subject: () => Promise<number>,
       options?: { timeout?: number }
