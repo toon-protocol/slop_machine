@@ -18,5 +18,14 @@
     "noImplicitOverride": true,
     "noPropertyAccessFromIndexSignature": true
   },
-  "exclude": ["node_modules", "dist", "coverage", "deploy/devnet/run"]
+  // packages/guide is a browser SPA — JSX and DOM libs its siblings must not
+  // inherit — so it is excluded here and typechecked through its own
+  // tsconfig, which the root typecheck script chains.
+  "exclude": [
+    "node_modules",
+    "dist",
+    "coverage",
+    "deploy/devnet/run",
+    "packages/guide"
+  ]
 }

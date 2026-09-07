@@ -11,9 +11,9 @@
     "test:devnet": "vitest run --config vitest.devnet.config.ts",
     "demo": "vite-node deploy/devnet/demo.ts --",
     "lint": "eslint .",
-    "format": "prettier --write \"packages/*/src/**/*.ts\" \"deploy/**/*.ts\"",
-    "format:check": "prettier --check \"packages/*/src/**/*.ts\" \"deploy/**/*.ts\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"deploy/**/*.ts\"",
+    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"deploy/**/*.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p packages/guide/tsconfig.json --noEmit"
   },
   "keywords": [
     "toon",

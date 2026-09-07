@@ -6,7 +6,10 @@ export default defineConfig({
   // This config runs every package's suites, so it needs the same build-time
   // version substitution each of those packages applies to its own bundle.
   // One `define` for both: each names its own placeholder, so a package added
-  // here adds a line rather than replacing one.
+  // here adds a line rather than replacing one. packages/guide adds none on
+  // purpose: it is a static SPA with no version surface — no /health, no
+  // image, nothing that reports a version — so a define for it would
+  // substitute a placeholder no source carries.
   define: { ...stationOriginVersionDefine, ...slotAppVersionDefine },
   test: {
     globals: true,
