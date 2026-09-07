@@ -15,11 +15,14 @@ declare module 'playwright/test' {
     filter(options: { hasText?: string | RegExp }): Locator;
     first(): Locator;
     getByTestId(testId: string): Locator;
+    click(): Promise<void>;
   }
 
   export interface Page {
     goto(url: string): Promise<unknown>;
     getByTestId(testId: string): Locator;
+    getByRole(role: string, options?: { name?: string | RegExp }): Locator;
+    getByText(text: string | RegExp): Locator;
   }
 
   export interface LocatorExpectations {
@@ -28,6 +31,14 @@ declare module 'playwright/test' {
       expected: string | RegExp,
       options?: { timeout?: number }
     ): Promise<void>;
+    toHaveCount(
+      expected: number,
+      options?: { timeout?: number }
+    ): Promise<void>;
+  }
+
+  export interface PageExpectations {
+    toHaveURL(expected: string | RegExp): Promise<void>;
   }
 
   export const test: {
@@ -38,6 +49,7 @@ declare module 'playwright/test' {
   };
 
   export function expect(subject: Locator): LocatorExpectations;
+  export function expect(subject: Page): PageExpectations;
 
   export function defineConfig<Config>(config: Config): Config;
 }
