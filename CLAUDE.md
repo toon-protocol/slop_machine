@@ -696,9 +696,10 @@ pulls one.
 **real** committed files rather than fixtures, check **every file set a bundle is run with** rather
 than only the base compose file, and keep **every expected value a literal in the test** — so a
 reverted fix fails the suite instead of quietly agreeing with itself. `vitest.config.ts`'s include
-list reaches `deploy/*.test.ts`, `deploy/hub/*.test.ts` and `deploy/devnet/bundle.test.ts`, so all
-three run in `pnpm test` with no Docker daemon; the devnet's is named by FILE rather than by glob
-because the devnet DRIVER lives in that same directory and does need one. The two things a hub
+list reaches `deploy/*.test.ts`, `deploy/hub/*.test.ts`, `deploy/devnet/bundle.test.ts` and
+`deploy/devnet/contract.test.ts`, so all of them run in `pnpm test` with no Docker daemon; the two
+devnet files are named by FILE rather than by glob because the devnet DRIVER lives in that same
+directory and does need one. The two things a hub
 guard adds over a station's: it fails on **RTMP anywhere at all** — port, service, path, or a
 directive naming the protocol — because a hub carries no vibes of its own and has no uplink to
 front; and it boots the real slot app to check the declared `request` shapes against the surface
@@ -806,6 +807,21 @@ daemon's job on a real viber's machine, and the daemon is not in this repo and c
 the smallest thing that stands where it stands, bound to loopback and taking no setting that could
 move it.
 
+**The player also serves the playback contract**
+([ADR 0005](docs/adr/0005-the-budget-lives-on-the-paying-side-of-the-loopback-line.md)) — the
+versioned loopback surface between the guide and whatever pays, which the eventual toon-client
+daemon implements from that record. Under `/contract/v1/` a guide can initiate vibing, stop it,
+select a rung, and read state — the live flag, each rung's price and its broadcaster/hub split,
+spend totals, playlist locations. Two rules are the point and both are held by literals in tests:
+**the budget lives on the paying side of the loopback line and no request across it can raise it**
+(the reserved `/contract/v1/budget` path and any smuggled `budget` key both answer `403
+budget_is_not_yours`, and the budget stands), and the spend-initiating writes check the request's
+`Origin` against the paying side's own allowlist (`403 origin_not_allowed`), because loopback does
+not fence a browser. `deploy/devnet/contract.test.ts` boots the real player standalone — a plain
+Node HTTP server, no Docker — and runs in `pnpm test`, named by FILE in `vitest.config.ts` exactly
+as the devnet's bundle guard is; the devnet suite drives the same surface in the full topology,
+with vibing initiated across it and real money underneath.
+
 **The devnet publishes the station's ingest port on loopback, and that is the one publish that is
 not the driver's.** It is what OBS connects to, on the same `rtmp://127.0.0.1:1935/live` plus stream
 key pair the shipped station bundle offers the same party. It is **not** a fourth free door and the
@@ -883,15 +899,18 @@ pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTM
                  # fresh ports against a temporary directory. Deliberately slow — real encoding
                  # is the point, because ADR 0001 is a claim about bytes. The include list is
                  # packages/*/src/**/*.test.ts, so a new package's suites are picked up with
-                 # no change here; it also covers deploy/*.test.ts, deploy/hub/*.test.ts and
-                 # deploy/devnet/bundle.test.ts, so each bundle's guard runs beside the files it
-                 # guards; smol-toml and yaml are there to read them
+                 # no change here; it also covers deploy/*.test.ts, deploy/hub/*.test.ts,
+                 # deploy/devnet/bundle.test.ts and deploy/devnet/contract.test.ts — each bundle's
+                 # guard beside the files it guards, and the playback contract's suite booting the
+                 # real player on loopback (ADR 0005); smol-toml and yaml are there to read them
 pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/devnet/ — a chain,
                  # a hub and a station — replays the settlement contracts onto anvil, generates
                  # every credential and both connector.toml files, pushes real vibes in over RTMP,
                  # and drives the whole documented path: quote, configure, restart, buy, the funded
                  # channel asserted ON CHAIN, a viber paying for segments at two rungs, the fee
-                 # arithmetic, and the broadcaster redeeming on chain. Needs a Docker daemon and no
+                 # arithmetic, the broadcaster redeeming on chain, and the playback contract
+                 # (ADR 0005) driven in place — vibing initiated across it, the state read back,
+                 # and the budget provably unraisable. Needs a Docker daemon and no
                  # Foundry, Rust or submodules; tears everything down, volumes included, and dumps
                  # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
                  # still and runs in `pnpm test` with no daemon at all

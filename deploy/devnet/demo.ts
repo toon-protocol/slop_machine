@@ -123,6 +123,14 @@ const FUNDING = {
 /** Where the page is served, unless `--port` says otherwise. */
 const DEFAULT_PORT = 8088;
 
+/**
+ * The viber's own budget, in base units per second — the paying side's figure,
+ * which ADR 0005 says nothing across the loopback line can raise. Buying the
+ * whole two-rung ladder plus the *now* runs to about 700 a second at the
+ * devnet's prices, so this covers it with room and is still a real bound.
+ */
+const BUDGET_PER_SECOND = 1000n;
+
 /** What the devnet's origin is configured to cut, and what the playlist declares. */
 const SEGMENT_SECONDS = 2;
 
@@ -379,13 +387,21 @@ async function main(): Promise<void> {
     redeemed,
   });
 
-  const player: Player = startPlayer({
+  const player: Player = await startPlayer({
     port: options.port,
     rungs: LADDER,
     // What `docker-compose.yml` configures this origin's `TOON_SEGMENT_SECONDS`
     // with. The station's own *now* reports it too, but the playlist has to
     // declare a target duration before the first pull has been paid for.
     segmentSeconds: SEGMENT_SECONDS,
+    // The playback contract (ADR 0005): the demo IS the paying side, so it
+    // starts vibing of its own accord — the state is the record, and the
+    // page's rung buttons select through the contract like any guide would.
+    contract: {
+      station: bought.prefix,
+      budgetPerSecond: BUDGET_PER_SECOND,
+      vibing: true,
+    },
     state,
     redeem: async () => {
       if (redeeming) return;
@@ -468,6 +484,10 @@ async function main(): Promise<void> {
   const cursor = new Map<string, number>();
 
   const cycle = async (): Promise<void> => {
+    // The contract's own switch: a guide that POSTed /contract/v1/stop has
+    // stopped the spend, and nothing is bought until it vibes again.
+    if (!player.vibing()) return;
+
     const answer = await serially(() =>
       pullThroughTheHub(viber, sealTo, `${bought.prefix}.now`)
     );

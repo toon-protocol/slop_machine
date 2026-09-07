@@ -154,6 +154,16 @@ category describes the vibes, not the medium — audio-only versus video is a
 rung's business, not a category's.
 _Avoid_: genre, tag, topic, game, directory
 
+## Playback contract
+
+The versioned loopback surface between the guide and whatever pays on a viber's
+machine. Across it the guide initiates and stops vibing, selects a rung, and
+reads state; the budget stays on the paying side, and nothing across the line
+can raise it. It is a recorded contract because its two sides ship separately —
+a guide meets whatever paying process a machine runs.
+_Avoid_: player API, streaming API, daemon API (an API is incidental; a
+contract is the point)
+
 ## Segment
 
 The unit in which a station's vibes are delivered — a short, self-contained span
