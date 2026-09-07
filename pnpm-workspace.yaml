@@ -10,3 +10,6 @@ autoInstallPeers: false
 # every `tsup` build fails on a missing binary.
 allowBuilds:
   esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@toon-protocol/client@3.0.0'

@@ -203,7 +203,7 @@ const IGNORES_TS_BY_EXTENSION = /(^|\/)\*\.ts$/;
  * is `deny_unknown_fields` and its startup is fail-closed, so a schema drift
  * under a moving tag would be an outage rather than a degraded run.
  */
-const EXPECTED_CONNECTOR_TAG = 'rust-2026.08.28.1';
+const EXPECTED_CONNECTOR_TAG = 'rust-sha-97f45a0';
 const EXPECTED_CONNECTOR_IMAGE = `ghcr.io/toon-protocol/connector:${EXPECTED_CONNECTOR_TAG}`;
 
 /** Anything that reads as a connector build handle, in config or in prose. */
@@ -240,6 +240,12 @@ const NOT_SCANNED_FOR_A_PIN = new Set([
   'dist',
   'coverage',
   'pnpm-lock.yaml',
+  // The devnet's generated working directory: gitignored all the way down, so
+  // nothing in it is a committed pin — and after a `pnpm demo --anyone` run it
+  // holds the anon daemon's HiddenServiceDir, which the daemon owns and the
+  // host user cannot even read, so a walk that descends dies on EACCES rather
+  // than finding anything.
+  'run',
 ]);
 
 // ── Healthchecks ─────────────────────────────────────────────────────────────

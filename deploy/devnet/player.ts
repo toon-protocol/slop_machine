@@ -121,7 +121,10 @@ export interface ContractRung {
   price: string;
   toStation: string;
   toHub: string;
-  /** Where this rung's synthesized playlist is served, on loopback. */
+  /**
+   * Where this rung's synthesized playlist is served — named from the asking
+   * request's own Host, so the location works for whoever fetched the state.
+   */
   playlist: string;
   edge: number | null;
   bought: number;
@@ -189,8 +192,13 @@ export interface PlayerOptions {
   clip?: ClipMedia;
   /** What the page asks for once a second. */
   state: () => DemoState;
-  /** What the page's one button does: redeem the station's latest claim, on chain. */
-  redeem: () => Promise<void>;
+  /**
+   * What the page's one button does: redeem the station's latest claim, on
+   * chain. It is the HOST's affordance — the broadcaster's own operator write
+   * — so a viewer's player omits it, the page hides the button, and
+   * `/api/redeem` answers by name rather than pretending.
+   */
+  redeem?: () => Promise<void>;
 }
 
 export interface Player {
@@ -241,7 +249,25 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
   let baseUrl = '';
   const playlistUrl = (rung: string): string => `${baseUrl}/hls/${rung}.m3u8`;
 
-  const contractState = (): ContractState => {
+  /**
+   * The base the ASKING client can actually fetch from. The state's playlist
+   * locations must work for whoever reads them — the local page, a LAN
+   * forward, an https tunnel — so they are named from the request's own Host
+   * (and forwarded proto, when a fronting proxy states one), never from the
+   * loopback bind. The URIs inside a playlist are relative and resolve
+   * against whichever base served it, so this one field is the whole of it.
+   */
+  const requestBase = (request: IncomingMessage): string => {
+    const stated = request.headers['x-forwarded-proto'];
+    const proto = (Array.isArray(stated) ? stated[0] : stated)
+      ?.split(',')[0]
+      ?.trim();
+    const host = request.headers.host;
+    if (host === undefined || host.length === 0) return baseUrl;
+    return `${proto !== undefined && proto.length > 0 ? proto : 'http'}://${host}`;
+  };
+
+  const contractState = (base: string): ContractState => {
     const driver = options.state();
     return {
       contract: CONTRACT_VERSION,
@@ -256,7 +282,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
         price: rung.price,
         toStation: rung.toStation,
         toHub: rung.toHub,
-        playlist: playlistUrl(rung.rung),
+        playlist: `${base}/hls/${rung.rung}.m3u8`,
         edge: rung.edge,
         bought: rung.bought,
         spent: rung.spent,
@@ -325,7 +351,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       if (request.method !== 'GET') {
         return answer(405, { error: 'method_not_allowed' });
       }
-      return answer(200, contractState());
+      return answer(200, contractState(requestBase(request)));
     }
 
     const write = /^\/contract\/v1\/(vibe|stop|rung)$/.exec(path);
@@ -369,11 +395,11 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
             return answer(404, { error: 'unknown_station' });
           }
           vibing = true;
-          return answer(200, contractState());
+          return answer(200, contractState(requestBase(request)));
         }
         case 'stop': {
           vibing = false;
-          return answer(200, contractState());
+          return answer(200, contractState(requestBase(request)));
         }
         case 'rung': {
           if (typeof body['rung'] !== 'string') {
@@ -385,7 +411,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
             return answer(404, { error: 'unknown_rung' });
           }
           selectedRung = body['rung'];
-          return answer(200, contractState());
+          return answer(200, contractState(requestBase(request)));
         }
         default:
           return answer(404, { error: 'unknown_contract_path' });
@@ -417,19 +443,36 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     if (path === '/api/state') {
       // The page's superset: the demo's own extras plus the contract's two
       // facts the page follows — whether the paying side is vibing, and which
-      // rung the guide selected.
+      // rung the guide selected. `redeemable` says whether the redeem
+      // affordance exists at all: it is the broadcaster's own operator write,
+      // so a viewer's player has none and the page hides the button.
       return send(
         response,
         200,
         'application/json',
-        JSON.stringify({ ...options.state(), vibing, rung: selectedRung })
+        JSON.stringify({
+          ...options.state(),
+          vibing,
+          rung: selectedRung,
+          redeemable: options.redeem !== undefined,
+        })
       );
     }
     if (path === '/api/redeem' && request.method === 'POST') {
+      const redeem = options.redeem;
+      if (redeem === undefined) {
+        // A viewer's player: redeeming is the broadcaster's write, and this
+        // side holds no key that could make it. Said by name.
+        return send(
+          response,
+          404,
+          'application/json',
+          JSON.stringify({ error: 'not_the_broadcaster' })
+        );
+      }
       // The answer is the state, so the page learns what moved from the same
       // place it learns everything else rather than from this reply.
-      return void options
-        .redeem()
+      return void redeem()
         .then(() =>
           send(response, 200, 'application/json', JSON.stringify({ ok: true }))
         )

@@ -38,6 +38,10 @@
 #   station-connector   127.0.0.1:3001   the station's client edge
 #   station-origin      127.0.0.1:1935   the broadcaster's own RTMP ingest
 #   hub-relay           127.0.0.1:7100   the relay's FREE NIP-01 reads
+#   hub-anon            127.0.0.1:9050   SOCKS for the host's payers — `--anyone`
+#                                        runs only; the service is behind a
+#                                        profile and its own comment says why
+#                                        this is not a free door
 #
 # The relay's read publish is not a free door either, and for the opposite
 # reason from ingest's: NIP-01 reads are free BY DESIGN — announcements are
@@ -131,6 +135,12 @@ services:
     image: ghcr.io/foundry-rs/foundry:v1.4.0@sha256:f6a3fd201ae617fdc67bf7b3db9abdca7678e2589e15eda6bc84f88eb5239e04
     command:
       - 'anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10'
+    networks:
+      default:
+        # FIXED, because hub-anon's `HiddenServicePort 8545` names this
+        # address at config-parse time — same rule as hub-connector's, held to
+        # `anon.ts` by the bundle guard.
+        ipv4_address: 10.213.0.20
     ports:
       # Loopback only, like everything else here. The driver deploys the
       # settlement contracts over this and reads balances back over it.
@@ -166,6 +176,13 @@ services:
     # in, and the devnet therefore runs exactly the connector the two shipped
     # bundles pin, with nothing here that can drift away from it.
     image: ${DEVNET_CONNECTOR_IMAGE:?the driver passes the pin from deploy/docker-compose.yml — run `pnpm test:devnet` rather than `docker compose up`}
+    networks:
+      default:
+        # FIXED, because hub-anon's `HiddenServicePort 80` names this address
+        # and anon resolves it when it PARSES its config — long before this
+        # container exists. `anon.ts` holds the same literal, and the bundle
+        # guard holds the two files to each other.
+        ipv4_address: 10.213.0.10
     volumes:
       # GENERATED, not committed: the chain repointed at the anvil service, the
       # replayed registry and token addresses, this hub's four routes, and its
@@ -217,6 +234,12 @@ services:
   # publishes this same port for this same reason.
   hub-relay:
     image: ghcr.io/toon-protocol/relay:release
+    networks:
+      default:
+        # FIXED, because hub-anon's guide service forwards its port 7100 to
+        # this address — resolved when anon PARSES its config, like the other
+        # three pins, and held to `anon.ts` by the bundle guard.
+        ipv4_address: 10.213.0.40
     environment:
       TOON_BLS_PORT: '3100' # paid writes — PRIVATE, only hub-connector dials it
       TOON_RELAY_PORT: '7100' # free reads — published below, for the driver
@@ -319,6 +342,63 @@ services:
       start_period: 2s
     restart: 'no'
 
+  # ── The hub's way onto the Anyone network (`pnpm demo --anyone` only) ──────
+  #
+  # BEHIND A PROFILE, so every existing `up` — `pnpm test:devnet`'s included —
+  # runs exactly the topology it always ran: a service with a profile is
+  # started by nothing that does not name the profile.
+  #
+  # ONE daemon, both jobs: it hosts the hidden service that fronts the hub's
+  # client edge and the chain's RPC, and it serves SOCKS to the host's own
+  # payers. The connector repo's `local/anyone` rehearsal splits those across
+  # two daemons to prove network isolation; nothing here is proving that, so
+  # one bootstrap stands where two would.
+  #
+  # The anonrc is GENERATED (./run/hub-anon/anonrc, from anon.ts) and its
+  # HiddenServicePort targets are the fixed addresses this file pins on
+  # hub-connector and chain, because anon resolves them when it parses its
+  # config. The HS directory is a BIND MOUNT, not a named volume, and the one
+  # writable bind in this file: `down --volumes` must not rotate the station's
+  # public address every run, and the address is exactly what that directory
+  # holds.
+  hub-anon:
+    build:
+      context: ./anon
+    profiles: ['anyone']
+    init: true
+    volumes:
+      - ./run/hub-anon/anonrc:/etc/anon/anonrc:ro
+      # The two HiddenServiceDirs — each holds a .anyone address and the key
+      # behind it. WRITABLE, uniquely: the daemon generates and maintains what
+      # is in them. The first is the hub's paid edge; the second is the
+      # GUIDE's page, a second service on this same daemon, its address just
+      # as stable across runs.
+      - ./run/hub-anon/hs:/var/lib/anon/hidden_service
+      - ./run/hub-anon/guide-hs:/var/lib/anon/guide_service
+    networks:
+      default:
+        ipv4_address: 10.213.0.30
+    ports:
+      # The SOCKS side, on loopback, for the HOST'S OWN PAYERS — in `--anyone`
+      # mode the broadcaster and the demo's viber dial the hub at its .anyone
+      # address through this. It is a driver publish on exactly the terms of
+      # the other four, and not a free door: SOCKS into a circuit reaches only
+      # what a hidden service itself fronts, which here is the hub's PAID
+      # client edge and the chain — the same two surfaces the loopback
+      # publishes above already offer this machine for nothing.
+      - '127.0.0.1:9050:9050'
+    healthcheck:
+      # A container that is Up is not a container with a circuit, and a
+      # hostname file exists long before a descriptor is published — so this
+      # gates on the SOCKS port ANSWERING, and the driver additionally waits
+      # for `Bootstrapped 100%` in the log before it trusts the address.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9050' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: 'no'
+
   # ── The station ────────────────────────────────────────────────────────────
   #
   # The broadcaster's own node, and the counterparty the hub carries packets
@@ -412,6 +492,20 @@ services:
       retries: 30
       start_period: 2s
     restart: 'no'
+
+networks:
+  # The default network every service already sat on, now with a PINNED
+  # subnet so three services can hold fixed addresses — hub-anon's
+  # HiddenServicePort targets are resolved when anon parses its config, so
+  # they must be addresses that exist before any container does. RFC1918 and
+  # from 10/8, outside docker's own default pools, for the two reasons
+  # `anon.ts` gives: no collision with an auto-assigned network, and a source
+  # address the daemon's SocksPolicy accepts. Non-anyone runs are unchanged
+  # by this in everything but the numbers a container happens to get.
+  default:
+    ipam:
+      config:
+        - subnet: 10.213.0.0/16
 
 volumes:
   # No volume for the chain: anvil holds its state in memory, so a run that is

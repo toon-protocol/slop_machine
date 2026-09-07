@@ -27,10 +27,20 @@
  *
  *   pnpm demo -- --pattern     the run's own ffmpeg test pattern instead of OBS
  *   pnpm demo -- --port 8088   where the page is served
+ *   pnpm demo -- --anyone      host the hub behind an Anyone-network hidden
+ *                              service, so REMOTE viewers can pay for the
+ *                              broadcast over the circuit
  *
  * `--pattern` exists so the demo still runs with nobody at the keyboard —
  * it pushes the same generated pattern `devnet.test.ts` broadcasts, from the
  * ffmpeg inside the origin's own image, over this network.
+ *
+ * `--anyone` fronts the hub's client edge and the chain's RPC with ONE hidden
+ * service (the `hub-anon` compose service, behind a profile so nothing else
+ * ever starts it), makes every payer here dial the hub at its `.anyone`
+ * address through the daemon's SOCKS side, and prints three funded keys and
+ * the exact `pnpm demo:viewer` command a remote viewer runs. The address is
+ * persisted in `run/hub-anon/hs/` so it survives across runs.
  *
  * ## The one thing that is NOT like the test
  *
@@ -64,24 +74,41 @@ import {
 import {
   connectorPinOfRecord,
   down,
+  execIn,
   logs,
   requireDockerDaemon,
   restart,
   up,
 } from './compose.js';
-import { generatePayerKey, openPayer } from './payer.js';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import {
+  ANYONE_PROFILE,
+  GATEWAY_IPV4,
+  GUIDE_PORT,
+  HS_HOSTNAME_PATTERN,
+} from './anon.js';
+import { startGuideServer, type GuideServer } from './guide-server.js';
+import {
+  generatePayerKey,
+  openPayer,
+  waitForClientEdge,
+  type PayerKey,
+} from './payer.js';
+import {
+  createLedger,
+  createViberCycle,
+  withCircuitPatience,
+  type Ledger,
+  type RungPrices,
+} from './viber-loop.js';
 import {
   startBroadcasting,
   stationNow,
   stopBroadcasting,
   type StationNow,
 } from './vibes.js';
-import {
-  attemptBuy,
-  pullQuote,
-  pullThroughTheHub,
-  type BoughtSlot,
-} from './paid.js';
+import { attemptBuy, pullQuote, type BoughtSlot } from './paid.js';
 import {
   broadcasterVoice,
   publishClip,
@@ -149,7 +176,16 @@ const BUDGET_PER_SECOND = 1000n;
  * (ADR 0005): it is wired HERE, on the paying side, and nothing across the
  * line can extend it.
  */
-const GUIDE_ORIGINS = ['http://127.0.0.1:4173', 'http://localhost:4173'];
+const GUIDE_ORIGINS = [
+  'http://127.0.0.1:4173',
+  'http://localhost:4173',
+  // The guide as GitHub Pages hosts it — this repository's own static build
+  // at its canonical Pages origin. An https page may still reach loopback
+  // (browsers exempt 127.0.0.1 from mixed-content rules), so the hosted page
+  // talks to THIS paying side and to the relay's local reads exactly as the
+  // vite-served one does.
+  'https://toon-protocol.github.io',
+];
 
 /** What the devnet's origin is configured to cut, and what the playlist declares. */
 const SEGMENT_SECONDS = 2;
@@ -171,6 +207,42 @@ const PREROLL_SEGMENTS = 3;
  * discontinuity.
  */
 const MAX_SEGMENTS_BEHIND = 10;
+
+/**
+ * The same two numbers, widened for `--anyone` — and ONLY there. A pull over
+ * the circuit pays for several overlay hops each way, so its round trip is
+ * tens of loopback's: a viber that started three segments back would spend
+ * its whole preroll on the first exchange, and the 10-segment jump threshold
+ * would fire on ordinary circuit jitter rather than on real drift. Both stay
+ * under the station's 20-segment window, which is the number that makes a
+ * jump mean anything.
+ */
+const PREROLL_SEGMENTS_ANYONE = 5;
+const MAX_SEGMENTS_BEHIND_ANYONE = 15;
+
+/** The SOCKS side of the hub's own daemon, as `docker-compose.yml` publishes it. */
+const HUB_SOCKS_PROXY = 'socks5h://127.0.0.1:9050';
+
+/** How long a first bootstrap onto the live Anyone network may take. */
+const HS_BOOTSTRAP_TIMEOUT_MS = 5 * 60_000;
+
+/** How many remote viewers an `--anyone` run funds keys for. */
+const VIEWER_KEYS = 3;
+
+/**
+ * The guide's static build, as `vite build` leaves it. The DRIVER never runs
+ * that build — it spawns nothing but docker, and the build bakes this run's
+ * own guide address in as `VITE_RELAY_URL` — so this path either holds a
+ * build the user made or the demo prints the exact command that makes one.
+ */
+const GUIDE_DIST = resolve(
+  import.meta.dirname,
+  '..',
+  '..',
+  'packages',
+  'guide',
+  'dist'
+);
 
 // ── The announcements (ADR 0004) ─────────────────────────────────────────────
 
@@ -198,33 +270,9 @@ const STATION_CATEGORIES = ['slop', 'demo'];
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_EXPIRES_IN_SECONDS = 45;
 
-// ── The ledger ───────────────────────────────────────────────────────────────
-
-/**
- * What the viber has spent, and how it split.
- *
- * `toStation` and `toHub` are DERIVED FROM THE TWO NODES' OWN PRICES rather
- * than from a fee this file knows: the station publishes what it charges to
- * terminate, the hub's purchase answer says what it charges to carry, and the
- * difference is the hub's. A demo that hard-coded 20 would be showing its own
- * arithmetic.
- */
-interface Ledger {
-  spent: bigint;
-  toStation: bigint;
-  toHub: bigint;
-  packets: number;
-  perRung: Map<string, { bought: number; spent: bigint }>;
-}
-
-interface RungPrices {
-  /** What a viber pays for one segment at this rung, across the hop. */
-  price: bigint;
-  /** What the station charges to terminate it. */
-  toStation: bigint;
-  /** What the hub keeps for carrying it. */
-  toHub: bigint;
-}
+// The ledger, the one-at-a-time queue and the pull cycle live in
+// `viber-loop.ts` — one implementation, shared with the remote viewer, so
+// that "how a viber buys a broadcast" cannot drift into two.
 
 async function main(): Promise<void> {
   const options = readArguments(process.argv.slice(2));
@@ -265,7 +313,51 @@ async function main(): Promise<void> {
     token: deployment.token,
     decimals: TOKEN_DECIMALS,
   };
-  renderHubConnectorToml(chain, HUB_ADDRESS);
+
+  // ── The hidden service, when asked for ─────────────────────────────────────
+  //
+  // BEFORE the hub's configuration can be rendered, because the hub has to
+  // advertise the address and the address does not exist until the daemon has
+  // generated it — the same circle a real operator breaks by starting their
+  // daemon first and copying the hostname down. The daemon's own healthcheck
+  // gates on SOCKS answering; full bootstrap and the address are waited for
+  // here, because a container that is Up is not a container with a circuit.
+  let hubHiddenService: string | null = null;
+  let guideHiddenService: string | null = null;
+  let guide: GuideServer | null = null;
+  if (options.anyone) {
+    await up(['hub-anon'], { profiles: [ANYONE_PROFILE] });
+    say('anon is up — bootstrapping onto the live Anyone network…');
+    const addresses = await waitForHiddenService();
+    hubHiddenService = addresses.hub;
+    guideHiddenService = addresses.guide;
+    say(`the hub's hidden-service address is http://${hubHiddenService}`);
+    say(`the guide's hidden-service address is http://${guideHiddenService}`);
+
+    // ── The guide, when it has been built ────────────────────────────────────
+    //
+    // The daemon forwards the guide service's port 80 to the driver's own
+    // static server on the compose network's GATEWAY address — the one
+    // address on that network that is the host — plus loopback for checking
+    // it here. The BUILD is the user's, never the driver's: the devnet spawns
+    // nothing but docker, and the build bakes VITE_RELAY_URL, which is this
+    // run's stable guide address — one build per address, not per run. A
+    // missing build is an honest absence with the exact command, never a
+    // broken page.
+    guide = await startGuideIfBuilt(guideHiddenService);
+  }
+
+  // In `--anyone` mode every payer — the broadcaster, this run's own viber,
+  // and any remote viewer — dials the hub at its `.anyone` address, so that
+  // is what the hub advertises; otherwise its payers are on this machine's
+  // loopback publish, exactly as `devnet.test.ts` renders it.
+  renderHubConnectorToml(
+    chain,
+    HUB_ADDRESS,
+    hubHiddenService === null
+      ? `${HUB_EDGE_URL}/ilp`
+      : `http://${hubHiddenService}/ilp`
+  );
   // At a placeholder its hub never granted it, which is where a broadcaster's
   // node actually starts.
   renderStationConnectorToml(chain, PLACEHOLDER_STATION_APEX);
@@ -273,6 +365,37 @@ async function main(): Promise<void> {
   await up(NODE_SERVICES);
   await readSelfDescription(`${HUB_EDGE_URL}/ilp`);
   say('hub and station up');
+
+  // The address exists; now wait until it ANSWERS. A fresh descriptor takes a
+  // minute or two to propagate after bootstrap, and a payer that dials into
+  // that window dies on `could not reach the connector client edge` — which is
+  // a bring-up failure, not a payment one, so it is waited out here rather
+  // than left to `withCircuitPatience`'s few attempts.
+  if (hubHiddenService !== null) {
+    say('waiting for the hidden service to answer through the circuit…');
+    await waitForClientEdge({
+      connectorUrl: `http://${hubHiddenService}`,
+      socksProxy: HUB_SOCKS_PROXY,
+      rpcUrl: CHAIN_RPC_URL,
+      say,
+    });
+    say('the circuit answers — the hidden service is live');
+  }
+
+  // How this run's own payers reach the hub: over the circuit when there is
+  // one — the point of `--anyone` is that the paid path rides it — and over
+  // the loopback publish otherwise. The chain stays direct either way: it is
+  // this machine's own anvil, and `proxyRpc: false` is the documented opt-out
+  // for exactly that case (connector ADR 0070 decision 4; `local/anyone`'s
+  // payer takes the same one).
+  const payerReach =
+    hubHiddenService === null
+      ? { connectorUrl: HUB_EDGE_URL }
+      : {
+          connectorUrl: `http://${hubHiddenService}`,
+          socksProxy: HUB_SOCKS_PROXY,
+          proxyRpc: false,
+        };
 
   // ── The broadcaster ────────────────────────────────────────────────────────
   //
@@ -286,17 +409,26 @@ async function main(): Promise<void> {
     printObsInstructions(credentials.station.streamKey);
   }
 
-  const broadcaster = await openPayer({
-    who: 'broadcaster',
-    connectorUrl: HUB_EDGE_URL,
-    rpcUrl: CHAIN_RPC_URL,
-    token: deployment.token,
-    key: generatePayerKey(),
-    funding: FUNDING,
-  });
+  const onCircuit = hubHiddenService !== null;
+  const broadcaster = await withCircuitPatience(
+    onCircuit,
+    "the broadcaster's channel",
+    say,
+    () =>
+      openPayer({
+        who: 'broadcaster',
+        ...payerReach,
+        rpcUrl: CHAIN_RPC_URL,
+        token: deployment.token,
+        key: generatePayerKey(),
+        funding: FUNDING,
+      })
+  );
 
   // The documented order, executed: quote, configure, restart.
-  const quote = await pullQuote(broadcaster, HUB_ADDRESS);
+  const quote = await withCircuitPatience(onCircuit, 'the quote', say, () =>
+    pullQuote(broadcaster, HUB_ADDRESS)
+  );
   say(
     `quoted: the hub would grant "${quote.prefix}" for ${quote.slotPrice.toString()} a period — that quote cost ${quote.paid.toString()}`
   );
@@ -305,10 +437,14 @@ async function main(): Promise<void> {
   await restart('station-connector');
   const station = await readSelfDescription(`${STATION_EDGE_URL}/ilp`);
 
-  const purchase = await attemptBuy(
-    broadcaster,
-    HUB_ADDRESS,
-    STATION_URL_FOR_THE_HUB
+  // Safe to repeat over a flaky circuit: the buy is retry-safe by the slot
+  // app's own design — a repeat finds the established peering, deposits only
+  // a shortfall, and upserts the routes.
+  const purchase = await withCircuitPatience(
+    onCircuit,
+    'the purchase',
+    say,
+    () => attemptBuy(broadcaster, HUB_ADDRESS, STATION_URL_FOR_THE_HUB)
   );
   if (purchase.status !== 200) {
     throw new Error(
@@ -330,19 +466,25 @@ async function main(): Promise<void> {
   // URL the player serves; the heartbeat starts once the station is on the
   // air.
   const voice = broadcasterVoice(credentials.station.nostrSecretKey);
-  await publishProfile(broadcaster, HUB_ADDRESS, voice, BROADCASTER_PROFILE);
-  await publishStationAnnouncement(broadcaster, HUB_ADDRESS, voice, {
-    prefix: bought.prefix,
-    segmentSeconds: SEGMENT_SECONDS,
-    rungs: LADDER.flatMap((rung) => {
-      const published = station.routes.find(
-        (route) => route.prefix === `${bought.prefix}.${rung}`
-      );
-      return published === undefined ? [] : [{ rung, price: published.price }];
-    }),
-    categories: STATION_CATEGORIES,
-    about: STATION_ABOUT,
-  });
+  await withCircuitPatience(onCircuit, 'the profile announcement', say, () =>
+    publishProfile(broadcaster, HUB_ADDRESS, voice, BROADCASTER_PROFILE)
+  );
+  await withCircuitPatience(onCircuit, 'the station announcement', say, () =>
+    publishStationAnnouncement(broadcaster, HUB_ADDRESS, voice, {
+      prefix: bought.prefix,
+      segmentSeconds: SEGMENT_SECONDS,
+      rungs: LADDER.flatMap((rung) => {
+        const published = station.routes.find(
+          (route) => route.prefix === `${bought.prefix}.${rung}`
+        );
+        return published === undefined
+          ? []
+          : [{ rung, price: published.price }];
+      }),
+      categories: STATION_CATEGORIES,
+      about: STATION_ABOUT,
+    })
+  );
   say(
     `announced: profile and station are on the relay, signed by ${voice.pubkey.slice(0, 12)}…`
   );
@@ -367,55 +509,56 @@ async function main(): Promise<void> {
   }
 
   // ── The viber ──────────────────────────────────────────────────────────────
-  const viber = await openPayer({
-    who: 'viber',
-    connectorUrl: HUB_EDGE_URL,
-    rpcUrl: CHAIN_RPC_URL,
-    token: deployment.token,
-    key: generatePayerKey(),
-    funding: FUNDING,
-  });
+  const viber = await withCircuitPatience(
+    onCircuit,
+    "the viber's channel",
+    say,
+    () =>
+      openPayer({
+        who: 'viber',
+        ...payerReach,
+        rpcUrl: CHAIN_RPC_URL,
+        token: deployment.token,
+        key: generatePayerKey(),
+        funding: FUNDING,
+      })
+  );
   const sealTo = station.edgeIdentity.publicKey;
 
-  const ledger: Ledger = {
-    spent: 0n,
-    toStation: 0n,
-    toHub: 0n,
-    packets: 0,
-    perRung: new Map(LADDER.map((rung) => [rung, { bought: 0, spent: 0n }])),
-  };
+  const ledger: Ledger = createLedger(LADDER);
 
-  /**
-   * Every paid send goes through here, one at a time.
-   *
-   * A claim strictly advances a nonce the connector has already banked, so two
-   * pulls signing at once is two claims racing for one number — and the loser
-   * is refused for a reason that has nothing to do with the demo.
-   */
-  let queue: Promise<unknown> = Promise.resolve();
-  const serially = <T>(work: () => Promise<T>): Promise<T> => {
-    const next = queue.then(work, work);
-    queue = next.then(
-      () => undefined,
-      () => undefined
-    );
-    return next;
-  };
-
-  const spend = (rung: string, paid: bigint): void => {
-    const split = prices.get(rung);
-    ledger.spent += paid;
-    ledger.packets += 1;
-    if (split !== undefined) {
-      ledger.toStation += split.toStation;
-      ledger.toHub += paid - split.toStation;
+  // ── The remote viewers, when there is a circuit for them ───────────────────
+  //
+  // Three keys, each funded with gas and the settlement token on this run's
+  // chain — no channel: a viewer's own client opens one over the circuit,
+  // which is the half `pnpm demo:viewer` exists to prove. What is printed is
+  // everything a viewer needs and nothing the host must hold back: the
+  // address is public, the seal-to key is the station's PUBLIC edge identity
+  // (a viewer seals segment pulls to the station and cannot read the
+  // station's self-description, so the host hands it out), and the keys are
+  // this play-chain's money.
+  if (hubHiddenService !== null) {
+    const viewerKeys: PayerKey[] = [];
+    for (let held = 0; held < VIEWER_KEYS; held += 1) {
+      const key = generatePayerKey();
+      await fundGas(CHAIN_RPC_URL, key.address, GAS_PER_NODE);
+      await mintToken(
+        CHAIN_RPC_URL,
+        deployment.token,
+        key.address,
+        TOKEN_PER_NODE
+      );
+      viewerKeys.push(key);
     }
-    const held = ledger.perRung.get(rung);
-    if (held !== undefined) {
-      held.bought += 1;
-      held.spent += paid;
-    }
-  };
+    printViewerInstructions({
+      hiddenService: hubHiddenService,
+      guideHiddenService,
+      stationPrefix: bought.prefix,
+      sealTo,
+      keys: viewerKeys,
+      prices,
+    });
+  }
 
   // ── What the page reads ────────────────────────────────────────────────────
   let live = false;
@@ -473,7 +616,15 @@ async function main(): Promise<void> {
     contract: {
       station: bought.prefix,
       budgetPerSecond: BUDGET_PER_SECOND,
-      allowedOrigins: GUIDE_ORIGINS,
+      // The paying side's own allowlist (ADR 0005), extended AT RUNTIME with
+      // the guide's hidden-service origin when there is one: a page served at
+      // its .anyone address is still this viber's own guide, and the grant
+      // covers both the contract writes and the CORS on the playlists and
+      // segments the state names.
+      allowedOrigins:
+        guideHiddenService === null
+          ? GUIDE_ORIGINS
+          : [...GUIDE_ORIGINS, `http://${guideHiddenService}`],
       vibing: true,
     },
     // The demo's one clip: real sound this run serves itself, free to read.
@@ -527,12 +678,15 @@ async function main(): Promise<void> {
   // from a free fetch, for real. On a real station this URL is an Arweave
   // gateway's; the shape of the event is identical.
   if (player.clipUrl !== null) {
-    await publishClip(broadcaster, HUB_ADDRESS, voice, {
-      url: player.clipUrl,
-      title: FIRST_LIGHT.title,
-      durationSeconds: FIRST_LIGHT.durationSeconds,
-      description: FIRST_LIGHT.description,
-    });
+    const clipUrl = player.clipUrl;
+    await withCircuitPatience(onCircuit, 'the clip announcement', say, () =>
+      publishClip(broadcaster, HUB_ADDRESS, voice, {
+        url: clipUrl,
+        title: FIRST_LIGHT.title,
+        durationSeconds: FIRST_LIGHT.durationSeconds,
+        description: FIRST_LIGHT.description,
+      })
+    );
     say(`a clip is on the relay: "${FIRST_LIGHT.title}" at ${player.clipUrl}`);
   }
 
@@ -553,6 +707,7 @@ async function main(): Promise<void> {
   });
 
   const tearDown = async (): Promise<void> => {
+    await guide?.close();
     await player.close();
     await viber.client.close();
     await broadcaster.client.close();
@@ -602,64 +757,39 @@ async function main(): Promise<void> {
 
   // ── The viber's loop ───────────────────────────────────────────────────────
   //
-  // One `now` per cycle, paid for like everything else, and then every span
-  // between where this viber got to and where the live edge is. There is no
-  // free call in here: `/now` is a priced address of the station's precisely
-  // so that finding the live edge is not the one thing a station gives away.
-  const cursor = new Map<string, number>();
-
-  const cycle = async (): Promise<void> => {
-    // The contract's own switch: a guide that POSTed /contract/v1/stop has
-    // stopped the spend, and nothing is bought until it vibes again.
-    if (!player.vibing()) return;
-
-    const answer = await serially(() =>
-      pullThroughTheHub(viber, sealTo, `${bought.prefix}.now`)
-    );
-    spend('now', answer.paid);
-    if (answer.status !== 200) return;
-
-    edge = JSON.parse(answer.text) as StationNow;
-    live = edge.live;
-
-    for (const rung of LADDER) {
-      const latest = edge.rungs.find((held) => held.rung === rung)?.sequence;
-      if (latest === null || latest === undefined) continue;
-
-      let at = cursor.get(rung);
-      if (at === undefined) at = Math.max(0, latest - PREROLL_SEGMENTS);
-      // Fallen behind the station's own window: the vibes in between are
-      // being evicted underneath us, so skip to where they still exist.
-      if (latest - at > MAX_SEGMENTS_BEHIND) {
-        at = latest - PREROLL_SEGMENTS;
-        player.missed(rung);
-      }
-
-      for (; at <= latest; at += 1) {
-        if (stopping) return;
-        // Bound to a const before it is handed to the queue. `serially` runs
-        // its closure later than it is written, and a closure over the loop
-        // variable would pay for whichever sequence the loop had reached by
-        // then rather than the one it meant to buy.
-        const wanted = at;
-        const segment = await serially(() =>
-          pullThroughTheHub(
-            viber,
-            sealTo,
-            `${bought.prefix}.${rung}`,
-            `${String(wanted)}.ts`
-          )
-        );
-        spend(rung, segment.paid);
-
-        // A 404 rode home on a FULFILL and cost exactly what a 200 costs —
-        // that is what a paid answer is. It is simply not vibes.
-        if (segment.status === 200) player.publish(rung, wanted, segment.body);
-        else player.missed(rung);
-      }
-      cursor.set(rung, at);
-    }
-  };
+  // The shared cycle (`viber-loop.ts`): one `now` per call, paid for like
+  // everything else, and then every span between where this viber got to and
+  // where the live edge is. There is no free call in there — `/now` is a
+  // priced address of the station's precisely so that finding the live edge
+  // is not the one thing a station gives away. Over a circuit the viber
+  // starts further back and tolerates more drift, because a pull's round trip
+  // is tens of loopback's — the constants say so at length.
+  const cycle = createViberCycle({
+    viber,
+    sealTo,
+    stationPrefix: bought.prefix,
+    ladder: LADDER,
+    prerollSegments:
+      hubHiddenService === null ? PREROLL_SEGMENTS : PREROLL_SEGMENTS_ANYONE,
+    maxSegmentsBehind:
+      hubHiddenService === null
+        ? MAX_SEGMENTS_BEHIND
+        : MAX_SEGMENTS_BEHIND_ANYONE,
+    ledger,
+    prices,
+    vibing: () => player.vibing(),
+    stopping: () => stopping,
+    onEdge: (now) => {
+      edge = now;
+      live = now.live;
+    },
+    publish: (rung, sequence, body) => {
+      player.publish(rung, sequence, body);
+    },
+    missed: (rung) => {
+      player.missed(rung);
+    },
+  });
 
   // What the broadcaster's own node says it has banked, and what is on chain.
   // Read off the STATION's operator surface, never inferred from what the
@@ -792,17 +922,238 @@ function printObsInstructions(streamKey: string): void {
   );
 }
 
+/**
+ * Serve the guide at its hidden service, when a build exists — and say
+ * exactly how to make one when it does not.
+ *
+ * The build is the USER'S step, once per address: it bakes `VITE_RELAY_URL`,
+ * and the right value is this guide service's own port 7100, which the daemon
+ * forwards to the relay's free NIP-01 reads — so a browser anywhere reads the
+ * announcements over the same circuit it reads the page over.
+ * `VITE_PLAYBACK_URL` is deliberately NOT baked: its default,
+ * `http://127.0.0.1:8088`, is each reader's OWN paying side — this machine's
+ * demo player, or a remote viewer's `pnpm demo:viewer` — which is the seam
+ * working: the page travels, the budget stays home.
+ *
+ * A server that cannot bind (something else on the port — the guide's own
+ * vite harness holds 4173 while `pnpm test:guide` runs) is said out loud and
+ * the demo continues without the page rather than dying over it.
+ */
+async function startGuideIfBuilt(
+  guideAddress: string
+): Promise<GuideServer | null> {
+  const buildCommand = `VITE_RELAY_URL=ws://${guideAddress}:7100 pnpm --filter @toon-protocol/guide build`;
+
+  if (!existsSync(resolve(GUIDE_DIST, 'index.html'))) {
+    printGuideInstructions(guideAddress, buildCommand, 'unbuilt');
+    return null;
+  }
+
+  try {
+    const server = await startGuideServer({
+      distDir: GUIDE_DIST,
+      port: GUIDE_PORT,
+      hosts: [GATEWAY_IPV4, '127.0.0.1'],
+    });
+    say(
+      `the guide is served from ${GUIDE_DIST} on ${server.urls.join(' and ')}`
+    );
+    printGuideInstructions(guideAddress, buildCommand, 'serving');
+    return server;
+  } catch (cause) {
+    say(
+      `the guide's server could not start (${cause instanceof Error ? cause.message : String(cause)}) — usually something else on port ${String(GUIDE_PORT)}, like the guide's own vite harness. Continuing without the page.`
+    );
+    return null;
+  }
+}
+
+/**
+ * How a person actually looks at it — printed either way, because the build
+ * command is the fix for the unbuilt case and the viewing steps are the point
+ * of the built one.
+ */
+function printGuideInstructions(
+  guideAddress: string,
+  buildCommand: string,
+  state: 'serving' | 'unbuilt'
+): void {
+  console.log(
+    [
+      '',
+      '  ┌─ The guide, over the circuit ────────────────────────────────────',
+      ...(state === 'unbuilt'
+        ? [
+            '  │  packages/guide/dist does not exist, so nothing is served yet.',
+            '  │  Build it once for this address (the address is stable across',
+            '  │  runs), then re-run the demo:',
+            '  │',
+            `  │    ${buildCommand}`,
+          ]
+        : [
+            `  │  Browse:  http://${guideAddress}/`,
+            '  │',
+            '  │  Firefox → Settings → Network Settings → Manual proxy:',
+            '  │    SOCKS v5 Host 127.0.0.1  Port 9050   (this machine; a remote',
+            '  │    viewer uses their demo:viewer daemon on port 9250)',
+            '  │    and check "Proxy DNS when using SOCKS v5".',
+            '  │  Loopback is not proxied, which is exactly right: the page and',
+            '  │  the relay ride the circuit, while the contract calls to your',
+            '  │  OWN paying side at 127.0.0.1:8088 stay direct.',
+            '  │',
+            '  │  If the page was built for a different address, rebuild once:',
+            `  │    ${buildCommand}`,
+          ]),
+      '  └──────────────────────────────────────────────────────────────────',
+      '',
+    ].join('\n')
+  );
+}
+
+/** The two addresses one daemon generates: the hub's paid edge, and the guide's page. */
+interface HiddenServiceAddresses {
+  hub: string;
+  guide: string;
+}
+
+/**
+ * Wait for the hub's daemon to have a circuit AND both addresses.
+ *
+ * The healthcheck already gated on the SOCKS port answering; this waits for
+ * `Bootstrapped 100%` in the daemon's own log — the first moment a descriptor
+ * can be published — and for both hostname files, read out of the container
+ * because the daemon owns those directories. Each address is then validated
+ * by shape, and an `.onion` answer is diagnosed as what it is: the OLDER
+ * daemon, from before upstream renamed the TLD — a wrong build, not a wrong
+ * config.
+ */
+async function waitForHiddenService(): Promise<HiddenServiceAddresses> {
+  const deadline = Date.now() + HS_BOOTSTRAP_TIMEOUT_MS;
+  const hostnames: Record<keyof HiddenServiceAddresses, string> = {
+    hub: '/var/lib/anon/hidden_service/hostname',
+    guide: '/var/lib/anon/guide_service/hostname',
+  };
+  const addresses: HiddenServiceAddresses = { hub: '', guide: '' };
+  let said = 0;
+
+  for (;;) {
+    for (const service of ['hub', 'guide'] as const) {
+      try {
+        addresses[service] = (
+          await execIn('hub-anon', ['cat', hostnames[service]])
+        ).trim();
+      } catch {
+        // Not generated yet — key generation is seconds in, so this is early.
+      }
+    }
+
+    let bootstrapped = false;
+    try {
+      const count = await execIn('hub-anon', [
+        'grep',
+        '-c',
+        'Bootstrapped 100%',
+        '/var/lib/anon/notice.log',
+      ]);
+      bootstrapped = Number(count.trim()) > 0;
+    } catch {
+      // `grep -c` exits non-zero on zero matches: still building circuits.
+    }
+
+    if (addresses.hub.length > 0 && addresses.guide.length > 0 && bootstrapped)
+      break;
+
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the anon daemon did not bootstrap within ${String(HS_BOOTSTRAP_TIMEOUT_MS / 1000)}s — the Anyone network is a live third-party network, so this can be it or the way to it. \`docker compose logs hub-anon\` says which. (Hostnames so far: ${JSON.stringify(addresses)})`
+      );
+    }
+    if (Date.now() - said > 15_000) {
+      said = Date.now();
+      say('still bootstrapping onto the Anyone network…');
+    }
+    await new Promise((waited) => setTimeout(waited, 5_000));
+  }
+
+  for (const service of ['hub', 'guide'] as const) {
+    if (!HS_HOSTNAME_PATTERN.test(addresses[service])) {
+      throw new Error(
+        `the daemon produced "${addresses[service]}" for the ${service} service, which is not a 56-character .anyone address. An address ending .onion means the image is anon v0.4.9.7 — the release before upstream renamed the TLD — and the payer refuses that spelling; deploy/devnet/anon/Dockerfile is the build that fixes it.`
+      );
+    }
+  }
+  return addresses;
+}
+
+/**
+ * Everything a remote viewer needs, printed once — and nothing here is a
+ * secret the host should have kept: the address is the station's public door,
+ * the seal-to key is public material, and the keys hold this run's play
+ * money, minted to be handed out.
+ */
+function printViewerInstructions(options: {
+  hiddenService: string;
+  /** The guide's own address, so the viewer's paying side can allowlist the page. */
+  guideHiddenService: string | null;
+  stationPrefix: string;
+  sealTo: string;
+  keys: PayerKey[];
+  prices: Map<string, RungPrices>;
+}): void {
+  const pricePairs = [...options.prices.entries()]
+    .map(([rung, split]) => `--price ${rung}=${split.toStation.toString()}`)
+    .join(' ');
+
+  console.log(
+    [
+      '',
+      '  ┌─ Remote viewers ─────────────────────────────────────────────────',
+      '  │  From a checkout of this repository, with Docker running:',
+      '  │',
+      '  │    pnpm demo:viewer -- \\',
+      `  │      --connector http://${options.hiddenService} \\`,
+      `  │      --station ${options.stationPrefix} \\`,
+      `  │      --seal-to ${options.sealTo} \\`,
+      `  │      ${pricePairs} \\`,
+      ...(options.guideHiddenService === null
+        ? []
+        : [`  │      --guide-origin http://${options.guideHiddenService} \\`]),
+      '  │      --key <one of the keys below>',
+      '  │',
+      "  │  One funded key per viewer (gas and token, on this run's chain):",
+      ...options.keys.map((key) => `  │    ${key.privateKey}`),
+      '  │',
+      '  │  The viewer builds its own anon daemon image on first run and pays',
+      '  │  over the circuit — bootstrap takes a minute or two, and the first',
+      '  │  segments a while longer. --socks skips the managed daemon if one',
+      '  │  is already running.',
+      '  │',
+      '  │  Once it is up, open https://toon-protocol.github.io/slop_machine/',
+      '  │  — the guide finds this station through relay reads riding the',
+      "  │  viewer's own circuit, and vibes against their own paying side.",
+      '  └──────────────────────────────────────────────────────────────────',
+      '',
+    ].join('\n')
+  );
+}
+
 interface Arguments {
   pattern: boolean;
   port: number;
+  anyone: boolean;
 }
 
 function readArguments(argv: string[]): Arguments {
-  const parsed: Arguments = { pattern: false, port: DEFAULT_PORT };
+  const parsed: Arguments = {
+    pattern: false,
+    port: DEFAULT_PORT,
+    anyone: false,
+  };
 
   for (let at = 0; at < argv.length; at += 1) {
     const argument = argv[at];
     if (argument === '--pattern') parsed.pattern = true;
+    else if (argument === '--anyone') parsed.anyone = true;
     else if (argument === '--port') {
       const port = Number(argv[at + 1]);
       if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -814,7 +1165,7 @@ function readArguments(argv: string[]): Arguments {
       at += 1;
     } else if (argument !== undefined) {
       throw new Error(
-        `the demo takes --pattern and --port, and does not know "${argument}"`
+        `the demo takes --pattern, --anyone and --port, and does not know "${argument}"`
       );
     }
   }

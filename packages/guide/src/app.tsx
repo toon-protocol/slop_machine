@@ -23,7 +23,15 @@ export function App() {
   return (
     <StationsProvider>
       <PlaybackProvider>
-        <BrowserRouter>
+        {/*
+          `basename` follows the build's own `base`, so the SAME routes work
+          at a domain root ('/' — a hub's own hosting, the dev server, the
+          e2e harness) and under a subpath (a static host like GitHub Pages
+          serves a project at /<repo>/). Vite guarantees BASE_URL ends the
+          way a basename must, and at the default base this is exactly the
+          '/' it has always been.
+        */}
+        <BrowserRouter basename={import.meta.env.BASE_URL}>
           <Routes>
             <Route element={<Shell />}>
               <Route path="/" element={<Discovery />} />
