@@ -401,6 +401,16 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       return handleContract(request, response, path);
     }
 
+    // CORS grants follow the allowlist on reads as well as writes (ADR
+    // 0005), and the playlists the contract's state names are exactly such
+    // reads: an allowlisted guide plays them with hls.js, whose fetches the
+    // browser holds to CORS — without the grant the contract would be naming
+    // locations its own client cannot play. Any other origin gets no grant
+    // and reads nothing, same as on the contract surface.
+    const origin = originOf(request);
+    const media =
+      origin !== undefined && allowedOrigins.has(origin) ? origin : undefined;
+
     if (path === '/' || path === '/index.html') {
       return send(response, 200, 'text/html; charset=utf-8', PAGE);
     }
@@ -446,7 +456,8 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       return sendFile(
         response,
         resolve(directory, `${String(playlist[1])}.m3u8`),
-        'application/vnd.apple.mpegurl'
+        'application/vnd.apple.mpegurl',
+        media
       );
     }
 
@@ -455,7 +466,8 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       return sendFile(
         response,
         resolve(directory, String(segment[1]), `${String(segment[2])}.ts`),
-        'video/mp2t'
+        'video/mp2t',
+        media
       );
     }
 
@@ -576,12 +588,18 @@ function send(
   response: ServerResponse,
   status: number,
   type: string,
-  body: string | Uint8Array
+  body: string | Uint8Array,
+  corsOrigin?: string
 ): void {
   response.writeHead(status, {
     'content-type': type,
     // A live window: every one of these is stale within seconds.
     'cache-control': 'no-store',
+    // A media-read grant only ever names an allowlisted origin — the same
+    // rule sendJson applies to the contract surface.
+    ...(corsOrigin === undefined
+      ? {}
+      : { 'access-control-allow-origin': corsOrigin, vary: 'origin' }),
   });
   response.end(body);
 }
@@ -605,11 +623,16 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
-function sendFile(response: ServerResponse, path: string, type: string): void {
+function sendFile(
+  response: ServerResponse,
+  path: string,
+  type: string,
+  corsOrigin?: string
+): void {
   try {
-    send(response, 200, type, readFileSync(path));
+    send(response, 200, type, readFileSync(path), corsOrigin);
   } catch {
     // Evicted, or never bought. A miss, and the player asks for the next one.
-    send(response, 404, 'text/plain', 'gone');
+    send(response, 404, 'text/plain', 'gone', corsOrigin);
   }
 }

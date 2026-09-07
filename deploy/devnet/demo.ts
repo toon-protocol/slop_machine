@@ -140,6 +140,17 @@ const DEFAULT_PORT = 8088;
  */
 const BUDGET_PER_SECOND = 1000n;
 
+/**
+ * Web origins allowed to initiate spend across the playback contract, beside
+ * the player's own page (which is allowlisted by construction). This is the
+ * guide as its own harness serves it — `pnpm test:guide` runs vite on 4173 —
+ * under both spellings of loopback, because a person typing `localhost` is
+ * still this machine. The allowlist is the paying side's own configuration
+ * (ADR 0005): it is wired HERE, on the paying side, and nothing across the
+ * line can extend it.
+ */
+const GUIDE_ORIGINS = ['http://127.0.0.1:4173', 'http://localhost:4173'];
+
 /** What the devnet's origin is configured to cut, and what the playlist declares. */
 const SEGMENT_SECONDS = 2;
 
@@ -462,6 +473,7 @@ async function main(): Promise<void> {
     contract: {
       station: bought.prefix,
       budgetPerSecond: BUDGET_PER_SECOND,
+      allowedOrigins: GUIDE_ORIGINS,
       vibing: true,
     },
     // The demo's one clip: real sound this run serves itself, free to read.

@@ -15,11 +15,15 @@ import {
 } from '@/relay/clips';
 import { useStations } from '@/relay/stations-context';
 import { isLive, type Station } from '@/relay/stations';
+import { VibeLive } from '@/routes/vibe-live';
 
 /**
  * `/b/:handle` — the broadcaster page: the free, public description of a
  * station, which a viber reads to decide whether to vibe. Everything on it
- * is free — that is what keeps trying a new broadcaster cheap.
+ * is free — that is what keeps trying a new broadcaster cheap — except the
+ * one thing that is the point of the rest: vibing live, which lights up in
+ * the theater below when a paying side is detected on loopback (#79), and
+ * degrades into an honest explanation when none is.
  *
  * The handle is the route's identity and the station's: the last segment of
  * the address a hub granted, which is exactly what the grid's cards link
@@ -117,6 +121,8 @@ function AnnouncedBroadcaster({
           </Badge>
         ))}
       </div>
+
+      <VibeLive station={station} />
 
       <Separator className="my-6" />
 
