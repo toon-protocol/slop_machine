@@ -124,6 +124,11 @@ export async function startGuideServer(options: {
         listening();
       });
     });
+    // The server must never be what keeps the process alive: a run that dies
+    // on its way up exits through a path that has no handle to close this,
+    // and an event loop this held open is a zombie squatting on the port the
+    // NEXT run needs. The demo's own loop is what keeps a live run running.
+    server.unref();
     servers.push(server);
     urls.push(`http://${host}:${String(options.port)}/`);
   }
