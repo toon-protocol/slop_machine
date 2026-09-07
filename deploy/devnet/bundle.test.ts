@@ -338,7 +338,19 @@ const ROOT_PACKAGE_JSON = 'package.json';
 const PACKAGE_MANIFESTS = [
   'packages/station-origin/package.json',
   'packages/slot-app/package.json',
+  'packages/guide/package.json',
 ];
+
+/**
+ * The one file under `packages/` allowed to spell the payer's name: the
+ * guide's own payment-free guard, which forbids the payer BY NAME in the
+ * guide's manifest and cannot do that without writing the name down — the
+ * same exemption the slot app's vocabulary test grants itself. Exempting a
+ * guard that fails the ordinary suite on the very dependency this test
+ * polices trades nothing away.
+ */
+const THE_GUIDES_OWN_PAYER_GUARD =
+  'packages/guide/src/guide/payment-free.test.ts';
 
 // ── The settlement contracts ─────────────────────────────────────────────────
 
@@ -1230,7 +1242,8 @@ describe('devnet bundle', () => {
       encoding: 'utf8',
     })
       .split('\n')
-      .filter((file) => file.endsWith('.ts'));
+      .filter((file) => file.endsWith('.ts'))
+      .filter((file) => file !== THE_GUIDES_OWN_PAYER_GUARD);
 
     for (const file of sources) {
       expect(

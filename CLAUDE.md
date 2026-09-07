@@ -22,14 +22,17 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide renders its shell, payment-free by test
 
-This repository is a pnpm workspace with two packages, one per toon app it ships —
+This repository is a pnpm workspace with three packages. Two are the toon apps it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
 (`@toon-protocol/slot-app`). Both take the fleet's house shape, the same one `relay` and `store`
 use: TypeScript, Hono over the Node server adapter, bundled to a single entrypoint with
 tsup/esbuild, tested with vitest, a `Dockerfile` beside it and an image published to GHCR on merge
-to `main`. The slot app is the newer and by far the smaller of the two — see
+to `main`. The third is **not a toon app and not a server at all**: `packages/guide`
+(`@toon-protocol/guide`) is the viber-facing discovery SPA of epic
+[#72](https://github.com/toon-protocol/slop_machine/issues/72) — see
+[the guide](#the-guide) below. The slot app is by far the smaller of the two apps — see
 [the slot app](#the-slot-app) below for exactly what it does today, which is boot, quote a slot,
 and sell one — peering with the broadcaster's station, **funding the payment channel that peering
 opened**, routing every address it sells, treating a
@@ -593,6 +596,38 @@ first agree with the table of the second, and the app wires all of it up. **The 
 rather than inferred**: a fifth block asserts the exact set of directories under `src/`, so a new
 module cannot quietly become a fifth exemption by being new.
 
+### The guide
+
+[`packages/guide`](packages/guide/) (`@toon-protocol/guide`) is the repo's third package and its
+first that is **not a toon app**: a Vite SPA on React, Tailwind and shadcn — browser-only, static
+build, no server of its own — the discovery surface of epic
+[#72](https://github.com/toon-protocol/slop_machine/issues/72), which a hub can host as plain
+static files. What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75))
+is the dark shell with the four routes stubbed and navigable — `/` (the discovery grid),
+`/categories`, `/categories/:category` and `/b/:handle` (the broadcaster page; no bare vanity
+URLs, because display names are not unique and the handle is the only identity anybody grants) —
+and, from day one, the guard that makes the repo's oldest invariant hold on it by test.
+
+**`packages/guide/src/guide/payment-free.test.ts` is that guard**, in the style of the slot app's
+vocabulary test: it reads the package's own source and manifest and fails on a payer dependency
+(a pinned denylist with a reason per entry — the payer itself, chain clients, signing curves, ILP
+stacks), on payment vocabulary or key-material identifiers in any source, and on the word
+*channel* anywhere at all — in a browser SPA a channel is always a payment channel, and a
+payment-free page has nothing to say about one. It runs in the ordinary suite, reads files only,
+and needs no browser and no build. The guide is `private: true` and publishes nothing — no npm
+package, no image; its deliverable is `vite build`'s static output.
+
+Three toolchain facts about it, each deliberate: the root `tsconfig.json` **excludes**
+`packages/guide` (JSX and DOM libs its siblings must not inherit) and the root `typecheck` script
+chains the guide's own tsconfig instead; the format globs cover `*.{ts,tsx}` under
+`packages/*/src/` because the guide is the repo's first `.tsx`; and the root `vitest.config.ts`
+gives it **no version define on purpose** — a static SPA has no `/health` and no image, so there
+is no version surface for a placeholder to feed. Its components come from the globally-installed
+`shadcn` CLI (see [the shadcn section](#shadcn-is-the-house-component-source-and-its-target-is-the-guide)),
+generated into `src/components/ui/` and committed like any source; the runtime deps they need
+(`cn`, `radix-ui`, `class-variance-authority`, `lucide-react`) are ordinary dependencies of the
+guide, while shadcn itself stays a dependency of nothing.
+
 ### The deploy bundles
 
 **THREE bundles ship from this repository, and they are siblings, not variants.**
@@ -841,7 +876,8 @@ What does exist, all run from the repo root:
 
 ```
 pnpm install
-pnpm build       # bundles every package to its own dist/ (dist/cli.js is each entrypoint)
+pnpm build       # bundles every package to its own dist/ (dist/cli.js is each app's entrypoint;
+                 # the guide's dist/ is vite's static output, and nothing serves it from here)
 pnpm test        # vitest: boots the real origin on fresh ports, pushes real RTMP at it, and
                  # pulls the encoded segments back over HTTP, and boots the real slot app on
                  # fresh ports against a temporary directory. Deliberately slow — real encoding
@@ -873,8 +909,11 @@ pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key 
                  # daemon and takes minutes; deploy/bundle.test.ts holds the fast half of that
                  # guard. An image this repo publishes belongs in its PUBLISHED_IMAGES list
 pnpm lint        # eslint
-pnpm typecheck   # tsc --noEmit
-pnpm format      # prettier over packages/*/src/**/*.ts and deploy/**/*.ts — all three bundles
+pnpm typecheck   # tsc --noEmit — the root project, then the guide's own tsconfig, which the root
+                 # one excludes because a browser package's JSX and DOM libs must not leak into
+                 # the two Node apps
+pnpm format      # prettier over packages/*/src/**/*.{ts,tsx} and deploy/**/*.ts — all three
+                 # bundles, and tsx because the guide is the repo's first
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 docker build -f packages/slot-app/Dockerfile -t ghcr.io/toon-protocol/slot-app:latest .
 ```
@@ -1089,11 +1128,18 @@ bitten by:
 is the run that has to work on a laptop with no Docker daemon. Wired to a script at all, it is an
 opt-in one beside `test:devnet` and `test:image`, which are opt-in for exactly the same reason.
 
-### shadcn is the house component source, and has nothing to point at yet
+### shadcn is the house component source, and its target is the guide
 
-`shadcn` writes components into a React and Tailwind project, and **this repository does not have
-one**: two Hono services and a page that is a single inlined string. It is on the box ahead of the
-work rather than behind it, and the honest state today is that **`shadcn init` has no target here.**
+`shadcn` writes components into a React and Tailwind project, and since
+[#75](https://github.com/toon-protocol/slop_machine/issues/75) this repository has exactly one:
+[`packages/guide`](packages/guide/). Its `components.json` is committed, so from that directory
+`shadcn add <component>` generates into `src/components/ui/`, and the generated source is
+committed like any other. The CLI stays a global on the box: **a dependency of nothing, called by
+no pnpm script** — what a component *needs at runtime* (`cn`, `radix-ui`,
+`class-variance-authority`, `lucide-react`) is declared as an ordinary dependency of the guide,
+which is the difference between using a tool and depending on one. Anything shadcn adds to the
+manifest is still subject to the guide's own payment-free guard, which fails the ordinary suite on
+a payer dependency whoever's tool wrote the line.
 
 It specifically does **not** apply to `deploy/devnet/page.ts`, and that file's own header already
 says why: the page is inline, as one string, because `demo.ts` is bundled to a single file before it
@@ -1103,9 +1149,8 @@ to be read; the demo page is deliberately a place where files cannot be read. **
 page into a component tree.** Overturn the constraint first, in the same commit, or leave the page
 alone.
 
-Where shadcn *is* the answer: any **new** UI package under `packages/`, which would be an ordinary
-React and Tailwind app with a real build and a real directory. Take components from shadcn rather
-than hand-rolling them there, and the demo page stays the one exception, named as such.
+Any further **new** UI package under `packages/` takes components from shadcn the same way rather
+than hand-rolling them, and the demo page stays the one exception, named as such.
 
 ## Agent skills
 
