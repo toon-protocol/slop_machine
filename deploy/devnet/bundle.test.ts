@@ -47,7 +47,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { GENERATED_FILES } from './credentials.js';
+import { DRIVER_HELD_FILES, GENERATED_FILES } from './credentials.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..');
 
@@ -72,15 +72,19 @@ const PROJECT_NAME = 'slopmachine-devnet';
 
 /**
  * Every service, by name, written out so that one ADDED to this topology — a
- * Caddy, a relay, a second station — is a failure here rather than a surprise
- * in a run.
+ * Caddy, a second station — is a failure here rather than a surprise in a
+ * run.
+ *
+ * The relay is here since #73: it is the hub's announcement surface, exactly
+ * as `deploy/hub/` runs it — the stock published image, no code of this
+ * repository's in it — and ADR 0004's events are what a run pays it to carry.
  *
  * EVERY NAME SAYS WHICH NODE IT BELONGS TO. Two connectors are running; they
  * hold different keys, terminate different prefixes and answer on different
  * host ports. A bare `connector` is a log line nobody can place and a
  * `docker compose exec` into the wrong box.
  */
-const HUB_SERVICES = ['hub-connector', 'hub-slot-app'];
+const HUB_SERVICES = ['hub-connector', 'hub-relay', 'hub-slot-app'];
 const STATION_SERVICES = ['station-connector', 'station-origin'];
 const CHAIN_SERVICE = 'chain';
 const EXPECTED_SERVICES = [CHAIN_SERVICE, ...HUB_SERVICES, ...STATION_SERVICES];
@@ -109,8 +113,24 @@ const A_STATION_SERVICE = /(^|[-_])(origin|ingest|rtmp)([-_]|$)/i;
  * is not a mitigation, it is a free slot and a free roster.
  */
 const SLOT_APP_PORT = '3200';
-/** The origin's segment port. The same rule, for the same reason: it serves vibes. */
+/**
+ * The origin's segment port. The same rule, for the same reason: it serves
+ * vibes. The relay's PAID WRITE port shares this number inside its own
+ * container and is the same shape for the same reason — it takes announcement
+ * writes with no notion of a payment — so the one check covers both.
+ */
 const SEGMENT_PORT = '3100';
+/**
+ * The relay's two ports, and they are not alike. The write port takes PAID
+ * announcement writes and stays on `expose:`, on exactly the slot app's
+ * terms. The READ port serves free NIP-01 reads and is published on loopback
+ * for the driver — not a free door, for the opposite reason from ingest's:
+ * reads are free BY DESIGN. Announcements are found for nothing; being
+ * reachable is what costs. The hub bundle's local overlay publishes this same
+ * port for this same reason.
+ */
+const RELAY_WRITE_PORT = '3100';
+const RELAY_READ_PORT = '7100';
 /**
  * RTMP ingest. The STATION half's, and the one publish here that is not the
  * driver's.
@@ -135,9 +155,12 @@ const LOOPBACK_PUBLISH_PREFIX = '127.0.0.1:';
  * loopback-qualified — and each exists only so somebody on this machine can
  * reach the one surface they are entitled to.
  *
- * Three of them are the DRIVER'S, and the fourth is the BROADCASTER'S: the
- * ingest their own encoder pushes into. That one is authenticated and unpaid,
- * which is what keeps it off the list the next guard refuses.
+ * Four of them are the DRIVER'S — the chain, the two connector edges, and the
+ * relay's free NIP-01 reads, which is the seam the devnet suite (and one day
+ * the guide) consumes announcements at. The fifth is the BROADCASTER'S: the
+ * ingest their own encoder pushes into, authenticated and unpaid. Neither
+ * exception is a free door: ingest has a key on it and reads are free by
+ * design, which is exactly what the ports the next guard refuses are not.
  *
  * The two connector edges are the reason this bundle cannot be assembled out
  * of the two shipped local overlays: they publish the same host port, each
@@ -146,12 +169,17 @@ const LOOPBACK_PUBLISH_PREFIX = '127.0.0.1:';
 const EXPECTED_PUBLISHED_PORTS: Record<string, string> = {
   chain: `${LOOPBACK_PUBLISH_PREFIX}8545:8545`,
   'hub-connector': `${LOOPBACK_PUBLISH_PREFIX}3000:${CONNECTOR_EDGE_PORT}`,
+  'hub-relay': `${LOOPBACK_PUBLISH_PREFIX}${RELAY_READ_PORT}:${RELAY_READ_PORT}`,
   'station-connector': `${LOOPBACK_PUBLISH_PREFIX}3001:${CONNECTOR_EDGE_PORT}`,
   'station-origin': `${LOOPBACK_PUBLISH_PREFIX}${RTMP_PORT}:${RTMP_PORT}`,
 };
 
 /** What each service keeps on `expose:` — private, but still dialable on this network. */
 const EXPECTED_EXPOSE: Record<string, string[]> = {
+  // The relay's paid write lane, dialled only by hub-connector. The free read
+  // port is published above rather than exposed here — a `ports:` entry
+  // already reaches this network.
+  'hub-relay': [RELAY_WRITE_PORT],
   'hub-slot-app': [SLOT_APP_PORT],
   // The segment port, and only it. The ingest port is published above rather
   // than exposed here — a `ports:` entry already reaches this network, so the
@@ -207,6 +235,25 @@ const REQUIRED_VARIABLE = new RegExp(
 /** Anything that reads as a connector build handle, in config or in prose. */
 const CONNECTOR_BUILD_LITERAL =
   /rust-(?:sha-[0-9a-f]{7,40}|\d{4}\.\d{2}\.\d{2}\.\d+|main|release)/;
+
+/**
+ * The relay: the STOCK published image, exactly as `deploy/hub/` runs it.
+ * This repository writes no relay code and publishes no relay image — the
+ * announcement surface is pulled, never built, and `:release` is the same
+ * moving tag the hub bundle's own default names.
+ */
+const EXPECTED_RELAY_IMAGE = 'ghcr.io/toon-protocol/relay:release';
+
+/**
+ * The relay's Nostr identity, and the one environment-valued credential in
+ * this topology — that image offers no file-valued form, which is the hub
+ * bundle's own stated reason for its one `.env` secret. The compose file must
+ * hold the INTERPOLATION, never a value: the driver generates the key per run
+ * and passes it in, and the default is empty so teardown works before
+ * anything has been generated.
+ */
+const RELAY_SECRET_ENV = 'NOSTR_SECRET_KEY';
+const RELAY_SECRET_INTERPOLATION = '${DEVNET_RELAY_NOSTR_SECRET:-}';
 
 /**
  * The only two services that may be built, and the only Dockerfiles they may
@@ -331,7 +378,23 @@ const AN_ADDRESS_LITERAL = /"0x[0-9a-fA-F]{40}"/;
  * an app.
  */
 const PAYER_PACKAGE = '@toon-protocol/client';
-/** Exact, with no range operator: a payer that moved underneath a run is a run that proves nothing. */
+
+/**
+ * The announcement signer, on exactly the payer's terms and since #73. The
+ * apps hold no payment code, and they hold no announcement-signing either:
+ * announcing is the BROADCASTER'S client-side act (ADR 0004), and in this
+ * repository the only party who signs those events is the devnet's driver.
+ */
+const SIGNER_PACKAGE = 'nostr-tools';
+
+/**
+ * Every dependency that exists for the devnet alone: a development dependency
+ * of the workspace root, pinned exact, in neither package's manifest, in no
+ * published image, and imported by nothing under `packages/`.
+ */
+const DEVNET_ONLY_PACKAGES = [PAYER_PACKAGE, SIGNER_PACKAGE];
+
+/** Exact, with no range operator: a dependency that moved underneath a run is a run that proves nothing. */
 const AN_EXACT_VERSION = /^\d+\.\d+\.\d+$/;
 
 const ROOT_PACKAGE_JSON = 'package.json';
@@ -435,6 +498,7 @@ const KEY_MATERIAL = /[0-9a-fA-F]{64}/;
 const EXPECTED_HEALTHCHECKS: Record<string, string> = {
   chain: 'cast block-number --rpc-url http://127.0.0.1:8545 || exit 1',
   'hub-connector': `wget -q --spider http://127.0.0.1:${CONNECTOR_EDGE_PORT}/ilp/identity || exit 1`,
+  'hub-relay': `wget -q --spider http://127.0.0.1:${RELAY_WRITE_PORT}/health || exit 1`,
   'hub-slot-app': `wget -q --spider http://127.0.0.1:${SLOT_APP_PORT}/health || exit 1`,
   'station-connector': `wget -q --spider http://127.0.0.1:${CONNECTOR_EDGE_PORT}/ilp/identity || exit 1`,
   'station-origin': `wget -q --spider http://127.0.0.1:${SEGMENT_PORT}/health || exit 1`,
@@ -688,7 +752,7 @@ describe('devnet bundle', () => {
     }
   });
 
-  it("publishes exactly the three driver addresses and the broadcaster's ingest", () => {
+  it("publishes exactly the four driver addresses and the broadcaster's ingest", () => {
     const published = Object.fromEntries(
       publishedPorts(EVERY_COMPOSE_FILE).map(({ service, entry }) => [
         service,
@@ -698,7 +762,7 @@ describe('devnet bundle', () => {
 
     expect(
       published,
-      `${COMPOSE_PATH}: the published set is the chain's RPC, the two connector edges and the broadcaster's own ingest, all on loopback, and nothing else`
+      `${COMPOSE_PATH}: the published set is the chain's RPC, the two connector edges, the relay's free NIP-01 reads and the broadcaster's own ingest, all on loopback, and nothing else`
     ).toEqual(EXPECTED_PUBLISHED_PORTS);
   });
 
@@ -927,13 +991,42 @@ describe('devnet bundle', () => {
     for (const service of [
       CHAIN_SERVICE,
       'hub-connector',
+      'hub-relay',
       'station-connector',
     ]) {
       expect(
         servicesOf(COMPOSE_PATH)[service]?.build,
-        `${COMPOSE_PATH} ${service}: has a \`build:\`. This repository publishes no connector image and no chain image — both are pulled.`
+        `${COMPOSE_PATH} ${service}: has a \`build:\`. This repository publishes no connector image, no chain image and no relay image — all three are pulled.`
       ).toBeUndefined();
     }
+  });
+
+  it('runs the stock relay image, and holds its identity as an interpolation', () => {
+    // The announcement surface is the relay's own published image, exactly as
+    // the hub bundle runs it — this repository writes no relay code. And its
+    // Nostr identity is the one environment-valued credential in the
+    // topology, because that image offers no file-valued form: the compose
+    // file may hold only the interpolation, with the driver generating the
+    // value per run.
+    const relay = servicesOf(COMPOSE_PATH)['hub-relay'];
+
+    expect(
+      relay?.image,
+      `${COMPOSE_PATH} hub-relay: expected the stock relay image ${EXPECTED_RELAY_IMAGE}`
+    ).toBe(EXPECTED_RELAY_IMAGE);
+
+    expect(
+      relay?.environment?.[RELAY_SECRET_ENV],
+      `${COMPOSE_PATH} hub-relay: ${RELAY_SECRET_ENV} must be exactly \`${RELAY_SECRET_INTERPOLATION}\` — the driver generates the identity per run, and a value here would be a committed credential`
+    ).toBe(RELAY_SECRET_INTERPOLATION);
+
+    // NIP-40, stated rather than left to an image default: liveness IS the
+    // existence of an unexpired heartbeat (ADR 0004), so a relay that kept
+    // serving expired events would show every dead station live for ever.
+    expect(
+      relay?.environment?.['TOON_ENFORCE_EXPIRATION'],
+      `${COMPOSE_PATH} hub-relay: TOON_ENFORCE_EXPIRATION must be stated 'true' — the heartbeat's whole design leans on expired events not being served`
+    ).toBe('true');
   });
 
   // ── The generated configuration ────────────────────────────────────────────
@@ -1139,6 +1232,22 @@ describe('devnet bundle', () => {
         `${WORK_DIR_MOUNT_PREFIX}${generated} is generated but mounted by no service`
       ).toContain(generated);
     }
+
+    // The driver-held pair is generated and mounted by NOTHING, on purpose:
+    // the relay's identity travels as environment because its image has no
+    // file-valued form, and the broadcaster's announcement keypair signs from
+    // the driver — mounting it into any node would hand a broadcaster's
+    // public voice to a box that must never speak for them.
+    for (const held of DRIVER_HELD_FILES) {
+      expect(
+        [...GENERATED_FILES] as string[],
+        `${held} is in both manifests — a file is mounted or driver-held, never both`
+      ).not.toContain(held);
+      expect(
+        mounted,
+        `${COMPOSE_PATH}: mounts ${WORK_DIR_MOUNT_PREFIX}${held}, which is the driver's own — the relay's identity goes in as environment, and the broadcaster's announcement keypair never leaves the driver`
+      ).not.toContain(held);
+    }
   });
 
   it('commits a template for each node, and leaves every chain value to the run', () => {
@@ -1191,52 +1300,56 @@ describe('devnet bundle', () => {
 
   // ── The payer ──────────────────────────────────────────────────────────────
 
-  it('keeps the payer a devnet-only development dependency, pinned exactly', () => {
+  it('keeps the payer and the signer devnet-only development dependencies, pinned exactly', () => {
     // The whole reason a devnet needs a payer from outside this repository is
-    // that NO APP IN IT CONTAINS PAYMENT CODE. A payer that crept into either
-    // package's dependencies — or into a published image — would make that
-    // sentence false while every other gate stayed green.
+    // that NO APP IN IT CONTAINS PAYMENT CODE — and the announcement signer
+    // is held to the payer's exact terms, because announcing is the
+    // broadcaster's client-side act and neither app may grow a voice. Either
+    // one creeping into a package's dependencies — or into a published image
+    // — would make those sentences false while every other gate stayed green.
     const root = JSON.parse(readFile(ROOT_PACKAGE_JSON)) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };
 
-    const pinned = root.devDependencies?.[PAYER_PACKAGE];
-    expect(
-      pinned,
-      `${ROOT_PACKAGE_JSON}: ${PAYER_PACKAGE} belongs in devDependencies — it is the devnet's payer and nothing else in this repository uses it`
-    ).toBeDefined();
-    expect(
-      pinned,
-      `${ROOT_PACKAGE_JSON}: ${PAYER_PACKAGE} is pinned as "${String(pinned)}". Pin an exact release: a payer that moved underneath a run is a run that proves nothing about the version anybody has.`
-    ).toMatch(AN_EXACT_VERSION);
-    expect(
-      Object.keys(root.dependencies ?? {}),
-      `${ROOT_PACKAGE_JSON}: the payer is not a runtime dependency of this workspace`
-    ).not.toContain(PAYER_PACKAGE);
+    for (const devnetOnly of DEVNET_ONLY_PACKAGES) {
+      const pinned = root.devDependencies?.[devnetOnly];
+      expect(
+        pinned,
+        `${ROOT_PACKAGE_JSON}: ${devnetOnly} belongs in devDependencies — it is the devnet's and nothing else in this repository uses it`
+      ).toBeDefined();
+      expect(
+        pinned,
+        `${ROOT_PACKAGE_JSON}: ${devnetOnly} is pinned as "${String(pinned)}". Pin an exact release: a dependency that moved underneath a run is a run that proves nothing about the version anybody has.`
+      ).toMatch(AN_EXACT_VERSION);
+      expect(
+        Object.keys(root.dependencies ?? {}),
+        `${ROOT_PACKAGE_JSON}: ${devnetOnly} is not a runtime dependency of this workspace`
+      ).not.toContain(devnetOnly);
 
-    for (const manifest of PACKAGE_MANIFESTS) {
-      const declared = JSON.parse(readFile(manifest)) as {
-        dependencies?: Record<string, string>;
-        devDependencies?: Record<string, string>;
-      };
-      for (const [kind, deps] of [
-        ['dependencies', declared.dependencies],
-        ['devDependencies', declared.devDependencies],
-      ] as const) {
-        expect(
-          Object.keys(deps ?? {}),
-          `${manifest}: declares ${PAYER_PACKAGE} in ${kind}. Neither app in this repository contains payment code, and a dependency on the payer is how that stops being true.`
-        ).not.toContain(PAYER_PACKAGE);
+      for (const manifest of PACKAGE_MANIFESTS) {
+        const declared = JSON.parse(readFile(manifest)) as {
+          dependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+        };
+        for (const [kind, deps] of [
+          ['dependencies', declared.dependencies],
+          ['devDependencies', declared.devDependencies],
+        ] as const) {
+          expect(
+            Object.keys(deps ?? {}),
+            `${manifest}: declares ${devnetOnly} in ${kind}. It is the devnet's alone, and a manifest entry here is how it ends up in a published image.`
+          ).not.toContain(devnetOnly);
+        }
       }
     }
   });
 
-  it('lets nothing under packages/ import the payer', () => {
+  it('lets nothing under packages/ import the payer or the signer', () => {
     // The manifest check above is about what is INSTALLED; this is about what
-    // is written. An import from an app's own source would reach the payer
-    // through the workspace root's node_modules and typecheck perfectly, right
-    // up until the image that has no such directory.
+    // is written. An import from an app's own source would reach either
+    // package through the workspace root's node_modules and typecheck
+    // perfectly, right up until the image that has no such directory.
     const sources = execFileSync('git', ['ls-files', '--', 'packages'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
@@ -1246,10 +1359,12 @@ describe('devnet bundle', () => {
       .filter((file) => file !== THE_GUIDES_OWN_PAYER_GUARD);
 
     for (const file of sources) {
-      expect(
-        readFile(file).includes(PAYER_PACKAGE),
-        `${file}: names ${PAYER_PACKAGE}. No app in this repository contains payment code, and the payer is the devnet's alone.`
-      ).toBe(false);
+      for (const devnetOnly of DEVNET_ONLY_PACKAGES) {
+        expect(
+          readFile(file).includes(devnetOnly),
+          `${file}: names ${devnetOnly}. No app in this repository contains payment code or signs an announcement — both are the devnet's alone.`
+        ).toBe(false);
+      }
     }
   });
 

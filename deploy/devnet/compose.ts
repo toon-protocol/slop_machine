@@ -22,10 +22,11 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
+import { RELAY_NOSTR_KEY_FILE } from './credentials.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +41,21 @@ const PIN_OF_RECORD = resolve(REPO_ROOT, 'deploy/docker-compose.yml');
 
 /** The variable the devnet's compose file requires, and this module supplies. */
 const CONNECTOR_IMAGE_VAR = 'DEVNET_CONNECTOR_IMAGE';
+
+/**
+ * The relay's Nostr identity, supplied the same way. The relay image takes it
+ * as an ENVIRONMENT value and offers no file-valued form — the hub bundle's
+ * one `.env` secret, for the same reason — so the driver reads the generated
+ * file back and interpolates it in. Empty when nothing has been generated yet,
+ * which is every `down()` at the start of a run: teardown asks the relay to
+ * stop, not to boot.
+ */
+const RELAY_NOSTR_SECRET_VAR = 'DEVNET_RELAY_NOSTR_SECRET';
+
+function relayNostrSecret(): string {
+  if (!existsSync(RELAY_NOSTR_KEY_FILE)) return '';
+  return readFileSync(RELAY_NOSTR_KEY_FILE, 'utf8').trim();
+}
 
 /**
  * The compose project, as the daemon labels every container in it.
@@ -145,7 +161,10 @@ export async function compose(
   try {
     return await docker(['compose', '-f', COMPOSE_FILE, ...args], {
       timeoutMs: options.timeoutMs ?? 600_000,
-      env: { [CONNECTOR_IMAGE_VAR]: connectorPinOfRecord() },
+      env: {
+        [CONNECTOR_IMAGE_VAR]: connectorPinOfRecord(),
+        [RELAY_NOSTR_SECRET_VAR]: relayNostrSecret(),
+      },
     });
   } catch (cause) {
     const failure = cause as { stdout?: string; stderr?: string };

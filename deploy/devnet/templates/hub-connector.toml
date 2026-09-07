@@ -43,12 +43,18 @@ peer_allow_plaintext_endpoints = true
 key_file = "/app/data/signer.key"
 
 # ── What this hub says about itself ──────────────────────────────────────────
-# `addresses` lists what this hub TERMINATES, which is exactly the two routes
-# below. It does not list what it CARRIES: every station the slot app admits
-# gets a forwarded route written at runtime by the app's own operator key, and
-# never by this file.
+# `addresses` lists what this hub TERMINATES, which is exactly the four routes
+# below — the two slot routes and the two announcement routes. It does not
+# list what it CARRIES: every station the slot app admits gets a forwarded
+# route written at runtime by the app's own operator key, and never by this
+# file.
 [node]
-addresses = ["{{HUB_ADDRESS}}.slot.quote", "{{HUB_ADDRESS}}.slot.buy"]
+addresses = [
+  "{{HUB_ADDRESS}}.slot.quote",
+  "{{HUB_ADDRESS}}.slot.buy",
+  "{{HUB_ADDRESS}}.announce",
+  "{{HUB_ADDRESS}}.announce.ephemeral",
+]
 
 # WHERE THIS HUB'S OWN CLIENTS REACH IT, which in this topology is NOT its
 # compose service — and the station's is, which is the whole difference.
@@ -95,6 +101,41 @@ price = 1000000
 method = "POST"
 contentType = "application/json"
 body = { stationUrl = "string, required — your station connector's own self-description URL" }
+
+# ── The announcement surface ─────────────────────────────────────────────────
+# The relay's paid write, exactly as the shipped hub bundle terminates it: a
+# station being REACHABLE is what the two slot routes above sell, and a
+# station being FOUND is what lands here. ADR 0004 is the schema — the four
+# events the devnet's broadcaster signs and pays this route to carry, the
+# heartbeat included, because liveness has to be a STORED fact that decays and
+# the ephemeral lane below never stores.
+#
+# `/write`, not the bare relay: the relay also serves /health and /metrics,
+# and an envelope's target resolves strictly beneath this path.
+[[routes]]
+prefix = "{{HUB_ADDRESS}}.announce"
+handler_url = "http://hub-relay:3100/write"
+price = 1
+
+[routes.request]
+method = "POST"
+contentType = "application/json"
+body = { event = "a signed NIP-01 event" }
+
+# ── Free ephemeral writes (presence) ─────────────────────────────────────────
+# The same free lane the shipped hub bundle carries, at the same shape: only
+# ephemeral kinds (20000-29999), never stored, fully verified — that route has
+# no payment gate to lean on. Nothing in ADR 0004's schema travels this lane;
+# it exists here so the devnet's hub terminates what a real hub terminates.
+[[routes]]
+prefix = "{{HUB_ADDRESS}}.announce.ephemeral"
+handler_url = "http://hub-relay:3100/write-ephemeral"
+price = 0
+
+[routes.request]
+method = "POST"
+contentType = "application/json"
+body = { event = "a signed NIP-01 event of an ephemeral kind, 20000-29999" }
 
 # `per_kib` is set on no route in this file, as in neither shipped bundle: a
 # price is a schedule over the INBOUND payload, and everything terminated here

@@ -4,9 +4,11 @@
 #
 #   station-origin ──vibes──▶ station-connector ◀──carries── hub-connector
 #         :3100  :1935              :3000                        :3000
-#                                                                  │
-#                                                            hub-slot-app
-#                                                                :3200
+#                                                              │       │
+#                                                        hub-slot-app  │
+#                                                            :3200     │
+#                                                                  hub-relay
+#                                                              :3100  :7100
 #
 #   chain  :8545   anvil. The contracts are deployed onto it by the driver.
 #
@@ -35,6 +37,14 @@
 #   hub-connector       127.0.0.1:3000   the hub's client edge
 #   station-connector   127.0.0.1:3001   the station's client edge
 #   station-origin      127.0.0.1:1935   the broadcaster's own RTMP ingest
+#   hub-relay           127.0.0.1:7100   the relay's FREE NIP-01 reads
+#
+# The relay's read publish is not a free door either, and for the opposite
+# reason from ingest's: NIP-01 reads are free BY DESIGN — announcements are
+# found for nothing, and being reachable is what costs — so publishing the
+# free surface gives away exactly what the design gives away. The relay's
+# WRITE port (3100) is the paid surface and stays on `expose:` with the other
+# two below.
 #
 # TWO CONNECTORS NOW SHARE A MACHINE, so those host ports are DISTINCT while
 # both containers keep the same 3000 inside. That is the whole reason this
@@ -51,7 +61,10 @@
 # and /segments, /now, /health and /encode on the other, none of them with any
 # notion of a payment. A devnet that published either would be proving the
 # paid path over a topology that had a free door in it, and it is the one
-# habit that would then look normal in a bundle an operator runs.
+# habit that would then look normal in a bundle an operator runs. The RELAY'S
+# WRITE PORT is the same shape for the same reason — it takes announcement
+# writes with no notion of a payment — and it happens to share the segment
+# port's number, so the same guard covers it.
 #
 # THE INGEST PORT IS THE ONE PUBLISH THAT IS NOT THE DRIVER'S, and it belongs
 # to the STATION HALF and to nothing else: a hub carries no vibes of its own.
@@ -183,6 +196,62 @@ services:
         condition: service_healthy
       hub-slot-app:
         condition: service_healthy
+      hub-relay:
+        condition: service_healthy
+    restart: 'no'
+
+  # ── The announcement surface ───────────────────────────────────────────────
+  #
+  # The RELAY's own published image, unmodified, exactly as the hub bundle runs
+  # it — this repo writes no relay code and publishes no relay image. A station
+  # being REACHABLE is the slot app's business; being FOUND is this one's, and
+  # ADR 0004 is the schema of what lands here.
+  #
+  # Two ports, and they are not alike. 3100 takes PAID writes, has no notion of
+  # a payment on it, and is dialled only by hub-connector — so it stays
+  # `expose:` on exactly the slot app's terms (it shares the segment port's
+  # number, so the same guard line covers it). 7100 serves FREE NIP-01 reads
+  # and is published on loopback for the driver: reads are free BY DESIGN —
+  # announcements are found for nothing — so the free surface is the one
+  # surface with nothing behind it to protect. The hub bundle's local overlay
+  # publishes this same port for this same reason.
+  hub-relay:
+    image: ghcr.io/toon-protocol/relay:release
+    environment:
+      TOON_BLS_PORT: '3100' # paid writes — PRIVATE, only hub-connector dials it
+      TOON_RELAY_PORT: '7100' # free reads — published below, for the driver
+      TOON_DATA_DIR: /data
+      # The relay's own Nostr IDENTITY — not money, and not the broadcaster's
+      # announcement key. This image takes it as an ENVIRONMENT value and
+      # offers no file-valued form (the hub bundle's one `.env` secret, for
+      # the same reason), so the driver generates it per run into ./run/ and
+      # interpolates it here. The default is empty rather than required so
+      # that teardown works before anything has been generated; an empty
+      # identity is a relay that refuses to boot, which a run never meets
+      # because the driver always generates first.
+      NOSTR_SECRET_KEY: ${DEVNET_RELAY_NOSTR_SECRET:-}
+      # NIP-40, enforced: an event past its own expiration stops being served.
+      # Stated rather than left to an image default, because the heartbeat's
+      # whole design leans on it — liveness IS the existence of an unexpired
+      # heartbeat (ADR 0004), and the run watches one lapse. The hub bundle
+      # states the same value for the same reason.
+      TOON_ENFORCE_EXPIRATION: 'true'
+    volumes:
+      # events.db — the announcements themselves.
+      - hub_relay_data:/data
+    expose:
+      - '3100' # paid writes — private, only the connector dials this
+    ports:
+      # The free NIP-01 read surface, on loopback, for the driver: the devnet
+      # suite reads every announcement back off this — the seam the guide will
+      # consume — and it is free by design, so there is nothing here to sell.
+      - '127.0.0.1:7100:7100'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 2s
     restart: 'no'
 
   # The hub's admission desk. Built from THIS CHECKOUT, like the hub bundle's
@@ -349,6 +418,7 @@ volumes:
   # torn down with `--volumes` starts the next one from the same place as this
   # one whether or not anything here is named.
   hub_connector_state:
+  hub_relay_data:
   hub_slot_app_data:
   station_connector_state:
   station_origin_data:

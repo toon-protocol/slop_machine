@@ -41,6 +41,7 @@ import {
   type SettlementDeployment,
 } from './chain.js';
 import {
+  DRIVER_HELD_FILES,
   generateCredentials,
   GENERATED_FILES,
   HUB_CONNECTOR_TOML,
@@ -110,6 +111,20 @@ import {
 // full topology, so the surface the guide will stand on is exercised with
 // real money moving underneath it.
 import { startPlayer, type ContractState, type Player } from './player.js';
+// The announcements — ADR 0004's four events, published through the hub's
+// paid announce route and read back off the relay's free NIP-01 surface.
+// Shared with `demo.ts` like `paid.ts` is, and for the same reason; every
+// kind, tag and price this suite expects is still a literal declared below.
+import {
+  broadcasterVoice,
+  publishClip,
+  publishHeartbeat,
+  publishProfile,
+  publishStationAnnouncement,
+  readAnnouncements,
+  type BroadcasterVoice,
+  type PublishedEvent,
+} from './announce.js';
 
 /** The chain's own RPC, on loopback. Nothing in this topology is reachable off-box. */
 const CHAIN_RPC_URL = 'http://127.0.0.1:8545';
@@ -182,6 +197,8 @@ const PLACEHOLDER_STATION_APEX = `${HUB_ADDRESS}.demo`;
 const EXPECTED_HUB_ROUTES: { prefix: string; price: bigint }[] = [
   { prefix: `${HUB_ADDRESS}.slot.quote`, price: 50n },
   { prefix: `${HUB_ADDRESS}.slot.buy`, price: 1_000_000n },
+  { prefix: `${HUB_ADDRESS}.announce`, price: 1n },
+  { prefix: `${HUB_ADDRESS}.announce.ephemeral`, price: 0n },
 ];
 const EXPECTED_STATION_ROUTES: { rung: string; price: bigint }[] = [
   { rung: 'now', price: 50n },
@@ -194,6 +211,7 @@ const NODE_SERVICES = [
   'station-origin',
   'station-connector',
   'hub-slot-app',
+  'hub-relay',
   'hub-connector',
 ];
 
@@ -327,6 +345,67 @@ const CONTRACT_BUDGET_PER_SECOND = 600n;
 /** What the raise attempt asks for — bigger, so "it stood" is not "it matched". */
 const A_RAISED_BUDGET = '9000000';
 
+// ── The announcements ────────────────────────────────────────────────────────
+
+/**
+ * The relay's free NIP-01 read surface, on the driver's loopback publish.
+ * This is the seam the guide will consume, which is exactly why the suite
+ * asserts here rather than trusting what it published.
+ */
+const RELAY_READ_URL = 'ws://127.0.0.1:7100';
+
+/** What the hub charges to carry one announcement write. */
+const EXPECTED_ANNOUNCE_PRICE = 1n;
+
+/**
+ * ADR 0004's four kinds, declared here as literals rather than imported from
+ * `announce.ts` — the schema has one implementation and this suite is what
+ * holds it still, so a kind changed there must go red here.
+ */
+const PROFILE_KIND = 0;
+const STATION_ANNOUNCEMENT_KIND = 11750;
+const HEARTBEAT_KIND = 11751;
+const CLIP_KIND = 1063;
+
+/** The profile a viber would read to decide whether to vibe. */
+const BROADCASTER_PROFILE = {
+  name: 'The Devnet Broadcaster',
+  about: 'a test pattern with a tone under it, priced honestly',
+  picture: 'https://example.invalid/devnet-broadcaster.png',
+};
+
+/** The station's own about, and the categories it announces itself under. */
+const STATION_ABOUT = 'the vibes this run pushed through its own ingest';
+const STATION_CATEGORIES = ['slop', 'test-pattern'];
+
+/**
+ * The rung tags the announcement must carry, in ladder order: each rung at
+ * the station's OWN published per-segment price, as a decimal string of base
+ * units. These agree with `EXPECTED_STATION_ROUTES` by being the same numbers
+ * — the emitting code derives them from the station's self-description, and
+ * this literal is what catches it restating anything else.
+ */
+const EXPECTED_RUNG_TAGS = [
+  ['rung', 'audio', '200'],
+  ['rung', '480p', '1000'],
+];
+
+/** One clip, one event. The URL shape is Arweave's; the run stores nothing there. */
+const CLIP = {
+  url: 'https://arweave.net/devnet-first-light',
+  title: 'first light',
+  durationSeconds: 42,
+  description: 'the first vibes this station ever held',
+};
+
+/**
+ * How long the run's heartbeat lives. Short enough that the suite can watch
+ * it lapse without a fake clock — the same reason every period in this
+ * repository is in seconds — and long enough that the read taken right after
+ * publishing sees it standing.
+ */
+const HEARTBEAT_EXPIRES_IN_SECONDS = 8;
+
 describe('the devnet', () => {
   let deployment: SettlementDeployment;
   let credentials: DevnetCredentials;
@@ -348,6 +427,16 @@ describe('the devnet', () => {
   let paidForTheSlot: bigint;
   let carriedRoutes: CarriedRoute[];
   let carriedPeerings: CarriedPeering[];
+  /** The broadcaster's announcement keypair — their public voice, minted per run. */
+  let voice: BroadcasterVoice;
+  let profile: PublishedEvent;
+  let announcement: PublishedEvent;
+  let heartbeat: PublishedEvent;
+  let clip: PublishedEvent;
+  /** When the run's one heartbeat claims to stop being true. */
+  let heartbeatExpiresAt: number;
+  /** The heartbeat as the relay served it WHILE it was unexpired. */
+  let heartbeatWhileOnAir: Awaited<ReturnType<typeof readAnnouncements>>;
   let viber: Payer;
   let now: PaidPull;
   const segments: BoughtSegment[] = [];
@@ -524,6 +613,63 @@ describe('the devnet', () => {
       HUB_EDGE_URL,
       credentials.hub.bearerToken
     );
+
+    // ── The announcements ───────────────────────────────────────────────────
+    //
+    // The broadcaster is reachable; now they make themselves FOUND. All four
+    // of ADR 0004's events go through the hub's paid announce route, signed
+    // with the per-broadcaster keypair the run minted — and the ladder in the
+    // station announcement is DERIVED from the station connector's own
+    // published routes, never restated, so the announcement and the routes
+    // cannot drift.
+    voice = broadcasterVoice(credentials.station.nostrSecretKey);
+    const announcedRungs = LADDER.map((rung) => {
+      const published = station.routes.find(
+        (route) => route.prefix === `${quote.prefix}.${rung}`
+      );
+      if (published === undefined) {
+        throw new Error(
+          `the station publishes no route for the rung "${rung}", so there is nothing to announce for it`
+        );
+      }
+      return { rung, price: published.price };
+    });
+
+    profile = await publishProfile(
+      broadcaster,
+      HUB_ADDRESS,
+      voice,
+      BROADCASTER_PROFILE
+    );
+    announcement = await publishStationAnnouncement(
+      broadcaster,
+      HUB_ADDRESS,
+      voice,
+      {
+        prefix: quote.prefix,
+        segmentSeconds: EXPECTED_SEGMENT_SECONDS,
+        rungs: announcedRungs,
+        categories: STATION_CATEGORIES,
+        about: STATION_ABOUT,
+      }
+    );
+    heartbeatExpiresAt =
+      Math.floor(Date.now() / 1000) + HEARTBEAT_EXPIRES_IN_SECONDS;
+    heartbeat = await publishHeartbeat(
+      broadcaster,
+      HUB_ADDRESS,
+      voice,
+      heartbeatExpiresAt
+    );
+    clip = await publishClip(broadcaster, HUB_ADDRESS, voice, CLIP);
+
+    // Read back NOW, off the free surface, while the heartbeat is unexpired:
+    // the rest of this setup takes longer than the heartbeat lives, which is
+    // the point of the lapse assertion at the foot of the suite.
+    heartbeatWhileOnAir = await readAnnouncements(RELAY_READ_URL, {
+      authors: [voice.pubkey],
+      kinds: [HEARTBEAT_KIND],
+    });
 
     // ── A viber ─────────────────────────────────────────────────────────────
     //
@@ -900,6 +1046,17 @@ describe('the devnet', () => {
         `${file} is not readable by the container that mounts it`
       ).toBeGreaterThan(0);
     }
+
+    // And the driver-held pair — the relay's identity, which the driver
+    // passes in as environment because that image has no file-valued form,
+    // and the broadcaster's own announcement keypair, which signs from the
+    // driver and is mounted into nothing.
+    for (const file of DRIVER_HELD_FILES) {
+      expect(
+        existsSync(resolve(WORK_DIR, file)),
+        `${file} was not generated`
+      ).toBe(true);
+    }
   });
 
   it("derives the operator write key's public half with the app's own ed25519 handling", () => {
@@ -1081,13 +1238,15 @@ describe('the devnet', () => {
     }
   });
 
-  it('has the hub publish the two priced routes it terminates and nothing else', () => {
+  it('has the hub publish the four priced routes it terminates and nothing else', () => {
     // A prefix terminated but never advertised is an address no broadcaster
     // can discover — `GET /ilp` is how a stranger who has only heard of this
     // hub finds where to buy. One advertised but not terminated is a paid 404.
+    // Four routes now: the quote, the buy, and the two announcement lanes —
+    // each beneath its own prefix, none reachable at another's price.
     expect(
       pricedAddresses(hub),
-      `the hub publishes ${JSON.stringify(hub.routes.map((r) => r.prefix))} — the quote and the buy, each beneath its own prefix and neither reachable at the other's price`
+      `the hub publishes ${JSON.stringify(hub.routes.map((r) => r.prefix))} — the quote, the buy and the two announcement lanes, each beneath its own prefix and none reachable at another's price`
     ).toEqual(byPrefix(EXPECTED_HUB_ROUTES));
 
     expect(hub.ilpAddresses.slice().sort()).toEqual(
@@ -1820,6 +1979,176 @@ describe('the devnet', () => {
       contractStateAfter.budgetPerSecond,
       `the budget reads ${contractStateAfter.budgetPerSecond} after the raise was attempted, and the paying side's own figure is ${CONTRACT_BUDGET_PER_SECOND.toString()}`
     ).toBe('600');
+  });
+
+  // ── The announcements ──────────────────────────────────────────────────────
+  //
+  // ADR 0004's four events, asserted AT THE CONSUMER'S SEAM: everything below
+  // is read back off the relay's free NIP-01 surface — the same surface the
+  // guide will stand at — never off what the run happens to remember
+  // publishing.
+
+  it('pays the announce route once per event, and signs each with the minted voice', () => {
+    // Four writes, each an ordinary paid packet at the announce route's own
+    // price — publishing is paid, reading is free, and that split is the
+    // design. And every one carries the pubkey of the keypair this run
+    // minted, which is what a consumer will query the relay by.
+    for (const [what, published] of [
+      ['the profile', profile],
+      ['the station announcement', announcement],
+      ['the heartbeat', heartbeat],
+      ['the clip', clip],
+    ] as const) {
+      expect(
+        published.paid,
+        `${what} cost ${String(published.paid)} to publish, and the hub carries an announcement write at ${String(EXPECTED_ANNOUNCE_PRICE)}`
+      ).toBe(EXPECTED_ANNOUNCE_PRICE);
+      expect(
+        published.event.pubkey,
+        `${what} is signed by ${published.event.pubkey}, and the broadcaster's minted voice is ${voice.pubkey}`
+      ).toBe(voice.pubkey);
+    }
+  });
+
+  it('publishes a standard kind 0 profile any Nostr client can render', async () => {
+    // Kind 0 and nothing custom in it, deliberately: free interop with every
+    // Nostr client on earth, without the guide existing.
+    const read = await readAnnouncements(RELAY_READ_URL, {
+      authors: [voice.pubkey],
+      kinds: [PROFILE_KIND],
+    });
+
+    expect(
+      read.length,
+      `the relay serves ${String(read.length)} profiles for this broadcaster, and one was published`
+    ).toBe(1);
+    expect(read[0]?.kind).toBe(PROFILE_KIND);
+    expect(
+      JSON.parse(read[0]?.content ?? '{}'),
+      `the profile's content is not the display name, about and avatar that were published`
+    ).toEqual(BROADCASTER_PROFILE);
+  });
+
+  it("announces the station: its address, its ladder at the station's own prices, its categories", async () => {
+    const read = await readAnnouncements(RELAY_READ_URL, {
+      authors: [voice.pubkey],
+      kinds: [STATION_ANNOUNCEMENT_KIND],
+    });
+
+    expect(
+      read.length,
+      `the relay serves ${String(read.length)} station announcements for this broadcaster — the kind is replaceable and one was published`
+    ).toBe(1);
+    const event = read[0];
+
+    // The ILP address is the prefix the hub granted — the one the station was
+    // re-rendered at and the one every route the viber paid actually used.
+    expect(
+      event?.tags.filter((tag) => tag[0] === 'ilp'),
+      `the announcement does not name the station's own ILP address`
+    ).toEqual([['ilp', quote.prefix]]);
+
+    // The fixed segment duration, so a per-segment price is a rate.
+    expect(event?.tags.filter((tag) => tag[0] === 'segment')).toEqual([
+      ['segment', String(EXPECTED_SEGMENT_SECONDS)],
+    ]);
+
+    // THE LADDER, at the station connector's own published per-segment prices
+    // and in ladder order. The emitting code derived these from the station's
+    // self-description; these literals are what catch it restating anything
+    // else — and they are the same numbers EXPECTED_STATION_ROUTES holds,
+    // which is the agreement the schema promises.
+    expect(
+      event?.tags.filter((tag) => tag[0] === 'rung'),
+      `the announcement's ladder does not agree with the station's own published routes`
+    ).toEqual(EXPECTED_RUNG_TAGS);
+
+    // Free-form categories, as `t` tags — the one tag every relay indexes.
+    expect(event?.tags.filter((tag) => tag[0] === 't')).toEqual(
+      STATION_CATEGORIES.map((category) => ['t', category])
+    );
+
+    expect(event?.content).toBe(STATION_ABOUT);
+  });
+
+  it('reads as on the air exactly while an unexpired heartbeat stands', () => {
+    // The read taken in setup, seconds after publishing and before the
+    // expiry: one heartbeat, its expiration still in the future at the moment
+    // it was served. Liveness IS this — there is no live flag anywhere else,
+    // and no sign-off event exists to get wrong.
+    expect(
+      heartbeatWhileOnAir.length,
+      `the relay served ${String(heartbeatWhileOnAir.length)} heartbeats while the station was on the air`
+    ).toBe(1);
+    expect(heartbeatWhileOnAir[0]?.kind).toBe(HEARTBEAT_KIND);
+    expect(
+      heartbeatWhileOnAir[0]?.tags.filter((tag) => tag[0] === 'expiration'),
+      `the heartbeat carries no NIP-40 expiration, so it would never stop being true`
+    ).toEqual([['expiration', String(heartbeatExpiresAt)]]);
+  });
+
+  it('reads as off the air once the heartbeat lapses, with no sign-off published', async () => {
+    // The crash-safety claim, exercised: nothing publishes "I stopped" — the
+    // run simply stops heartbeating, exactly as a dead process would, and the
+    // claim expires on its own. The relay enforces NIP-40 and stops serving
+    // the expired event, and a consumer must apply the same rule itself
+    // regardless (ADR 0004): both roads lead to the same answer here, an
+    // empty read.
+    const remaining = heartbeatExpiresAt * 1000 - Date.now() + 2_000; // past expiry, with slack
+    if (remaining > 0) {
+      await new Promise((lapsed) => setTimeout(lapsed, remaining));
+    }
+
+    const read = await readAnnouncements(RELAY_READ_URL, {
+      authors: [voice.pubkey],
+      kinds: [HEARTBEAT_KIND],
+    });
+    const unexpired = read.filter((event) =>
+      event.tags.some(
+        (tag) => tag[0] === 'expiration' && Number(tag[1]) > Date.now() / 1000
+      )
+    );
+
+    expect(
+      unexpired.length,
+      `the station's heartbeat lapsed ${String(Math.floor(Date.now() / 1000 - heartbeatExpiresAt))}s ago and an unexpired one is still being served — a dead station would read as live for ever`
+    ).toBe(0);
+    expect(
+      read.length,
+      `the relay is still serving ${String(read.length)} expired heartbeats — it enforces NIP-40 expiry on reads, and an expired liveness claim must stop being served`
+    ).toBe(0);
+  });
+
+  it('publishes one NIP-94-style event per clip, queryable by the broadcaster', async () => {
+    const read = await readAnnouncements(RELAY_READ_URL, {
+      authors: [voice.pubkey],
+      kinds: [CLIP_KIND],
+    });
+
+    expect(
+      read.length,
+      `the relay serves ${String(read.length)} clips for this broadcaster, and one was published`
+    ).toBe(1);
+    const event = read[0];
+
+    expect(event?.tags.filter((tag) => tag[0] === 'url')).toEqual([
+      ['url', CLIP.url],
+    ]);
+    expect(event?.tags.filter((tag) => tag[0] === 'title')).toEqual([
+      ['title', CLIP.title],
+    ]);
+    expect(event?.tags.filter((tag) => tag[0] === 'duration')).toEqual([
+      ['duration', String(CLIP.durationSeconds)],
+    ]);
+    expect(event?.content).toBe(CLIP.description);
+
+    // The posted-at is the event's own created_at — a real timestamp, not a
+    // tag to forget.
+    expect(
+      event?.created_at,
+      `the clip carries no plausible posted-at`
+    ).toBeGreaterThan(0);
+    expect(event?.created_at).toBeLessThanOrEqual(Math.ceil(Date.now() / 1000));
   });
 });
 
