@@ -57,7 +57,7 @@ devnet that published either would be proving the paid path over a topology with
 
 **The ingest port is the one publish that is not the driver's.** It belongs to the station half and
 to nothing else — a hub carries no vibes of its own — and it is published on loopback so the
-*broadcaster's own encoder* can reach the ingest it is entitled to. An OBS on this machine is what
+_broadcaster's own encoder_ can reach the ingest it is entitled to. An OBS on this machine is what
 a broadcaster actually holds, and the shipped station bundle publishes this same port for this same
 party. It is not a fourth free door: ingest is **authenticated**, on the stream key checked before
 a byte is transcoded, and it is the **unpaid** direction by design — supplying vibes costs a
@@ -107,7 +107,7 @@ Once the slot is bought, the broadcaster makes their station **found** as well a
 [ADR 0004](../../docs/adr/0004-a-station-announces-itself-in-four-events.md)'s four events — a
 standard kind 0 profile, a replaceable station announcement carrying the granted ILP address, the
 ladder at the station's own per-segment prices and its free-form categories, a short-expiry
-heartbeat whose unexpired existence *is* liveness, and one NIP-94-style event per clip — each
+heartbeat whose unexpired existence _is_ liveness, and one NIP-94-style event per clip — each
 signed with a per-broadcaster Nostr keypair the run mints, and each an ordinary **paid write**
 through the hub's `announce` route to the stock relay image the hub runs. The suite then reads
 every one back off the relay's **free NIP-01 surface** — the seam a discovery client will consume —
@@ -262,7 +262,7 @@ VITE_RELAY_URL=ws://<guide-address>.anyone:7100 pnpm --filter @toon-protocol/gui
 ```
 
 then re-run the demo. `VITE_PLAYBACK_URL` is deliberately **not** baked: its default,
-`http://127.0.0.1:8088`, is each reader's *own* paying side — the host's demo player, or a remote
+`http://127.0.0.1:8088`, is each reader's _own_ paying side — the host's demo player, or a remote
 viewer's `pnpm demo:viewer` on its default port — which is ADR 0005's seam working: the page
 travels, the budget stays home. (A viewer whose player was moved with `--port` — the same-machine
 rehearsal above uses 8090 — will see the hosted-mode explanation instead of the theater, because
@@ -280,6 +280,21 @@ across the line can extend it.
 Port 4173 is also the guide harness's own vite origin, so `pnpm test:guide` and an `--anyone`
 demo's guide server cannot run at the same time; the demo says so and continues without the page
 rather than dying over it.
+
+**A host firewall can silently cut the guide's last hop.** The daemon forwards the guide service
+to a server the _host_ runs on the bridge gateway address, and that container-to-host traffic goes
+through the host's INPUT chain — which a default-deny firewall (ufw on this repo's first live box)
+drops, so the page times out over the circuit while everything container-to-container (the hub,
+the chain, the relay) keeps working. The fix is one rule scoped to the pinned subnet and the one
+port:
+
+```
+sudo ufw allow from 10.213.0.0/16 to any port 4173 proto tcp comment 'slopmachine devnet: guide over the hidden service'
+```
+
+The probe that tells this apart from descriptor propagation: from inside the daemon's container,
+`bash -c 'exec 3<>/dev/tcp/10.213.0.1/4173'` — blocked means the firewall, open means keep
+waiting for the descriptor.
 
 [`bundle.test.ts`](bundle.test.ts) is this bundle's guard, the sibling of
 [`../bundle.test.ts`](../bundle.test.ts) and [`../hub/bundle.test.ts`](../hub/bundle.test.ts). It
