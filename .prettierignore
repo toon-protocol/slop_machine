@@ -1,0 +1,13 @@
+# The devnet's generated directory, and it is generated ALL THE WAY DOWN: two
+# `connector.toml`s, every credential, and — since `pnpm demo` — the MPEG-TS
+# segments a viber has bought.
+#
+# THIS IS THE `.ts` COLLISION CLAUDE.md WARNS ABOUT. An HLS segment is an
+# MPEG-TS file with a `.ts` extension, which is also TypeScript's, so
+# `deploy/**/*.ts` in the format scripts matches a broadcast. Without this,
+# `pnpm format:check` fails for anybody who has run the demo — and it fails by
+# printing binary video into their terminal.
+#
+# Ignored by DIRECTORY rather than by extension, which is the rule the repo
+# already follows for `segments/` and `recordings/`: never add a `*.ts` ignore.
+deploy/devnet/run/

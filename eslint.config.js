@@ -45,6 +45,12 @@ export default tseslint.config(
       '**/dist/**',
       '**/node_modules/**',
       'coverage/**',
+      // The devnet's generated directory. Since `pnpm demo` it holds the
+      // MPEG-TS segments a viber bought, and an HLS segment's `.ts` extension
+      // is TypeScript's — so linting it means parsing video as source. The
+      // `.ts` collision CLAUDE.md warns about; ignored by DIRECTORY, never by
+      // extension.
+      'deploy/devnet/run/**',
       '**/*.js',
       '**/*.cjs',
       '**/*.mjs',
