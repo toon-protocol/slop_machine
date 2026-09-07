@@ -127,6 +127,33 @@ hosted off the station node, and outside the paid path — it is what keeps tryi
 because paying one at all means opening a payment channel with them.
 _Avoid_: profile, landing page, station page, listing
 
+## Clip
+
+A finished piece of a broadcaster's vibes, kept and offered on the broadcaster
+page — what a viber can try for free before paying to vibe live. A clip is
+outside the paid path: writing one costs the broadcaster, reading one costs
+nobody. Live vibes are not clips, and a clip does not go stale.
+_Avoid_: VOD, recording, upload, video (a clip may be sound alone)
+
+## Announcement
+
+What a broadcaster publishes to a hub's relay to make their station findable:
+the free, readable claim that the station exists, what it carries, and what
+vibing with it costs. Reading announcements is how discovery works, and it is
+free; publishing one is paid. An announcement is a claim by the broadcaster,
+not a fact checked by the hub.
+_Avoid_: listing, advertisement, registration, broadcast (collides with the
+vibes themselves)
+
+## Category
+
+A label a station announces itself under, and the axis a viber browses by when
+they do not yet know which station they want. A broadcaster picks their
+station's categories; a hub's discovery surface groups stations by them. A
+category describes the vibes, not the medium — audio-only versus video is a
+rung's business, not a category's.
+_Avoid_: genre, tag, topic, game, directory
+
 ## Segment
 
 The unit in which a station's vibes are delivered — a short, self-contained span

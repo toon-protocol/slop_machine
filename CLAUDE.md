@@ -1044,6 +1044,69 @@ Cross-cutting agent skills, docs, and the canonical project context live in
 Canonical rules/decisions: `toon-meta` → [`context/context.md`](https://github.com/toon-protocol/toon-meta/blob/main/context/context.md),
 with `architecture.md`, `repos.md`, `decisions.md` and `glossary.md` beside it.
 
+## Two CLIs on the box: Playwright and shadcn
+
+Both are installed **globally, through `mise`** — the way `gh`, `codex` and `claude` already are on
+a machine that works on this repo — and both resolve on PATH through `~/.local/share/mise/shims/`:
+
+```
+mise use -g npm:playwright   # then: playwright install chromium
+mise use -g npm:shadcn
+```
+
+**Neither is a dependency of this repository and neither may become one.** `pnpm-workspace.yaml`
+refuses auto-installed peers on the grounds that a dependency nothing in the repo asked for is one
+nobody can account for, and the same argument holds here: these two drive and design a page, they
+are linked into no image, and no `pnpm` script calls either. `package.json` gains nothing for them.
+
+### Playwright drives the demo page, which is the one surface no suite can see
+
+`pnpm test` boots the real apps and speaks HTTP and real RTMP at them; `pnpm test:devnet` asserts
+the money on chain. **Neither of them ever looks at a picture.** `deploy/devnet/page.ts` — the page
+`pnpm demo` serves on `127.0.0.1:8088` — is the only thing in this repository whose whole job is to
+be *seen*: the rung buttons that make choosing a quality into choosing a price, the split between
+broadcaster and hub derived from the two nodes' own published prices, and the button that redeems a
+claim on chain. Playwright is how that page gets checked without asking a person to look at it.
+
+Chromium is installed and Firefox and WebKit are not; a run that wants them installs them rather
+than assuming them.
+
+Two rules about where a spec may live, and both are about collisions this repo has already been
+bitten by:
+
+- **A Playwright spec is never named `*.test.ts` under `packages/*/src/`, `deploy/` or
+  `deploy/hub/`.** `vitest.config.ts` includes all three globs, so such a file would be collected by
+  `pnpm test` — which has no browser and no demo running — and would go red for everybody.
+  `deploy/devnet/` is safe only by accident: vitest names `bundle.test.ts` by FILE precisely because
+  the devnet driver lives beside it. Do not lean on that accident. Give a spec its own extension,
+  `*.spec.ts`.
+- **Nothing Playwright writes belongs in `deploy/devnet/run/`.** That directory is excluded from
+  prettier, eslint and `tsc` because `pnpm demo` fills it with MPEG-TS segments whose `.ts`
+  extension is TypeScript's. A screenshot or a trace dropped there is invisible to all three, which
+  is fine; a *spec* dropped there is invisible too, which is not.
+
+**Playwright must never join `pnpm test`.** It needs a browser and a running demo, and `pnpm test`
+is the run that has to work on a laptop with no Docker daemon. Wired to a script at all, it is an
+opt-in one beside `test:devnet` and `test:image`, which are opt-in for exactly the same reason.
+
+### shadcn is the house component source, and has nothing to point at yet
+
+`shadcn` writes components into a React and Tailwind project, and **this repository does not have
+one**: two Hono services and a page that is a single inlined string. It is on the box ahead of the
+work rather than behind it, and the honest state today is that **`shadcn init` has no target here.**
+
+It specifically does **not** apply to `deploy/devnet/page.ts`, and that file's own header already
+says why: the page is inline, as one string, because `demo.ts` is bundled to a single file before it
+runs and a bundle has no directory to read a sibling out of — a file found at run time is a file
+that is missing exactly once, on somebody else's machine, at a demo. shadcn's whole output is files
+to be read; the demo page is deliberately a place where files cannot be read. **Do not turn that
+page into a component tree.** Overturn the constraint first, in the same commit, or leave the page
+alone.
+
+Where shadcn *is* the answer: any **new** UI package under `packages/`, which would be an ordinary
+React and Tailwind app with a real build and a real directory. Take components from shadcn rather
+than hand-rolling them there, and the demo page stays the one exception, named as such.
+
 ## Agent skills
 
 ### Issue tracker
