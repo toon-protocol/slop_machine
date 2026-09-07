@@ -69,6 +69,7 @@ import { WORK_DIR } from './credentials.js';
 import { pullThroughTheHub } from './paid.js';
 import type { Payer } from './payer.js';
 import { startPlayer, type DemoState, type Player } from './player.js';
+import { startRelayForwarder, type RelayForwarder } from './relay-forwarder.js';
 import {
   createLedger,
   createViberCycle,
@@ -118,6 +119,18 @@ const VIEWER_SOCKS_HOST_PORT = 9250;
 
 /** How long a first bootstrap onto the live Anyone network may take. */
 const BOOTSTRAP_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * The relay's free NIP-01 reads, as the hosted guide dials them: each
+ * reader's OWN loopback, at the number the devnet publishes everywhere. On
+ * the demo host that port is the compose bundle's own publish; on a viewer's
+ * machine the forwarder below serves it, carrying the reads over this
+ * viewer's circuit to the guide service's same port.
+ */
+const RELAY_READ_PORT = 7100;
+
+/** Where the hosted guide lives — the page the forwarder lights up. */
+const PAGES_GUIDE_URL = 'https://toon-protocol.github.io/slop_machine/';
 
 interface Arguments {
   connector: string;
@@ -193,6 +206,17 @@ async function main(): Promise<void> {
   const tearDownDaemon = async (): Promise<void> => {
     if (ownDaemon) await removeContainer(VIEWER_ANON_CONTAINER);
   };
+
+  // ── The relay reads, forwarded for the hosted guide ────────────────────────
+  //
+  // The Pages guide reads `ws://127.0.0.1:7100` — each reader's own machine —
+  // and a browser cannot dial a hidden service by any route, so the driver
+  // stands on that port and carries each connection over THIS viewer's
+  // circuit to the guide service's relay forward. Free reads only: nothing
+  // about it touches payment or the budget, which stay with the paying side.
+  // A port already taken is the demo HOST's own relay publish serving the
+  // same readers directly — the working state, not an error.
+  const relayForward = await startRelayReads(options.guideOrigin, socksProxy);
 
   try {
     // ── The payer, entirely over the circuit ─────────────────────────────────
@@ -416,9 +440,79 @@ async function main(): Promise<void> {
       await client.close();
     }
   } finally {
+    await relayForward?.close();
     await tearDownDaemon();
     say('torn down');
   }
+}
+
+/**
+ * Stand the relay forwarder up when there is a guide service to forward to —
+ * `--guide-origin` names it, and only a `.anyone` origin has a circuit-side
+ * relay behind it (the Pages origin in the allowlist is a clearnet page, not
+ * a place reads come from). Every outcome is said out loud, and none of them
+ * stops the viewer: the grid is a convenience beside the paid path.
+ */
+async function startRelayReads(
+  guideOrigin: string | null,
+  socksProxy: string
+): Promise<RelayForwarder | null> {
+  if (guideOrigin === null) return null;
+
+  let guideHost = '';
+  try {
+    guideHost = new URL(guideOrigin).hostname;
+  } catch {
+    say(
+      `--guide-origin "${guideOrigin}" is not a URL; not forwarding relay reads`
+    );
+    return null;
+  }
+  if (!guideHost.endsWith('.anyone')) return null;
+
+  const socks = new URL(socksProxy);
+  try {
+    const forwarder = await startRelayForwarder({
+      listenPort: RELAY_READ_PORT,
+      socksHost: socks.hostname,
+      socksPort: Number(socks.port),
+      targetHost: guideHost,
+      targetPort: RELAY_READ_PORT,
+    });
+    say(
+      `relay reads forwarded: ws://127.0.0.1:${String(RELAY_READ_PORT)} rides this circuit to ${guideHost}`
+    );
+    printHostedGuide();
+    return forwarder;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      // The demo host's own machine: the compose bundle publishes the relay's
+      // free reads on this same port, and the hosted guide reads them
+      // directly. Working as designed, and said so.
+      say(
+        `port ${String(RELAY_READ_PORT)} is already served on this machine — the demo's own relay publish; the hosted guide reads it directly`
+      );
+      printHostedGuide();
+      return null;
+    }
+    say(
+      `the relay forwarder could not start: ${cause instanceof Error ? cause.message : String(cause)} — the paid path continues; the hosted guide's grid will stay empty here`
+    );
+    return null;
+  }
+}
+
+/** The two lines that close the loop for a person at this keyboard. */
+function printHostedGuide(): void {
+  console.log(
+    [
+      '',
+      `  Open ${PAGES_GUIDE_URL} — the guide finds this station through`,
+      "  relay reads riding this viewer's own circuit, and vibes against this",
+      '  paying side.',
+      '',
+    ].join('\n')
+  );
 }
 
 /** Wait for the viewer's own daemon to have a circuit. */

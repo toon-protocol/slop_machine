@@ -239,6 +239,16 @@ settlement address is never broadcast from its own IP — discovers the ladder f
 display; `--socks socks5h://…` skips the managed daemon when one is already running. Ctrl-C prints
 what was paid and removes the daemon container.
 
+And that is the whole story for the hosted guide too: **run the command, open
+<https://toon-protocol.github.io/slop_machine/>.** With `--guide-origin` naming a `.anyone` guide,
+the viewer also stands a tiny forwarder on its own `127.0.0.1:7100` — each connection hand-carried
+through the viewer's SOCKS proxy to the guide service's relay forward — so the hosted page's
+`ws://127.0.0.1:7100` relay reads ride the viewer's own circuit, the grid lights up, and the page
+vibes against this viewer's own paying side at `127.0.0.1:8088`. Free reads only; nothing about
+the forwarder touches payment or the budget. On the demo **host** that port is already the compose
+bundle's own relay publish — the forwarder says so and stands down, because the hosted guide reads
+it directly there.
+
 Running the viewer **on the same machine as the host** — the full-circuit rehearsal — works too:
 the viewer's daemon takes its own SOCKS port so it never fights the host's 9050, but the page
 defaults to the same 8088 the host's page holds, so add `--port 8090`.

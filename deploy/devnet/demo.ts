@@ -1127,6 +1127,10 @@ function printViewerInstructions(options: {
       '  │  over the circuit — bootstrap takes a minute or two, and the first',
       '  │  segments a while longer. --socks skips the managed daemon if one',
       '  │  is already running.',
+      '  │',
+      '  │  Once it is up, open https://toon-protocol.github.io/slop_machine/',
+      '  │  — the guide finds this station through relay reads riding the',
+      "  │  viewer's own circuit, and vibes against their own paying side.",
       '  └──────────────────────────────────────────────────────────────────',
       '',
     ].join('\n')
