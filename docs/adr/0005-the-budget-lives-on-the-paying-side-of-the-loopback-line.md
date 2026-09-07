@@ -148,7 +148,8 @@ window.
 
 | Status | Error                      | What it is about                                                  |
 | ------ | -------------------------- | ----------------------------------------------------------------- |
-| `400`  | `no_station` / `no_rung`   | the write's one required key is missing or unreadable             |
+| `400`  | `no_station` / `no_rung`   | the write's one required key is missing                           |
+| `400`  | `unreadable_body`          | a body that is not JSON                                           |
 | `403`  | `origin_not_allowed`       | a web page the paying side does not know tried to initiate spend  |
 | `403`  | `budget_is_not_yours`      | the invariant, by name                                            |
 | `404`  | `unknown_station`          | a station this payer holds no channel toward                      |
