@@ -81,7 +81,12 @@ import {
   up,
 } from './compose.js';
 import { ANYONE_PROFILE, HS_HOSTNAME_PATTERN } from './anon.js';
-import { generatePayerKey, openPayer, type PayerKey } from './payer.js';
+import {
+  generatePayerKey,
+  openPayer,
+  waitForClientEdge,
+  type PayerKey,
+} from './payer.js';
 import {
   createLedger,
   createViberCycle,
@@ -290,7 +295,7 @@ async function main(): Promise<void> {
     await up(['hub-anon'], { profiles: [ANYONE_PROFILE] });
     say('anon is up — bootstrapping onto the live Anyone network…');
     hubHiddenService = await waitForHiddenService();
-    say(`the hub is reachable at http://${hubHiddenService}`);
+    say(`the hub's hidden-service address is http://${hubHiddenService}`);
   }
 
   // In `--anyone` mode every payer — the broadcaster, this run's own viber,
@@ -311,6 +316,22 @@ async function main(): Promise<void> {
   await up(NODE_SERVICES);
   await readSelfDescription(`${HUB_EDGE_URL}/ilp`);
   say('hub and station up');
+
+  // The address exists; now wait until it ANSWERS. A fresh descriptor takes a
+  // minute or two to propagate after bootstrap, and a payer that dials into
+  // that window dies on `could not reach the connector client edge` — which is
+  // a bring-up failure, not a payment one, so it is waited out here rather
+  // than left to `withCircuitPatience`'s few attempts.
+  if (hubHiddenService !== null) {
+    say('waiting for the hidden service to answer through the circuit…');
+    await waitForClientEdge({
+      connectorUrl: `http://${hubHiddenService}`,
+      socksProxy: HUB_SOCKS_PROXY,
+      rpcUrl: CHAIN_RPC_URL,
+      say,
+    });
+    say('the circuit answers — the hidden service is live');
+  }
 
   // How this run's own payers reach the hub: over the circuit when there is
   // one — the point of `--anyone` is that the paid path rides it — and over

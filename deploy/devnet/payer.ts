@@ -151,3 +151,55 @@ export async function openPayer(options: OpenPayerOptions): Promise<Payer> {
     deposit: options.funding.deposit,
   };
 }
+
+/**
+ * Wait until a hidden-service client edge actually ANSWERS through the
+ * circuit.
+ *
+ * `Bootstrapped 100%` means the daemon has a circuit, not that anybody can
+ * reach the service: a freshly published address stays unreachable for a
+ * minute or two while the network learns its introduction points, and a
+ * channel opened into that window dies as `could not reach the connector
+ * client edge` — which is exactly how the first `--anyone` bring-up on this
+ * machine failed. So the first thing a run does with the address is the free
+ * read, repeated until it lands. A throwaway identity, because reading a
+ * self-description signs nothing; a deadline rather than an attempt count,
+ * because each failed dial takes however long the circuit takes to give up.
+ */
+export async function waitForClientEdge(options: {
+  connectorUrl: string;
+  socksProxy: string;
+  rpcUrl: string;
+  say: (what: string) => void;
+  deadlineMs?: number;
+}): Promise<void> {
+  const deadline = Date.now() + (options.deadlineMs ?? 300_000);
+  for (let attempt = 1; ; attempt += 1) {
+    let client: ToonClient | undefined;
+    try {
+      client = await ToonClient.create({
+        connector: options.connectorUrl,
+        socksProxy: options.socksProxy,
+        proxyRpc: false,
+        evmPrivateKey: generatePayerKey().privateKey,
+        chain: 'evm',
+        rpcUrl: options.rpcUrl,
+        autoOpenChannel: false,
+      });
+      await client.describe();
+      return;
+    } catch (cause) {
+      if (Date.now() > deadline) throw cause;
+      options.say(
+        `the hidden service is not answering yet (attempt ${String(attempt)}) — a fresh descriptor takes a minute or two to propagate; still waiting`
+      );
+    } finally {
+      try {
+        await client?.close();
+      } catch {
+        // A probe that could not even open has nothing to close.
+      }
+    }
+    await new Promise((waited) => setTimeout(waited, 5_000));
+  }
+}
