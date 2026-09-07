@@ -44,12 +44,15 @@ const REDIAL_DELAY_MS = 5_000;
 /**
  * Open one subscription for the given kinds and hand every event up, from
  * the stored backlog and live thereafter. Returns a handle whose `close`
- * ends the subscription and stops any redial.
+ * ends the subscription and stops any redial. `authors` narrows the filter
+ * to those pubkeys — how the broadcaster page asks for one broadcaster's
+ * clips rather than everybody's.
  */
 export function subscribeToRelay(
   relayUrl: string,
   kinds: number[],
-  onEvent: (event: NostrEvent) => void
+  onEvent: (event: NostrEvent) => void,
+  authors?: string[]
 ): RelaySubscription {
   let socket: WebSocket | null = null;
   let redial: ReturnType<typeof setTimeout> | null = null;
@@ -59,7 +62,13 @@ export function subscribeToRelay(
     socket = new WebSocket(relayUrl);
 
     socket.addEventListener('open', () => {
-      socket?.send(JSON.stringify(['REQ', SUBSCRIPTION_ID, { kinds }]));
+      socket?.send(
+        JSON.stringify([
+          'REQ',
+          SUBSCRIPTION_ID,
+          { kinds, ...(authors === undefined ? {} : { authors }) },
+        ])
+      );
     });
 
     socket.addEventListener('message', (message: MessageEvent) => {

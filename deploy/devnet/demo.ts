@@ -90,6 +90,7 @@ import {
   publishStationAnnouncement,
 } from './announce.js';
 import { startPlayer, type DemoState, type Player } from './player.js';
+import { FIRST_LIGHT, firstLightMedia } from './clip-media.js';
 
 // ── The topology, at the same numbers the run uses ───────────────────────────
 
@@ -173,13 +174,9 @@ const BROADCASTER_PROFILE = {
 const STATION_ABOUT = 'whatever you point OBS at';
 const STATION_CATEGORIES = ['slop', 'demo'];
 
-/** One clip, one event — the demo publishes a placeholder to show the shape. */
-const DEMO_CLIP = {
-  url: 'https://arweave.net/demo-first-light',
-  title: 'first light',
-  durationSeconds: 42,
-  description: 'the first vibes this station ever held',
-};
+// The clip is `clip-media.ts`'s: real sound the run itself serves, so the
+// clip event names a URL the guide's broadcaster page can genuinely play.
+// Published after the player is up, because the URL is the player's.
 
 /**
  * The heartbeat cadence, while on the air. The expiry is three beats, so one
@@ -314,11 +311,13 @@ async function main(): Promise<void> {
 
   // ── The announcements ──────────────────────────────────────────────────────
   //
-  // Reachable, and now FOUND: the profile, the station announcement and a
-  // clip, each an ordinary paid write through the hub's announce route,
-  // signed with the per-broadcaster keypair this run minted. The ladder is
-  // DERIVED from the station connector's own published routes — the demo
-  // restates no price. The heartbeat starts once the station is on the air.
+  // Reachable, and now FOUND: the profile and the station announcement, each
+  // an ordinary paid write through the hub's announce route, signed with the
+  // per-broadcaster keypair this run minted. The ladder is DERIVED from the
+  // station connector's own published routes — the demo restates no price.
+  // The clip follows once the player is up, because the clip event names a
+  // URL the player serves; the heartbeat starts once the station is on the
+  // air.
   const voice = broadcasterVoice(credentials.station.nostrSecretKey);
   await publishProfile(broadcaster, HUB_ADDRESS, voice, BROADCASTER_PROFILE);
   await publishStationAnnouncement(broadcaster, HUB_ADDRESS, voice, {
@@ -333,9 +332,8 @@ async function main(): Promise<void> {
     categories: STATION_CATEGORIES,
     about: STATION_ABOUT,
   });
-  await publishClip(broadcaster, HUB_ADDRESS, voice, DEMO_CLIP);
   say(
-    `announced: profile, station and a clip are on the relay, signed by ${voice.pubkey.slice(0, 12)}…`
+    `announced: profile and station are on the relay, signed by ${voice.pubkey.slice(0, 12)}…`
   );
 
   // ── What each rung costs, from the two nodes rather than from here ─────────
@@ -466,6 +464,12 @@ async function main(): Promise<void> {
       budgetPerSecond: BUDGET_PER_SECOND,
       vibing: true,
     },
+    // The demo's one clip: real sound this run serves itself, free to read.
+    clip: {
+      fileName: FIRST_LIGHT.fileName,
+      contentType: FIRST_LIGHT.contentType,
+      body: firstLightMedia(),
+    },
     state,
     redeem: async () => {
       if (redeeming) return;
@@ -503,6 +507,22 @@ async function main(): Promise<void> {
   });
 
   say(`the page is at ${player.url}`);
+
+  // ── The clip ───────────────────────────────────────────────────────────────
+  //
+  // One clip, one event (ADR 0004), pointed at media the run itself serves —
+  // the player's own loopback URL — so a guide reading the relay can play it
+  // from a free fetch, for real. On a real station this URL is an Arweave
+  // gateway's; the shape of the event is identical.
+  if (player.clipUrl !== null) {
+    await publishClip(broadcaster, HUB_ADDRESS, voice, {
+      url: player.clipUrl,
+      title: FIRST_LIGHT.title,
+      durationSeconds: FIRST_LIGHT.durationSeconds,
+      description: FIRST_LIGHT.description,
+    });
+    say(`a clip is on the relay: "${FIRST_LIGHT.title}" at ${player.clipUrl}`);
+  }
 
   // ── The stop signal ────────────────────────────────────────────────────────
   //

@@ -15,7 +15,8 @@ declare module 'playwright/test' {
     filter(options: { hasText?: string | RegExp }): Locator;
     first(): Locator;
     getByTestId(testId: string): Locator;
-    click(): Promise<void>;
+    click(options?: { timeout?: number }): Promise<void>;
+    evaluate<Result>(body: (element: Element) => Result): Promise<Result>;
   }
 
   export interface Page {
@@ -23,6 +24,7 @@ declare module 'playwright/test' {
     getByTestId(testId: string): Locator;
     getByRole(role: string, options?: { name?: string | RegExp }): Locator;
     getByText(text: string | RegExp): Locator;
+    locator(selector: string): Locator;
   }
 
   export interface LocatorExpectations {
@@ -35,10 +37,21 @@ declare module 'playwright/test' {
       expected: number,
       options?: { timeout?: number }
     ): Promise<void>;
+    toHaveText(
+      expected: string | RegExp,
+      options?: { timeout?: number }
+    ): Promise<void>;
   }
 
   export interface PageExpectations {
-    toHaveURL(expected: string | RegExp): Promise<void>;
+    toHaveURL(
+      expected: string | RegExp,
+      options?: { timeout?: number }
+    ): Promise<void>;
+  }
+
+  export interface PollExpectations {
+    toBeGreaterThan(expected: number): Promise<void>;
   }
 
   export const test: {
@@ -48,8 +61,14 @@ declare module 'playwright/test' {
     setTimeout(milliseconds: number): void;
   };
 
-  export function expect(subject: Locator): LocatorExpectations;
-  export function expect(subject: Page): PageExpectations;
+  export const expect: {
+    (subject: Locator): LocatorExpectations;
+    (subject: Page): PageExpectations;
+    poll(
+      subject: () => Promise<number>,
+      options?: { timeout?: number }
+    ): PollExpectations;
+  };
 
   export function defineConfig<Config>(config: Config): Config;
 }

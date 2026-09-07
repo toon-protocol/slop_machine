@@ -57,6 +57,8 @@ export interface Station {
   name: string | null;
   /** Avatar URL from the profile. */
   picture: string | null;
+  /** The broadcaster's own about, from the profile — not the station's. */
+  broadcasterAbout: string | null;
   /** The station's own about — the announcement's content. */
   about: string;
   segmentSeconds: number | null;
@@ -79,19 +81,21 @@ export function isLive(station: Station, nowSeconds: number): boolean {
 interface Profile {
   name: string | null;
   picture: string | null;
+  about: string | null;
 }
 
 function profileFrom(event: NostrEvent | undefined): Profile {
-  if (event === undefined) return { name: null, picture: null };
+  if (event === undefined) return { name: null, picture: null, about: null };
   try {
     const content = JSON.parse(event.content) as Record<string, unknown>;
     return {
       name: typeof content['name'] === 'string' ? content['name'] : null,
       picture:
         typeof content['picture'] === 'string' ? content['picture'] : null,
+      about: typeof content['about'] === 'string' ? content['about'] : null,
     };
   } catch {
-    return { name: null, picture: null };
+    return { name: null, picture: null, about: null };
   }
 }
 
@@ -140,6 +144,7 @@ export function stationsFrom(log: AnnouncementLog): Station[] {
       announcedAt: event.created_at,
       name: profile.name,
       picture: profile.picture,
+      broadcasterAbout: profile.about,
       about: event.content,
       segmentSeconds:
         segment !== null && /^\d+$/.test(segment) ? Number(segment) : null,

@@ -10,9 +10,10 @@
  * no reload, and re-evaluating NIP-40 expiry against a ticking `nowSeconds`
  * is exactly that.
  *
- * This context is the seam the other routes consume — #77's broadcaster
- * page and the category views read the same stations, and clips (kind 1063)
- * ride the same reader with an author filter when that page fills in.
+ * This context is the seam the other routes consume — the broadcaster page
+ * and the category views read the same stations. Clips (kind 1063) ride the
+ * same reader with an author filter, but not this provider: they are one
+ * broadcaster's, so the broadcaster page opens its own subscription.
  */
 
 import {
