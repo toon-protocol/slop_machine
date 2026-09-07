@@ -12,17 +12,19 @@ a chain to settle on.
                           ╔═══════════════════════════════════════════════════╗
   driver ──paid pull────────▶ hub-connector ──carries──▶ station-connector     ║
    (a viber, a             ║      :3000                       :3000           ║
-    broadcaster)           ║        │                           │             ║
-                           ║   hub-slot-app                station-origin      ║
-                           ║      :3200                    :3100  :1935       ║
+    broadcaster)           ║        │      │                    │             ║
+                           ║   hub-slot-app │              station-origin      ║
+                           ║      :3200     │              :3100  :1935       ║
+                           ║           hub-relay                              ║
+                           ║         :3100  :7100                             ║
                            ║                                                  ║
                            ║   chain :8545  (anvil, contracts deployed at run  ║
                            ╚═══════════════════════════════════════════════════╝
 
      off-box    nothing at all
      loopback   8545 (the chain), 3000 (the hub's edge), 3001 (the station's edge),
-                1935 (the broadcaster's own RTMP ingest)
-     neither    3200 (the slot app), 3100 (the segment port)
+                1935 (the broadcaster's own RTMP ingest), 7100 (the relay's free reads)
+     neither    3200 (the slot app), 3100 (the segment port, and the relay's paid write port)
 ```
 
 ## Nothing in `../` or `../hub/` changes
@@ -82,7 +84,8 @@ job is diagnosable without re-running it locally.
 
 Both nodes then boot from **generated** configuration. Every credential a run needs — both
 connectors' signer and settlement keys, both bearer tokens and allowlists, the slot app's operator
-signing seed and the station's stream key — is fresh material written into `./run/`, and both
+signing seed, the station's stream key, the relay's Nostr identity and the broadcaster's own
+announcement keypair — is fresh material written into `./run/`, and both
 `connector.toml` files are rendered there from the templates in [`templates/`](templates/): the
 chain repointed at the compose service, this run's replayed registry and token addresses at six
 decimals, EVM only, plaintext peer endpoints allowed, and each node's endpoint named at its own
@@ -100,10 +103,23 @@ describing it: **quote, configure, restart.** A payer opens and funds one channe
 pulls a paid quote, reads the prefix the hub would grant, re-renders the station's configuration
 at it, restarts the node, and re-reads what the station now publishes.
 
+Once the slot is bought, the broadcaster makes their station **found** as well as reachable:
+[ADR 0004](../../docs/adr/0004-a-station-announces-itself-in-four-events.md)'s four events — a
+standard kind 0 profile, a replaceable station announcement carrying the granted ILP address, the
+ladder at the station's own per-segment prices and its free-form categories, a short-expiry
+heartbeat whose unexpired existence *is* liveness, and one NIP-94-style event per clip — each
+signed with a per-broadcaster Nostr keypair the run mints, and each an ordinary **paid write**
+through the hub's `announce` route to the stock relay image the hub runs. The suite then reads
+every one back off the relay's **free NIP-01 surface** — the seam a discovery client will consume —
+and watches the heartbeat lapse: a station that stops heartbeating reads as off the air, with no
+sign-off event anywhere, because none exists.
+
 The payer is [`toon-client`](https://github.com/toon-protocol/toon-client), the fleet's own client
 side, pinned to an exact release and a **development dependency of the devnet only** — a dependency
 of neither package, in no published image, imported by nothing under `packages/`. Neither app in
-this repository may hold payment code, which is exactly why the payer comes from outside it.
+this repository may hold payment code, which is exactly why the payer comes from outside it. The
+announcement signer, `nostr-tools`, is held to the same terms for the same shape of reason:
+announcing is the broadcaster's client-side act, and neither app may grow a voice.
 
 The prerequisite is **Docker and this repository's own toolchain, and nothing else** — no account,
 no faucet, no testnet, no real money, and no Foundry, Rust or submodules. anvil runs in the pinned

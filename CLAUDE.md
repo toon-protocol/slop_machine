@@ -641,8 +641,9 @@ from DNS to `docker compose up -d` to OBS; `deploy/hub/README.md` walks a hub op
 public key on the connector's `write_keys` allowlist.
 
 **The devnet is nobody's box**, which is why its shape differs: no Caddy, no overlays, no systemd,
-one compose file, and every `connector.toml`, every key and the station's stream key **generated
-per run** into `deploy/devnet/run/`, which git ignores. Nothing in `deploy/` or `deploy/hub/` is
+one compose file, and every `connector.toml`, every key, the station's stream key and the
+broadcaster's announcement keypair **generated per run** into `deploy/devnet/run/`, which git
+ignores. Nothing in `deploy/` or `deploy/hub/` is
 edited or read to make it work — the station bundle's apex is frozen to the `demo` placeholder by
 its own guard and both bundles publish the same connector edge port, so a devnet assembled out of
 their local overlays would be fighting two guards to prove a third thing. The one thing it does not
@@ -659,7 +660,7 @@ distinction between the two nodes:
 | ---------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- |
 | `deploy/`        | **three** — Caddy's 80 and 443, plus the origin's RTMPS ingest 1935 | stock Caddy does not speak RTMP, so a station fronts its own uplink        |
 | `deploy/hub/`    | **two** — Caddy's 80 and 443, and nothing else                      | **a hub carries no vibes of its own**, so it has no uplink to front        |
-| `deploy/devnet/` | **none off-box** — four loopback publishes: three for the driver, one for the broadcaster's own OBS | there is no public name and no certificate on a laptop, so nothing is fronted |
+| `deploy/devnet/` | **none off-box** — five loopback publishes: four for the driver, one for the broadcaster's own OBS | there is no public name and no certificate on a laptop, so nothing is fronted |
 
 **No RTMP port, service or path appears anywhere in the hub bundle**, and none may: a hub is never a
 station. In both bundles the connector's client edge is published on `127.0.0.1` only, and every app
@@ -707,9 +708,9 @@ actually served. What the devnet's adds over both: the compose file's generated 
 driver's own manifest are held **to each other**, because a bind mount with no file behind it is
 created by the daemon as a *directory*; the only binary a run may execute is `docker`, structurally
 (only `compose.ts` may import `node:child_process`), which is what makes "no Foundry, no Rust, no
-submodules" a fact about the driver rather than about its current contents; and the payer is held
-to being a devnet-only development dependency at an exact version, in neither package's manifest
-and named by no file under `packages/`.
+submodules" a fact about the driver rather than about its current contents; and the payer and the
+announcement signer (`nostr-tools`) are held to being devnet-only development dependencies at
+exact versions, in neither package's manifest and named by no file under `packages/`.
 
 **Connector configuration is bundle work, not application code.** `deploy/connector.toml` terminates
 **five routes** — one per rung at that rung's price, plus one for the station's *now* at its own low
@@ -753,7 +754,7 @@ with dummy keys planted and looking inside the result.
 
 [`deploy/devnet/`](deploy/devnet/) is the third bundle and the only place in this repository where
 both node shapes are described together: one compose project holding **a chain, a hub connector with
-its slot app, and a station connector with its origin**. It exists because both apps were finished
+its slot app and its relay, and a station connector with its origin**. It exists because both apps were finished
 and neither had ever been paid, and because that gap was hiding a defect — establishing a peering
 *opens* a payment channel and does not fund one, so a broadcaster who paid the slot price was peered,
 routed, on the roster, and carrying nothing. `pnpm test:devnet` is the thing that would have caught
@@ -783,7 +784,11 @@ chain**; a viber's own channel, the station's *now* bought across the hop, and a
 two rungs compared **byte for byte** against what the station holds; the fee arithmetic nobody's code
 enforces; and the money — the station's claim advanced by exactly its own price per pull, the
 difference from what the viber paid being exactly the hub's carriage, and the claim **redeemed on
-chain against a still-open channel**, with the token balance asserted to have moved.
+chain against a still-open channel**, with the token balance asserted to have moved; and **the
+announcements** — ADR 0004's four events, signed with the per-run broadcaster keypair, paid through
+the hub's `announce` route into the stock relay, each read back off the relay's free NIP-01 surface
+with every expected value a literal, and the heartbeat watched lapsing so a station that stops
+heartbeating reads as off the air.
 
 **`pnpm demo` is the same topology with a person in it**, and it is the other half of why the devnet
 exists: `pnpm test:devnet` is the *evidence* — every value it expects is a literal, it asserts the
@@ -830,7 +835,11 @@ stream key, checked before a byte is transcoded, and it is the unpaid direction 
 is nothing behind it to get for free. **The slot app's 3200 and the origin's segment port 3100 are
 still published on no interface, in any form, not even on loopback** — they hand out the very things
 a viber and a broadcaster are supposed to pay for and have no key on them, and
-[`deploy/devnet/bundle.test.ts`](deploy/devnet/bundle.test.ts) fails on either.
+[`deploy/devnet/bundle.test.ts`](deploy/devnet/bundle.test.ts) fails on either — a number the
+relay's own paid write port shares, so the same check covers it. The relay's free NIP-01 reads
+(7100) are the driver's fourth loopback publish, and not a free door for the opposite reason from
+ingest's: reads are free by design — announcements are found for nothing, and being reachable is
+what costs.
 
 **The payer is [`toon-client`](https://github.com/toon-protocol/toon-client)**, pinned to an exact
 release and a **development dependency of the devnet only** — a dependency of neither package, in no
@@ -838,6 +847,9 @@ published image, imported by nothing under `packages/`. Neither app here may hol
 is exactly why the payer comes from outside; and the connector's own `send` verb cannot stand in,
 because it originates through a node's operator surface and bypasses the claim gate entirely. The
 invariant is unchanged: **no app in this repo contains payment code, and the devnet is not an app.**
+**The announcement signer, `nostr-tools`, is a devnet-only development dependency on exactly the
+payer's terms** — announcing is the broadcaster's client-side act (ADR 0004), so neither app may
+grow a voice, and the bundle guard holds both packages to the same three fences.
 
 **No credential literal enters this repository, anvil's own included.** The chain's account zero is
 derived from the mnemonic anvil prints on every start; everything else is fresh material per run in

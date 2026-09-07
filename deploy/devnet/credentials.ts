@@ -50,11 +50,13 @@ const HUB_DIR = resolve(WORK_DIR, 'hub');
 const STATION_DIR = resolve(WORK_DIR, 'station');
 
 /**
- * Every file a run generates, as the compose file names it: `run/`-relative,
- * forward-slashed, in no particular order.
+ * Every file a run generates FOR A CONTAINER TO MOUNT, as the compose file
+ * names it: `run/`-relative, forward-slashed, in no particular order.
  *
  * This is the manifest half of the pair above. It is exported rather than
  * inferred so that the guard can compare two lists rather than trust one.
+ * The two files a run generates and mounts NOWHERE are the list below this
+ * one, and the guard holds that boundary too.
  */
 export const GENERATED_FILES = [
   'hub/connector.toml',
@@ -69,6 +71,27 @@ export const GENERATED_FILES = [
   'station/operator-bearer.token',
   'station/operator-write.keys',
   'station/stream.key',
+] as const;
+
+/**
+ * The files a run generates that NO SERVICE MOUNTS, and each for its own
+ * reason:
+ *
+ * - `hub/relay-nostr.key` is the relay's Nostr identity, and the relay image
+ *   takes it as an ENVIRONMENT value with no file-valued form — the hub
+ *   bundle's one `.env` secret, for the same reason. The driver reads this
+ *   file and passes it in when it brings the project up; a mount would be a
+ *   path the image never looks at.
+ * - `station/nostr.key` is the BROADCASTER'S OWN announcement keypair — the
+ *   per-broadcaster key ADR 0004's four events are signed with. Like the
+ *   broadcaster's operator write seed it lives with the broadcaster, who here
+ *   is the driver: the driver signs announcements from it, and mounting it
+ *   into any node would hand a broadcaster's public voice to a box that must
+ *   never speak for them.
+ */
+export const DRIVER_HELD_FILES = [
+  'hub/relay-nostr.key',
+  'station/nostr.key',
 ] as const;
 
 /** What `openssl rand -hex 32` writes, which is the shape of every credential here. */
@@ -111,6 +134,13 @@ export interface HubCredentials extends NodeCredentials {
    * `keyid` every signature the app makes names.
    */
   operatorKeyid: string;
+  /**
+   * The relay's own Nostr identity — not money, and not the broadcaster's
+   * announcement key. The relay image takes it as an environment value and
+   * offers no file-valued form, so the driver reads the generated file back
+   * and passes it in when it brings the project up.
+   */
+  relayNostrKey: string;
 }
 
 /** The station's credentials, which include the one thing only a station has. */
@@ -132,6 +162,14 @@ export interface StationCredentials extends NodeCredentials {
    * mounted file, and a run pushes vibes with it.
    */
   streamKey: string;
+  /**
+   * The broadcaster's OWN Nostr keypair seed — the per-broadcaster key every
+   * announcement event is signed with (ADR 0004). It is the broadcaster's
+   * public voice, distinct from every key the money touches, and like the
+   * operator write seed above it lives with the broadcaster: the driver signs
+   * announcements from it, and it is mounted into nothing.
+   */
+  nostrSecretKey: string;
 }
 
 /** Everything a run generated, for the two nodes it is about to boot. */
@@ -170,6 +208,7 @@ export function generateCredentials(): DevnetCredentials {
     bearerToken: randomHex32(),
     operatorWriteKey: randomHex32(),
     operatorKeyid: '',
+    relayNostrKey: randomHex32(),
   };
   // The app's own signer, so that what a run puts on the allowlist is what the
   // app's signatures are verified against — rather than a keyid learned some
@@ -183,6 +222,7 @@ export function generateCredentials(): DevnetCredentials {
     bearerToken: randomHex32(),
     operatorWriteKey: randomHex32(),
     streamKey: randomHex32(),
+    nostrSecretKey: randomHex32(),
   };
 
   write(resolve(HUB_DIR, 'signer.key'), hub.signerKey);
@@ -194,6 +234,10 @@ export function generateCredentials(): DevnetCredentials {
   // beside it is called `operator-signing.key` rather than a name one
   // character from this one.
   write(resolve(HUB_DIR, 'operator-write.keys'), hub.operatorKeyid);
+  // The relay's Nostr identity. Generated like everything else and mounted by
+  // nothing: the relay image takes it as an environment value with no
+  // file-valued form, so the driver reads this back and passes it in.
+  write(resolve(HUB_DIR, 'relay-nostr.key'), hub.relayNostrKey);
 
   write(resolve(STATION_DIR, 'signer.key'), station.signerKey);
   write(resolve(STATION_DIR, 'settlement.key'), station.settlementKey);
@@ -208,6 +252,10 @@ export function generateCredentials(): DevnetCredentials {
     createWriteSigner(station.operatorWriteKey).keyid
   );
   write(resolve(STATION_DIR, 'stream.key'), station.streamKey);
+  // The broadcaster's announcement keypair seed, beside their other
+  // credentials and mounted into nothing — the driver is the broadcaster here,
+  // and signs every announcement event from it (ADR 0004).
+  write(resolve(STATION_DIR, 'nostr.key'), station.nostrSecretKey);
 
   return { hub, station };
 }
@@ -215,3 +263,10 @@ export function generateCredentials(): DevnetCredentials {
 /** Where a rendered `connector.toml` goes, for the two nodes that read one. */
 export const HUB_CONNECTOR_TOML = resolve(HUB_DIR, 'connector.toml');
 export const STATION_CONNECTOR_TOML = resolve(STATION_DIR, 'connector.toml');
+
+/**
+ * Where the relay's generated Nostr identity lands. `compose.ts` reads this
+ * back to pass the value in as environment, because that image offers no
+ * file-valued form — see {@link DRIVER_HELD_FILES}.
+ */
+export const RELAY_NOSTR_KEY_FILE = resolve(HUB_DIR, 'relay-nostr.key');

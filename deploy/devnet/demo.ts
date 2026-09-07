@@ -82,6 +82,13 @@ import {
   pullThroughTheHub,
   type BoughtSlot,
 } from './paid.js';
+import {
+  broadcasterVoice,
+  publishClip,
+  publishHeartbeat,
+  publishProfile,
+  publishStationAnnouncement,
+} from './announce.js';
 import { startPlayer, type DemoState, type Player } from './player.js';
 
 // ── The topology, at the same numbers the run uses ───────────────────────────
@@ -105,6 +112,7 @@ const NODE_SERVICES = [
   'station-origin',
   'station-connector',
   'hub-slot-app',
+  'hub-relay',
   'hub-connector',
 ];
 
@@ -151,6 +159,36 @@ const PREROLL_SEGMENTS = 3;
  * discontinuity.
  */
 const MAX_SEGMENTS_BEHIND = 10;
+
+// ── The announcements (ADR 0004) ─────────────────────────────────────────────
+
+/** What a viber's client would render for this broadcaster, anywhere Nostr is read. */
+const BROADCASTER_PROFILE = {
+  name: 'The Demo Broadcaster',
+  about: 'your own OBS, playing back one paid packet at a time',
+  picture: 'https://example.invalid/demo-broadcaster.png',
+};
+
+/** The station's own about, and the free-form categories it announces itself under. */
+const STATION_ABOUT = 'whatever you point OBS at';
+const STATION_CATEGORIES = ['slop', 'demo'];
+
+/** One clip, one event — the demo publishes a placeholder to show the shape. */
+const DEMO_CLIP = {
+  url: 'https://arweave.net/demo-first-light',
+  title: 'first light',
+  durationSeconds: 42,
+  description: 'the first vibes this station ever held',
+};
+
+/**
+ * The heartbeat cadence, while on the air. The expiry is three beats, so one
+ * missed republish is not a false death — and when this process dies, the
+ * station reads as off the air within a minute with no sign-off published,
+ * because none exists to publish.
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_EXPIRES_IN_SECONDS = 45;
 
 // ── The ledger ───────────────────────────────────────────────────────────────
 
@@ -272,6 +310,32 @@ async function main(): Promise<void> {
   const bought = purchase.body as BoughtSlot;
   say(
     `slot bought for ${purchase.paid.toString()}: "${bought.prefix}", peered on channel ${bought.peering.channel.id}`
+  );
+
+  // ── The announcements ──────────────────────────────────────────────────────
+  //
+  // Reachable, and now FOUND: the profile, the station announcement and a
+  // clip, each an ordinary paid write through the hub's announce route,
+  // signed with the per-broadcaster keypair this run minted. The ladder is
+  // DERIVED from the station connector's own published routes — the demo
+  // restates no price. The heartbeat starts once the station is on the air.
+  const voice = broadcasterVoice(credentials.station.nostrSecretKey);
+  await publishProfile(broadcaster, HUB_ADDRESS, voice, BROADCASTER_PROFILE);
+  await publishStationAnnouncement(broadcaster, HUB_ADDRESS, voice, {
+    prefix: bought.prefix,
+    segmentSeconds: SEGMENT_SECONDS,
+    rungs: LADDER.flatMap((rung) => {
+      const published = station.routes.find(
+        (route) => route.prefix === `${bought.prefix}.${rung}`
+      );
+      return published === undefined ? [] : [{ rung, price: published.price }];
+    }),
+    categories: STATION_CATEGORIES,
+    about: STATION_ABOUT,
+  });
+  await publishClip(broadcaster, HUB_ADDRESS, voice, DEMO_CLIP);
+  say(
+    `announced: profile, station and a clip are on the relay, signed by ${voice.pubkey.slice(0, 12)}…`
   );
 
   // ── What each rung costs, from the two nodes rather than from here ─────────
@@ -475,6 +539,35 @@ async function main(): Promise<void> {
   waitingFor = 'on the air';
   say(`the station is on the air — buying from ${player.url}`);
 
+  // ── The heartbeat, while on the air ────────────────────────────────────────
+  //
+  // Liveness IS the existence of an unexpired heartbeat (ADR 0004): while the
+  // station is on the air this republishes one on a cadence, each with a
+  // short NIP-40 expiry, and when the process dies the claim expires on its
+  // own. One beat in flight at a time — a claim strictly advances a nonce, so
+  // two writes signing at once would race for one number.
+  let heartbeatInFlight = false;
+  const beat = async (): Promise<void> => {
+    if (heartbeatInFlight || stopping) return;
+    heartbeatInFlight = true;
+    try {
+      await publishHeartbeat(
+        broadcaster,
+        HUB_ADDRESS,
+        voice,
+        Math.floor(Date.now() / 1000) + HEARTBEAT_EXPIRES_IN_SECONDS
+      );
+    } catch (cause) {
+      say(
+        `a heartbeat did not land: ${cause instanceof Error ? cause.message : String(cause)}`
+      );
+    } finally {
+      heartbeatInFlight = false;
+    }
+  };
+  await beat();
+  const heartbeats = setInterval(() => void beat(), HEARTBEAT_INTERVAL_MS);
+
   // ── The viber's loop ───────────────────────────────────────────────────────
   //
   // One `now` per cycle, paid for like everything else, and then every span
@@ -587,6 +680,7 @@ async function main(): Promise<void> {
   }
 
   clearInterval(money);
+  clearInterval(heartbeats);
 
   // ── The receipt ────────────────────────────────────────────────────────────
   console.log('');
