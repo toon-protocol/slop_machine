@@ -106,6 +106,10 @@ import {
   waitForVibes,
   type StationNow,
 } from './vibes.js';
+// The playback contract's serving side (ADR 0005): the run drives it in the
+// full topology, so the surface the guide will stand on is exercised with
+// real money moving underneath it.
+import { startPlayer, type ContractState, type Player } from './player.js';
 
 /** The chain's own RPC, on loopback. Nothing in this topology is reachable off-box. */
 const CHAIN_RPC_URL = 'http://127.0.0.1:8545';
@@ -310,6 +314,19 @@ const NOT_AT_PREFIX = 'station_not_at_prefix';
 /** The chain, as the document a node publishes names it. */
 const EXPECTED_SETTLEMENT_CHAIN = `evm:${String(EXPECTED_CHAIN_ID)}`;
 
+// ── The playback contract ────────────────────────────────────────────────────
+
+/**
+ * The viber's own budget for the contract phase, in base units per second —
+ * the paying side's figure, which ADR 0005 says no request across the loopback
+ * line can raise. A literal, so "the budget stood" is asserted against this
+ * and against nothing the surface answered.
+ */
+const CONTRACT_BUDGET_PER_SECOND = 600n;
+
+/** What the raise attempt asks for — bigger, so "it stood" is not "it matched". */
+const A_RAISED_BUDGET = '9000000';
+
 describe('the devnet', () => {
   let deployment: SettlementDeployment;
   let credentials: DevnetCredentials;
@@ -340,6 +357,12 @@ describe('the devnet', () => {
   let stationBalanceAfter: bigint;
   let redemption: { status: number; body: string };
   let channelAfterRedemption: Awaited<ReturnType<typeof channelOnChain>>;
+  let player: Player;
+  /** The contract's state before vibing was initiated across it, and after. */
+  let contractStateBefore: ContractState;
+  let contractStateAfter: ContractState;
+  let vibeAnswer: { status: number; body: ContractState };
+  let budgetRaise: { status: number; body: { error?: string } };
 
   /**
    * Every paid pull the viber made across the hop, in the order it made them.
@@ -588,6 +611,125 @@ describe('the devnet', () => {
       tokenNetwork: deployment.tokenNetwork,
       channelId: bought.peering.channel.id as `0x${string}`,
     });
+
+    // ── The playback contract (ADR 0005), in the full topology ──────────────
+    //
+    // The run now stands where a viber's machine does: the real player in
+    // front of the paying side, the guide's surface on loopback, and real
+    // money underneath it. The run IS the paying side's driver, exactly as
+    // `demo.ts` is — it buys only while the contract says it is vibing, and
+    // everything the surface reports comes from this ledger and the two
+    // nodes' own prices.
+    const contractLedger = {
+      spent: 0n,
+      toStation: 0n,
+      toHub: 0n,
+      packets: 0,
+      bought: 0,
+      spentOnVibes: 0n,
+      edge: null as number | null,
+    };
+
+    player = await startPlayer({
+      // Ephemeral, so the contract's surface never collides with a demo.
+      port: 0,
+      rungs: [...LADDER],
+      segmentSeconds: EXPECTED_SEGMENT_SECONDS,
+      contract: {
+        station: quote.prefix,
+        budgetPerSecond: CONTRACT_BUDGET_PER_SECOND,
+      },
+      state: () => ({
+        live: true,
+        waitingFor: 'on the air',
+        hubAddress: HUB_ADDRESS,
+        stationPrefix: quote.prefix,
+        handle: quote.label,
+        segmentSeconds: EXPECTED_SEGMENT_SECONDS,
+        rungs: LADDER.map((rung) => ({
+          rung,
+          price: priceOf(rung).toString(),
+          toStation: (priceOf(rung) - EXPECTED_PEERING_FEE).toString(),
+          toHub: EXPECTED_PEERING_FEE.toString(),
+          edge: rung === FIRST_RUNG ? contractLedger.edge : null,
+          bought: rung === FIRST_RUNG ? contractLedger.bought : 0,
+          spent:
+            rung === FIRST_RUNG ? contractLedger.spentOnVibes.toString() : '0',
+        })),
+        spent: contractLedger.spent.toString(),
+        toStation: contractLedger.toStation.toString(),
+        toHub: contractLedger.toHub.toString(),
+        packets: contractLedger.packets,
+        claimed: '0',
+        onChain: '0',
+        redeeming: false,
+        redeemed: null,
+      }),
+      redeem: async () => {},
+    });
+
+    const contractBase = player.url.replace(/\/$/, '');
+    const readContract = async (path: string): Promise<ContractState> =>
+      (await (await fetch(`${contractBase}${path}`)).json()) as ContractState;
+    const writeContract = async <T>(
+      path: string,
+      body: unknown
+    ): Promise<{ status: number; body: T }> => {
+      const answer = await fetch(`${contractBase}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: answer.status, body: (await answer.json()) as T };
+    };
+
+    contractStateBefore = await readContract('/contract/v1/state');
+
+    // Vibing is INITIATED ACROSS THE CONTRACT — the write a guide makes —
+    // and the paying side buys only once its own surface says it is vibing.
+    vibeAnswer = await writeContract('/contract/v1/vibe', {
+      station: quote.prefix,
+    });
+
+    if (player.vibing()) {
+      const nowAcrossTheContract = await pullThroughTheHub(
+        viber,
+        sealTo,
+        `${quote.prefix}.now`
+      );
+      contractLedger.spent += nowAcrossTheContract.paid;
+      contractLedger.toStation += priceOf('now') - EXPECTED_PEERING_FEE;
+      contractLedger.toHub +=
+        nowAcrossTheContract.paid - (priceOf('now') - EXPECTED_PEERING_FEE);
+      contractLedger.packets += 1;
+
+      const edgeNow = JSON.parse(nowAcrossTheContract.text) as StationNow;
+      const sequence = sequenceHeldAt(edgeNow, FIRST_RUNG);
+      const segment = await pullThroughTheHub(
+        viber,
+        sealTo,
+        `${quote.prefix}.${FIRST_RUNG}`,
+        `${String(sequence)}.ts`
+      );
+      contractLedger.spent += segment.paid;
+      contractLedger.toStation += priceOf(FIRST_RUNG) - EXPECTED_PEERING_FEE;
+      contractLedger.toHub +=
+        segment.paid - (priceOf(FIRST_RUNG) - EXPECTED_PEERING_FEE);
+      contractLedger.packets += 1;
+      contractLedger.bought += 1;
+      contractLedger.spentOnVibes += segment.paid;
+      contractLedger.edge = sequence;
+      if (segment.status === 200) {
+        player.publish(FIRST_RUNG, sequence, segment.body);
+      }
+    }
+
+    // And the one write the surface must never honour, attempted for real.
+    budgetRaise = await writeContract('/contract/v1/budget', {
+      budgetPerSecond: A_RAISED_BUDGET,
+    });
+
+    contractStateAfter = await readContract('/contract/v1/state');
   }, 900_000);
 
   afterEach((context) => {
@@ -595,6 +737,7 @@ describe('the devnet', () => {
   });
 
   afterAll(async () => {
+    await player?.close();
     await broadcaster?.client.close();
     await viber?.client.close();
 
@@ -1599,6 +1742,84 @@ describe('the devnet', () => {
       hubSide.deposit,
       `the hub's deposit changed when the station redeemed, and a redemption draws against collateral rather than returning it`
     ).toBe(EXPECTED_PEERING_COLLATERAL);
+  });
+
+  // ── The playback contract ──────────────────────────────────────────────────
+
+  it('serves the playback contract, and vibing is initiated through it', () => {
+    // ADR 0005: the versioned loopback surface between the guide and whatever
+    // pays. Before the guide's write the paying side was not vibing; the
+    // write is what started it; and the state — read back through the same
+    // surface — is the record.
+    expect(contractStateBefore.contract).toBe('v1');
+    expect(
+      contractStateBefore.vibing,
+      `the paying side reports itself vibing before anything asked it to`
+    ).toBe(false);
+
+    expect(
+      vibeAnswer.status,
+      `the vibe write answered ${String(vibeAnswer.status)}: ${JSON.stringify(vibeAnswer.body)}`
+    ).toBe(200);
+
+    expect(contractStateAfter.vibing).toBe(true);
+    expect(contractStateAfter.live).toBe(true);
+    expect(
+      contractStateAfter.station,
+      `the contract names "${contractStateAfter.station}", and the hub granted "${quote.prefix}"`
+    ).toBe(quote.prefix);
+  });
+
+  it("reports through the contract what vibing actually cost, at the two nodes' own prices", () => {
+    // One *now* at 70 and one audio segment at 220 crossed the hop while the
+    // contract said the viber was vibing — so the totals the guide would
+    // render are these, to the base unit, with the hub's carriage of 20 per
+    // packet as the whole difference.
+    expect(
+      contractStateAfter.spent,
+      `the contract reports ${contractStateAfter.spent} spent, and the *now* plus one audio segment cost 290 across the hop`
+    ).toBe('290');
+    expect(contractStateAfter.toStation).toBe('250');
+    expect(contractStateAfter.toHub).toBe('40');
+    expect(contractStateAfter.packets).toBe(2);
+
+    const audio = contractStateAfter.rungs.find(
+      (rung) => rung.rung === FIRST_RUNG
+    );
+    expect(
+      audio,
+      `the contract reports no "${FIRST_RUNG}" rung: ${JSON.stringify(contractStateAfter.rungs)}`
+    ).toMatchObject({
+      rung: FIRST_RUNG,
+      price: '220',
+      toStation: '200',
+      toHub: '20',
+      bought: 1,
+      spent: '220',
+    });
+
+    // The playlist location is the player's own loopback address — the one
+    // place a bought segment may ever be served from.
+    expect(audio?.playlist).toBe(
+      `${player.url.replace(/\/$/, '')}/hls/${FIRST_RUNG}.m3u8`
+    );
+  });
+
+  it('refuses to raise the budget across the loopback line, with real money underneath', () => {
+    // THE NAMED INVARIANT, IN THE FULL TOPOLOGY (ADR 0005): the budget lives
+    // on the paying side of the loopback line, and no request across it can
+    // raise it. The raise was attempted for real, against the surface that
+    // had just spent real money — refused by name, and the budget stood.
+    expect(
+      budgetRaise.status,
+      `a request across the loopback line was allowed at the budget: ${JSON.stringify(budgetRaise.body)}`
+    ).toBe(403);
+    expect(budgetRaise.body.error).toBe('budget_is_not_yours');
+
+    expect(
+      contractStateAfter.budgetPerSecond,
+      `the budget reads ${contractStateAfter.budgetPerSecond} after the raise was attempted, and the paying side's own figure is ${CONTRACT_BUDGET_PER_SECOND.toString()}`
+    ).toBe('600');
   });
 });
 

@@ -30,12 +30,16 @@ export default defineConfig({
     // `deploy/devnet/` holds the bundle's guard, which reads committed files
     // and needs nothing, AND the devnet driver, which brings a chain and four
     // containers up. Only the first belongs in a run that must work with no
-    // Docker daemon (slop_machine#55, #56).
+    // Docker daemon (slop_machine#55, #56). The playback contract's suite is
+    // the same case from the other side: it boots the real player — a plain
+    // Node HTTP server on loopback, no daemon — so it belongs here, and it is
+    // likewise named by file so the driver stays out (slop_machine#74).
     include: [
       'packages/*/src/**/*.test.ts',
       'deploy/*.test.ts',
       'deploy/hub/*.test.ts',
       'deploy/devnet/bundle.test.ts',
+      'deploy/devnet/contract.test.ts',
     ],
     // deploy/image-secrets.test.ts is the one exception: it needs a Docker
     // daemon and builds real images, so it runs from vitest.image.config.ts

@@ -150,6 +150,14 @@ the playlist it plays is one **the station never sent** — no playlist is serve
 which is why the client daemon synthesizes one over loopback and why the smallest possible stand-in
 for it lives in [`player.ts`](player.ts) rather than in either app.
 
+The player also serves the **playback contract**
+([ADR 0005](../../docs/adr/0005-the-budget-lives-on-the-paying-side-of-the-loopback-line.md)) —
+the versioned loopback surface under `/contract/v1/` the guide will stand on and the eventual
+toon-client daemon implements from the record: initiate and stop vibing, select a rung, read
+state. The budget lives on the paying side of that line and no request across it can raise it;
+[`contract.test.ts`](contract.test.ts) boots the player standalone (no Docker) in `pnpm test` and
+holds that by literal, and the devnet run drives the same surface with real money underneath.
+
 ```
 pnpm demo -- --pattern      the run's own ffmpeg test pattern, for nobody at the keyboard
 pnpm demo -- --port 9000    where the page is served

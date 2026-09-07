@@ -156,6 +156,20 @@ export const PAGE = `<!doctype html>
 
   var n = function (value) { return Number(value || 0).toLocaleString('en-US'); };
 
+  // The guide's half of the playback contract (ADR 0005): choosing a rung is
+  // a POST at the paying side, never only a local secret. The budget is not
+  // ours to touch, so nothing here ever sends one.
+  function select(rung) {
+    chosen = rung;
+    attach(rung);
+    mark();
+    fetch('/contract/v1/rung', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rung: rung })
+    }).catch(function () {});
+  }
+
   function attach(rung) {
     if (attached === rung) return;
     attached = rung;
@@ -194,9 +208,7 @@ export const PAGE = `<!doctype html>
         '<div class="cost">' + n(rung.price) + ' / segment</div>' +
         '<div class="split">' + n(rung.toStation) + ' broadcaster · ' + n(rung.toHub) + ' hub</div>';
       b.addEventListener('click', function () {
-        chosen = rung.rung;
-        attach(chosen);
-        mark();
+        select(rung.rung);
       });
       rungsEl.appendChild(b);
     });
@@ -240,11 +252,10 @@ export const PAGE = `<!doctype html>
     if (anyBought) {
       if (!chosen) {
         // The dearest rung that is actually holding vibes — a demo should open
-        // on the picture, not on the sound.
+        // on the picture, not on the sound — selected through the contract
+        // like any deliberate choice would be.
         var withVibes = state.rungs.filter(function (r) { return r.bought > 0; });
-        chosen = withVibes[withVibes.length - 1].rung;
-        attach(chosen);
-        mark();
+        select(withVibes[withVibes.length - 1].rung);
       }
       waiting.hidden = true;
       video.hidden = false;
