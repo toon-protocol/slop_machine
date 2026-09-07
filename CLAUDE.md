@@ -870,7 +870,14 @@ as it is left running. A page on loopback shows the picture arriving, what each 
 splits between the broadcaster and the hub **derived from the two nodes' own published prices**, and
 a button that redeems the station's newest claim on chain while the channel stays open. Ctrl-C
 prints what was paid and tears everything down. `--pattern` swaps OBS for the run's own ffmpeg test
-pattern, so it still runs with nobody at the keyboard. Since #78 **the demo's clip event points at
+pattern, so it still runs with nobody at the keyboard. **`--anyone` hosts the demo behind an
+Anyone-network hidden service**: one anon daemon (the `hub-anon` compose service, behind a profile
+so no other run ever starts it, built from `deploy/devnet/anon/` because ghcr publishes no image at
+the release that routes `.anyone`) fronts the hub's client edge and the chain's RPC at one
+`.anyone` address, every payer — the broadcaster, the demo's own viber, and remote viewers — pays
+over the circuit, and the run prints three funded keys plus the exact `pnpm demo:viewer` command a
+remote viewer runs from any machine with Docker and this repo. The address persists in
+`run/hub-anon/hs/` across runs; the station stays internal, its only client being the hub. Since #78 **the demo's clip event points at
 media the run itself serves**: `deploy/devnet/clip-media.ts` synthesizes a few seconds of sound in
 pure TypeScript (a clip may be sound alone — the glossary says so), the player serves it on
 loopback at `/clips/first-light.wav`, and the clip event names that URL — so the guide's
@@ -1023,7 +1030,10 @@ pnpm demo        # NOT a test and asserts nothing: the same topology with a pers
                  # at both rungs while a page on 127.0.0.1:8088 plays them back — the spend, the
                  # split between broadcaster and hub, and a button that redeems on chain. Ctrl-C
                  # prints the receipt and tears it all down. `--pattern` uses the run's own ffmpeg
-                 # test pattern instead of OBS, `--port` moves the page. Runs on vite-node, because
+                 # test pattern instead of OBS, `--port` moves the page, and `--anyone` hosts the
+                 # hub behind an Anyone-network hidden service so remote viewers can pay for the
+                 # broadcast over the circuit with `pnpm demo:viewer` (which needs only Docker and
+                 # this repo, and takes the values the host's run prints). Runs on vite-node, because
                  # the devnet's modules anchor on import.meta.dirname and a bundle has no directory
 pnpm test:image  # vitest, opt-in and NOT part of `pnpm test`: plants dummy key material where
                  # deploy/README.md says to generate the real thing, then builds the build
@@ -1034,8 +1044,11 @@ pnpm lint        # eslint
 pnpm typecheck   # tsc --noEmit — the root project, then the guide's own tsconfig, which the root
                  # one excludes because a browser package's JSX and DOM libs must not leak into
                  # the two Node apps
-pnpm format      # prettier over packages/*/src/**/*.{ts,tsx} and deploy/**/*.ts — all three
-                 # bundles, and tsx because the guide is the repo's first
+pnpm format      # prettier over packages/*/src/**/*.{ts,tsx} and the three bundle directories BY
+                 # NAME (deploy/*.ts, deploy/hub/*.ts, deploy/devnet/*.ts) — never deploy/**,
+                 # because prettier's glob walks into deploy/devnet/run/, where an --anyone run
+                 # leaves a HiddenServiceDir the daemon owns and the host user cannot read; tsx
+                 # because the guide is the repo's first
 docker build -f packages/station-origin/Dockerfile -t ghcr.io/toon-protocol/station-origin:latest .
 docker build -f packages/slot-app/Dockerfile -t ghcr.io/toon-protocol/slot-app:latest .
 ```
@@ -1165,13 +1178,19 @@ literal in a test. `pnpm test:image` proves that for every image this repo publi
   source, never the rule.
 - **The same collision reaches the toolchain, not only git, and `deploy/devnet/run/` is where it
   bites.** `pnpm demo` writes the segments a viber bought into that directory, and the format
-  scripts glob `deploy/**/*.ts` — so `tsc`, `eslint` and `prettier` all tried to parse a broadcast
-  as source, and `pnpm format:check` failed by printing binary video into the terminal. That
-  directory is generated all the way down (both `connector.toml`s, every credential, and now the
-  media), so **it is excluded from all three by directory**: `.prettierignore`, `eslint.config.js`'s
-  `ignores`, and `tsconfig.json`'s `exclude`. CI never caught it because CI never runs the demo —
-  only a person who had. Add the exclusion in all three or in none; two out of three is a toolchain
-  that breaks for whoever ran the demo last.
+  scripts used to glob `deploy/**/*.ts` — so `tsc`, `eslint` and `prettier` all tried to parse a
+  broadcast as source, and `pnpm format:check` failed by printing binary video into the terminal.
+  That directory is generated all the way down (both `connector.toml`s, every credential, and now
+  the media), so **it is excluded from all three by directory**: `.prettierignore`,
+  `eslint.config.js`'s `ignores`, and `tsconfig.json`'s `exclude`. CI never caught it because CI
+  never runs the demo — only a person who had. Add the exclusion in all three or in none; two out
+  of three is a toolchain that breaks for whoever ran the demo last. **And an ignore rule is not
+  enough for prettier**: its positional glob still WALKS the tree it will then ignore, and after a
+  `pnpm demo --anyone` run `run/hub-anon/hs/` is a directory the anon daemon owns and the host user
+  cannot even read — `deploy/**` dies on EACCES before any ignore file is consulted. So the format
+  scripts name the three bundle directories (`deploy/*.ts`, `deploy/hub/*.ts`,
+  `deploy/devnet/*.ts`) and never `deploy/**`; a new directory of bundle TypeScript is a new glob,
+  not a wildcard.
 
 ## Cross-repo dependencies
 

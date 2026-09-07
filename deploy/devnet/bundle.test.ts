@@ -47,6 +47,13 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import {
+  CHAIN_IPV4,
+  DEVNET_SUBNET,
+  HUB_ANON_IPV4,
+  HUB_CONNECTOR_IPV4,
+  hubAnonrc,
+} from './anon.js';
 import { DRIVER_HELD_FILES, GENERATED_FILES } from './credentials.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..');
@@ -84,10 +91,20 @@ const PROJECT_NAME = 'slopmachine-devnet';
  * host ports. A bare `connector` is a log line nobody can place and a
  * `docker compose exec` into the wrong box.
  */
-const HUB_SERVICES = ['hub-connector', 'hub-relay', 'hub-slot-app'];
+const HUB_SERVICES = ['hub-anon', 'hub-connector', 'hub-relay', 'hub-slot-app'];
 const STATION_SERVICES = ['station-connector', 'station-origin'];
 const CHAIN_SERVICE = 'chain';
 const EXPECTED_SERVICES = [CHAIN_SERVICE, ...HUB_SERVICES, ...STATION_SERVICES];
+
+/**
+ * The one service behind a compose profile, and the profile it is behind.
+ * `hub-anon` exists only for `pnpm demo --anyone`, so the profile is what
+ * keeps every other invocation's topology — `pnpm test:devnet`'s included —
+ * byte-for-byte what it was; and NO OTHER service may gain one, because a
+ * profile on a service the run needs is a service that silently never starts.
+ */
+const THE_PROFILED_SERVICE = 'hub-anon';
+const THE_PROFILE = 'anyone';
 
 /**
  * A service name that names a role without naming its node. `connector` is the
@@ -172,6 +189,13 @@ const EXPECTED_PUBLISHED_PORTS: Record<string, string> = {
   'hub-relay': `${LOOPBACK_PUBLISH_PREFIX}${RELAY_READ_PORT}:${RELAY_READ_PORT}`,
   'station-connector': `${LOOPBACK_PUBLISH_PREFIX}3001:${CONNECTOR_EDGE_PORT}`,
   'station-origin': `${LOOPBACK_PUBLISH_PREFIX}${RTMP_PORT}:${RTMP_PORT}`,
+  // The hub daemon's SOCKS side, for the HOST'S OWN PAYERS in `--anyone`
+  // runs. A driver publish on exactly the terms of the other four, and not a
+  // free door: SOCKS into a circuit reaches only what the hidden service
+  // itself fronts, which is the hub's PAID client edge and the chain — the
+  // same two surfaces the loopback publishes above already offer this machine
+  // for nothing.
+  'hub-anon': `${LOOPBACK_PUBLISH_PREFIX}9050:9050`,
 };
 
 /** What each service keeps on `expose:` — private, but still dialable on this network. */
@@ -256,18 +280,30 @@ const RELAY_SECRET_ENV = 'NOSTR_SECRET_KEY';
 const RELAY_SECRET_INTERPOLATION = '${DEVNET_RELAY_NOSTR_SECRET:-}';
 
 /**
- * The only two services that may be built, and the only Dockerfiles they may
- * be built from. THE DEVNET INTRODUCES NO NEW PUBLISHED IMAGE: the connector
- * and the chain are already-published images, and these two are this
- * repository's own apps, built from the checkout exactly as each shipped
- * bundle's local overlay builds its own.
+ * The only services that may be built, and where each builds from. THE DEVNET
+ * INTRODUCES NO NEW PUBLISHED IMAGE: the connector, the chain and the relay
+ * are already-published images; the two apps are this repository's own, built
+ * from the checkout exactly as each shipped bundle's local overlay builds its
+ * own; and the anon daemon is built from `./anon/` because ghcr publishes no
+ * image at the release both TLD-speaking sides need — the Dockerfile check
+ * below is what holds that build to its verified version.
  */
-const EXPECTED_BUILDS: Record<string, string> = {
-  'hub-slot-app': 'packages/slot-app/Dockerfile',
-  'station-origin': 'packages/station-origin/Dockerfile',
+const EXPECTED_BUILDS: Record<
+  string,
+  { context: string; dockerfile?: string }
+> = {
+  // The repository root, two directories up from this bundle: a frozen
+  // install resolves against the workspace the context actually holds.
+  'hub-slot-app': {
+    context: '../..',
+    dockerfile: 'packages/slot-app/Dockerfile',
+  },
+  'station-origin': {
+    context: '../..',
+    dockerfile: 'packages/station-origin/Dockerfile',
+  },
+  'hub-anon': { context: './anon' },
 };
-/** The repository root, two directories up from this bundle. */
-const EXPECTED_BUILD_CONTEXT = '../..';
 
 // ── The generated configuration ──────────────────────────────────────────────
 
@@ -339,12 +375,15 @@ const EXPECTED_TEMPLATES: Record<string, string> = {
   // 0.0.0.0 and a private network — so it is configuration, and what it has to
   // name is the address the parties who pay THAT node can dial.
   //
-  // A hub's payers are a broadcaster and a viber, and in this topology both are
-  // the driver, on the host, coming in through the loopback publish. A
-  // station's only client is the hub, which dials from inside the compose
-  // network. A viber never reaches a station directly; that is what the hub is
-  // for.
-  'hub-connector': 'http://127.0.0.1:3000/ilp',
+  // A hub's payers are a broadcaster and a viber, and WHO THEY ARE depends on
+  // the run: the driver on this machine's loopback publish ordinarily, and
+  // parties dialing a circuit under `pnpm demo --anyone` — whose address does
+  // not exist until a daemon has generated it. So the hub's endpoint is a
+  // PLACEHOLDER the run fills (`devnet.test.ts` passes the loopback literal),
+  // where the station's is committed: its only client is the hub, which dials
+  // from inside the compose network in every mode. A viber never reaches a
+  // station directly; that is what the hub is for.
+  'hub-connector': '{{HUB_HTTP_ENDPOINT}}',
   'station-connector': 'http://station-connector:3000/ilp',
 };
 
@@ -364,6 +403,56 @@ const A_SECOND_CHAIN = '[settlement.solana]';
 
 /** An address literal. A template that carried one would be pinned to a chain it did not deploy. */
 const AN_ADDRESS_LITERAL = /"0x[0-9a-fA-F]{40}"/;
+
+// ── The hidden service (`pnpm demo --anyone`) ────────────────────────────────
+
+/**
+ * The anon daemon's build, held to its verified release. ghcr publishes no
+ * image for v0.4.10.2 — the release that routes `.anyone`, which is the only
+ * TLD the payer routes — so `./anon/Dockerfile` overlays the official release
+ * binary onto the last published image, sha-verified BEFORE it is ever
+ * executed. These are the same figures the connector repo's `local/anon-image`
+ * and toon-client's managed daemon record; a drifted copy here would be a
+ * daemon publishing addresses the payer refuses.
+ */
+const ANON_DOCKERFILE = `${DEVNET_DIR}/anon/Dockerfile`;
+const EXPECTED_ANON_BASE = 'ghcr.io/anyone-protocol/ator-protocol:v0.4.9.7';
+const EXPECTED_ANON_VERSION = 'v0.4.10.2';
+const EXPECTED_ANON_SHA256 =
+  '9c6498b8d27de54d78842a1b854979a605f9c140ccc34f2b4c267bf094eaeb17';
+/** The build-time check that the fetched binary IS that release. */
+const ANON_VERSION_CHECKED_AT_BUILD = 'anon --version | grep -q "0.4.10.2"';
+
+/**
+ * The fixed addresses, declared here as literals and held to BOTH files that
+ * carry them: the compose file pins the services, and `anon.ts` writes them
+ * into the daemon's `HiddenServicePort` lines — which anon resolves when it
+ * PARSES its config, before the targets exist, so a service name there aborts
+ * the daemon and a drifted address forwards the circuit into nothing. The
+ * subnet is RFC1918 from 10/8 on purpose: outside docker's own default pools,
+ * and inside the ranges the daemon's SocksPolicy accepts.
+ */
+const EXPECTED_SUBNET = '10.213.0.0/16';
+const EXPECTED_FIXED_IPS: Record<string, string> = {
+  'hub-connector': '10.213.0.10',
+  chain: '10.213.0.20',
+  'hub-anon': '10.213.0.30',
+};
+/** What the generated anonrc must target: the hub's edge, and the chain. */
+const EXPECTED_HS_FORWARDS = [
+  'HiddenServicePort 80 10.213.0.10:3000',
+  'HiddenServicePort 8545 10.213.0.20:8545',
+];
+
+/**
+ * The one WRITABLE bind mount in this bundle, exempt by literal from the
+ * read-only rule and from the generated-files manifest: it is a DIRECTORY the
+ * daemon itself writes — the `.anyone` address and the key behind it — not a
+ * credential the driver generates. It is a bind mount rather than a named
+ * volume so `down --volumes` cannot rotate the station's public address, and
+ * `credentials.ts` keeps it across runs for the same reason.
+ */
+const THE_ADDRESS_MOUNT = './run/hub-anon/hs:/var/lib/anon/hidden_service';
 
 // ── The payer ────────────────────────────────────────────────────────────────
 
@@ -497,6 +586,12 @@ const KEY_MATERIAL = /[0-9a-fA-F]{64}/;
  */
 const EXPECTED_HEALTHCHECKS: Record<string, string> = {
   chain: 'cast block-number --rpc-url http://127.0.0.1:8545 || exit 1',
+  // The SOCKS port ANSWERING, not the container being Up and not a hostname
+  // file existing — the address is generated seconds in, long before there is
+  // a circuit to publish it on. Full bootstrap is the driver's own wait, on
+  // `Bootstrapped 100%` in the daemon's log. bash's /dev/tcp, because the
+  // image ships neither wget nor nc and the check must not add a package.
+  'hub-anon': "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9050' || exit 1",
   'hub-connector': `wget -q --spider http://127.0.0.1:${CONNECTOR_EDGE_PORT}/ilp/identity || exit 1`,
   'hub-relay': `wget -q --spider http://127.0.0.1:${RELAY_WRITE_PORT}/health || exit 1`,
   'hub-slot-app': `wget -q --spider http://127.0.0.1:${SLOT_APP_PORT}/health || exit 1`,
@@ -524,11 +619,17 @@ interface ComposeService {
   healthcheck?: { test?: string[] };
   volumes?: string[];
   restart?: string;
+  profiles?: string[];
+  networks?: Record<string, { ipv4_address?: string } | null>;
 }
 
 interface DockerCompose {
   name?: string;
   services?: Record<string, ComposeService>;
+  networks?: Record<
+    string,
+    { ipam?: { config?: { subnet?: string }[] } } | null
+  >;
 }
 
 /**
@@ -752,7 +853,7 @@ describe('devnet bundle', () => {
     }
   });
 
-  it("publishes exactly the four driver addresses and the broadcaster's ingest", () => {
+  it("publishes exactly the five driver addresses and the broadcaster's ingest", () => {
     const published = Object.fromEntries(
       publishedPorts(EVERY_COMPOSE_FILE).map(({ service, entry }) => [
         service,
@@ -762,7 +863,7 @@ describe('devnet bundle', () => {
 
     expect(
       published,
-      `${COMPOSE_PATH}: the published set is the chain's RPC, the two connector edges, the relay's free NIP-01 reads and the broadcaster's own ingest, all on loopback, and nothing else`
+      `${COMPOSE_PATH}: the published set is the chain's RPC, the two connector edges, the relay's free NIP-01 reads, the hub daemon's SOCKS side (behind the anyone profile) and the broadcaster's own ingest, all on loopback, and nothing else`
     ).toEqual(EXPECTED_PUBLISHED_PORTS);
   });
 
@@ -958,7 +1059,7 @@ describe('devnet bundle', () => {
     }
   });
 
-  it("builds only this repository's own two apps, and pulls everything else", () => {
+  it("builds only this repository's own two apps and the anon daemon, and pulls everything else", () => {
     // THE DEVNET INTRODUCES NO NEW PUBLISHED IMAGE. The chain and the connector
     // are already-published images; the slot app and the origin are built from
     // the checkout, exactly as each shipped bundle's own local overlay builds
@@ -977,11 +1078,11 @@ describe('devnet bundle', () => {
       expect(
         definition.build?.dockerfile,
         `${COMPOSE_PATH} ${service}: builds from ${String(definition.build?.dockerfile)}`
-      ).toBe(EXPECTED_BUILDS[service]);
+      ).toBe(EXPECTED_BUILDS[service]?.dockerfile);
       expect(
         definition.build?.context,
-        `${COMPOSE_PATH} ${service}: builds from the wrong context — both Dockerfiles take the repository root`
-      ).toBe(EXPECTED_BUILD_CONTEXT);
+        `${COMPOSE_PATH} ${service}: builds from the wrong context — the two apps take the repository root, the anon daemon its own directory`
+      ).toBe(EXPECTED_BUILDS[service]?.context);
       expect(
         definition.image,
         `${COMPOSE_PATH} ${service}: declares an \`image:\` as well as a \`build:\` — one of them is what actually runs and a reader cannot tell which`
@@ -1027,6 +1128,102 @@ describe('devnet bundle', () => {
       relay?.environment?.['TOON_ENFORCE_EXPIRATION'],
       `${COMPOSE_PATH} hub-relay: TOON_ENFORCE_EXPIRATION must be stated 'true' — the heartbeat's whole design leans on expired events not being served`
     ).toBe('true');
+  });
+
+  // ── The hidden service (`pnpm demo --anyone`) ──────────────────────────────
+
+  it('keeps hub-anon behind the anyone profile, and every other service in front of it', () => {
+    const services = servicesOf(COMPOSE_PATH);
+
+    // The profiled service, exactly: `pnpm demo --anyone` names the profile,
+    // and nothing else — `pnpm test:devnet` included — ever starts it, which
+    // is what keeps every existing run's topology byte-for-byte what it was.
+    expect(
+      services[THE_PROFILED_SERVICE]?.profiles,
+      `${COMPOSE_PATH} ${THE_PROFILED_SERVICE}: expected exactly the profile ["${THE_PROFILE}"] — the daemon exists for --anyone runs and must be invisible to every other up`
+    ).toEqual([THE_PROFILE]);
+
+    // And NO OTHER service gained one: a profile on a service the run needs
+    // is a service that silently never starts, and the failure lands three
+    // assertions later against a node that was never up.
+    for (const [service, definition] of Object.entries(services)) {
+      if (service === THE_PROFILED_SERVICE) continue;
+      expect(
+        definition.profiles,
+        `${COMPOSE_PATH} ${service}: declares profiles ${JSON.stringify(definition.profiles)} — only ${THE_PROFILED_SERVICE} sits behind one`
+      ).toBeUndefined();
+    }
+  });
+
+  it('pins the addresses the hidden service forwards to, and holds the anonrc generator to them', () => {
+    const compose = readCompose(COMPOSE_PATH);
+
+    // The subnet, pinned so the fixed addresses below can exist — and RFC1918
+    // from 10/8, outside docker's default pools and inside the ranges the
+    // daemon's SocksPolicy accepts.
+    expect(
+      compose.networks?.['default']?.ipam?.config?.[0]?.subnet,
+      `${COMPOSE_PATH}: the default network must pin the subnet ${EXPECTED_SUBNET}`
+    ).toBe(EXPECTED_SUBNET);
+    expect(
+      DEVNET_SUBNET,
+      `anon.ts names the subnet ${DEVNET_SUBNET} and the guard expects ${EXPECTED_SUBNET} — the two must agree`
+    ).toBe(EXPECTED_SUBNET);
+
+    // Each pinned service, in the compose file AND in anon.ts: anon resolves
+    // `HiddenServicePort` targets when it parses its config, so a drifted
+    // address is a circuit forwarded into nothing.
+    for (const [service, address] of Object.entries(EXPECTED_FIXED_IPS)) {
+      expect(
+        compose.services?.[service]?.networks?.['default']?.ipv4_address,
+        `${COMPOSE_PATH} ${service}: expected the fixed address ${address}`
+      ).toBe(address);
+    }
+    expect(HUB_CONNECTOR_IPV4).toBe(EXPECTED_FIXED_IPS['hub-connector']);
+    expect(CHAIN_IPV4).toBe(EXPECTED_FIXED_IPS['chain']);
+    expect(HUB_ANON_IPV4).toBe(EXPECTED_FIXED_IPS['hub-anon']);
+
+    // And the generated anonrc actually targets them — the generator and the
+    // compose file held to each other the way the mounts-vs-manifest check
+    // holds the compose file to the credentials module.
+    const anonrc = hubAnonrc();
+    for (const forward of EXPECTED_HS_FORWARDS) {
+      expect(
+        anonrc,
+        `the generated anonrc does not carry "${forward}" — the hidden service would forward to nothing`
+      ).toContain(forward);
+    }
+    // Two lines the daemon does not start without: the terms, and — because
+    // the anonrc is mounted read-only — an explicit Nickname the entrypoint
+    // would otherwise try and fail to append.
+    expect(anonrc).toContain('AgreeToTerms 1');
+    expect(anonrc).toMatch(/^Nickname \w+$/m);
+    // The HiddenServiceDir the anonrc names is the container side of the
+    // address mount, or the persisted directory is not the one in use.
+    expect(anonrc).toContain(
+      `HiddenServiceDir ${THE_ADDRESS_MOUNT.split(':')[1] ?? ''}`
+    );
+  });
+
+  it('builds the anon daemon at its verified release, sha-checked before it runs', () => {
+    const dockerfile = readFile(ANON_DOCKERFILE);
+
+    expect(
+      dockerfile,
+      `${ANON_DOCKERFILE}: must overlay onto the last published image, ${EXPECTED_ANON_BASE}`
+    ).toContain(`FROM ${EXPECTED_ANON_BASE}`);
+    expect(
+      dockerfile,
+      `${ANON_DOCKERFILE}: must pin ANON_VERSION=${EXPECTED_ANON_VERSION} — the release that routes .anyone, which is the only TLD the payer routes`
+    ).toContain(`ARG ANON_VERSION=${EXPECTED_ANON_VERSION}`);
+    expect(
+      dockerfile,
+      `${ANON_DOCKERFILE}: must pin the release zip's sha256 — an unverified download is not an upgrade`
+    ).toContain(`ARG ANON_SHA256=${EXPECTED_ANON_SHA256}`);
+    expect(
+      dockerfile,
+      `${ANON_DOCKERFILE}: must fail the BUILD if the wrong release was fetched — \`${ANON_VERSION_CHECKED_AT_BUILD}\``
+    ).toContain(ANON_VERSION_CHECKED_AT_BUILD);
   });
 
   // ── The generated configuration ────────────────────────────────────────────
@@ -1075,6 +1272,10 @@ describe('devnet bundle', () => {
     )) {
       for (const mount of definition.volumes ?? []) {
         if (!mount.startsWith('.')) continue;
+        // The one writable bind, by literal: the daemon's own HiddenServiceDir,
+        // which holds what the daemon writes rather than what the driver
+        // generated. Everything else stays read-only.
+        if (mount === THE_ADDRESS_MOUNT) continue;
         // A credential a container can rewrite is a credential a compromised
         // container can rotate out from under whoever generated it.
         expect(
@@ -1129,8 +1330,15 @@ describe('devnet bundle', () => {
         continue;
       }
 
+      // Two 64-hex runs are declared literals of this bundle and stripped BY
+      // THOSE LITERALS, never by pattern: the chain image's digest, and the
+      // anon release's sha256 — a verification figure published by upstream,
+      // recorded identically in toon-client and the connector repo, and not a
+      // credential. A third run cannot arrive disguised as either.
       const withoutTheDigest = readFile(file)
         .split(EXPECTED_CHAIN_IMAGE)
+        .join('')
+        .split(EXPECTED_ANON_SHA256)
         .join('');
       const found = KEY_MATERIAL.exec(withoutTheDigest);
       expect(
@@ -1215,6 +1423,11 @@ describe('devnet bundle', () => {
     const mounted = Object.values(servicesOf(COMPOSE_PATH))
       .flatMap((definition) => definition.volumes ?? [])
       .filter((mount) => mount.startsWith(WORK_DIR_MOUNT_PREFIX))
+      // The daemon's HiddenServiceDir, by literal: the one `./run/` mount that
+      // is a DIRECTORY the container writes rather than a file the driver
+      // generates — docker creating it when absent is the wanted behavior, so
+      // it belongs in neither direction of this check.
+      .filter((mount) => mount !== THE_ADDRESS_MOUNT)
       .map((mount) => mount.slice(WORK_DIR_MOUNT_PREFIX.length).split(':')[0]);
 
     for (const mount of mounted) {

@@ -177,6 +177,7 @@ holds that by literal, and the devnet run drives the same surface with real mone
 ```
 pnpm demo -- --pattern      the run's own ffmpeg test pattern, for nobody at the keyboard
 pnpm demo -- --port 9000    where the page is served
+pnpm demo -- --anyone       host the hub behind an Anyone-network hidden service
 ```
 
 Ctrl-C prints what the viber paid, what the broadcaster earned, what the hub carried it for, and
@@ -184,6 +185,63 @@ tears everything down.
 
 The demo **asserts nothing**. It is here so that a thing which is true can also be seen by somebody
 who has not read the test.
+
+## Hosting over a hidden service — `pnpm demo --anyone`
+
+The demo above is one machine talking to itself. `--anyone` makes it a **broadcast anybody can pay
+for**: the hub's client edge and the chain's RPC are fronted by ONE hidden service on the
+[Anyone Protocol](https://github.com/anyone-protocol) overlay, and every payer — the broadcaster,
+the demo's own viber, and remote viewers — pays over the circuit at `http://<address>.anyone`.
+The station stays internal: its only client is the hub, one compose network away, and a viber never
+reaches a station directly in any mode.
+
+Be clear about what this rides on: **the Anyone network is a live third-party network.** First
+bootstrap takes a minute or two, circuit latency is real (a pull's round trip is tens of
+loopback's, which is why the viber's preroll and drift window widen in this mode), and a bad
+network day is a bad demo day. The daemon is anon v0.4.10.2, built by
+[`anon/Dockerfile`](anon/Dockerfile) because ghcr publishes no image for the release that routes
+`.anyone` — the only hidden-service TLD the payer routes.
+
+**The host:**
+
+```
+pnpm demo --pattern --anyone      (or without --pattern, with OBS at the keyboard)
+```
+
+The run brings the daemon up first — the hub's configuration has to advertise the `.anyone`
+address, and the address does not exist until the daemon has generated it — waits for
+`Bootstrapped 100%`, and then walks the demo exactly as before, every paid request now riding the
+circuit through the daemon's SOCKS side on `127.0.0.1:9050`. Once the slot is bought it prints a
+**Remote viewers** block: the hub's `.anyone` address, the station's granted prefix, the seal-to
+key (the station's public edge identity, handed out because a viewer cannot read the station's own
+self-description), three private keys funded with gas and token on this run's chain, and the exact
+`pnpm demo:viewer` command. **The address is stable across runs**: it lives in `run/hub-anon/hs/`,
+which is a bind mount the teardown and the next run's credential sweep both deliberately leave in
+place — delete that directory and the next run mints a new address.
+
+**A viewer**, on any machine with Docker and a checkout of this repository:
+
+```
+pnpm demo:viewer -- \
+  --connector http://<56-char-address>.anyone \
+  --station   g.toon.slopmachine.<handle> \
+  --seal-to   <hex> \
+  --price audio=200 --price 480p=1000 --price now=50 \
+  --key 0x…
+```
+
+(every value copied from the host's printed block). The viewer builds the daemon image on first
+use, runs its own SOCKS-only anon beside it, opens its **own payment channel with the hub over the
+circuit** — chain RPC rides the proxy too, through the hidden service's port 8545, so the viewer's
+settlement address is never broadcast from its own IP — discovers the ladder from the first paid
+`/now`, and then buys the broadcast one paid packet at a time into the same page, at
+<http://127.0.0.1:8088>. `--price` pairs are optional and only feed the broadcaster/hub split
+display; `--socks socks5h://…` skips the managed daemon when one is already running. Ctrl-C prints
+what was paid and removes the daemon container.
+
+Running the viewer **on the same machine as the host** — the full-circuit rehearsal — works too:
+the viewer's daemon takes its own SOCKS port so it never fights the host's 9050, but the page
+defaults to the same 8088 the host's page holds, so add `--port 8090`.
 
 [`bundle.test.ts`](bundle.test.ts) is this bundle's guard, the sibling of
 [`../bundle.test.ts`](../bundle.test.ts) and [`../hub/bundle.test.ts`](../hub/bundle.test.ts). It

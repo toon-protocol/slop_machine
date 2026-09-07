@@ -86,14 +86,24 @@ function chainValues(chain: ChainSettings): Record<string, string> {
  * is the same value the slot app is given as `TOON_HUB_ADDRESS` in the compose
  * file: a hub whose app and connector disagree about its own name grants
  * prefixes nothing terminates and writes routes nobody addresses.
+ *
+ * `httpEndpoint` is where the hub's OWN PAYERS reach it — the one fact a node
+ * cannot introspect, so the caller states it. The ordinary devnet passes the
+ * loopback publish (`http://127.0.0.1:3000/ilp`); an `--anyone` run passes
+ * the hub's generated `.anyone` address, which is why this is a parameter
+ * rather than a committed literal: clients verify and re-dial what a node
+ * advertises, so a hub reached over a circuit cannot go on advertising a
+ * loopback nobody dialing it can see.
  */
 export function renderHubConnectorToml(
   chain: ChainSettings,
-  hubAddress: string
+  hubAddress: string,
+  httpEndpoint: string
 ): string {
   const rendered = render(templateFor('hub-connector'), {
     ...chainValues(chain),
     HUB_ADDRESS: hubAddress,
+    HUB_HTTP_ENDPOINT: httpEndpoint,
   });
   writeFileSync(HUB_CONNECTOR_TOML, rendered, { mode: 0o644 });
   return rendered;

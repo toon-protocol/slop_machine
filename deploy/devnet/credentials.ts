@@ -32,11 +32,18 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import { createWriteSigner } from '../../packages/slot-app/src/operator/write-signature.js';
+import { hubAnonrc } from './anon.js';
 
 /**
  * The ignored working directory, and the two node directories under it. The
@@ -48,6 +55,17 @@ import { createWriteSigner } from '../../packages/slot-app/src/operator/write-si
 export const WORK_DIR = resolve(import.meta.dirname, 'run');
 const HUB_DIR = resolve(WORK_DIR, 'hub');
 const STATION_DIR = resolve(WORK_DIR, 'station');
+const HUB_ANON_DIR = resolve(WORK_DIR, 'hub-anon');
+
+/**
+ * The hub daemon's `HiddenServiceDir` — the one path under `run/` that
+ * SURVIVES a fresh run, because the `.anyone` address lives in it and an
+ * unpersisted one is a new address every start with every viewer's command
+ * going stale silently. It is also the one path the driver cannot delete: the
+ * anon image's entrypoint chowns it to its own unprivileged user, so it is
+ * kept in place rather than kept by copying.
+ */
+export const HS_DIR = resolve(HUB_ANON_DIR, 'hs');
 
 /**
  * Every file a run generates FOR A CONTAINER TO MOUNT, as the compose file
@@ -71,6 +89,12 @@ export const GENERATED_FILES = [
   'station/operator-bearer.token',
   'station/operator-write.keys',
   'station/stream.key',
+  // The hub daemon's configuration for `--anyone` runs — not a credential,
+  // and generated on every run regardless so that this manifest stays the
+  // whole truth about what the compose file may mount. The service that
+  // mounts it sits behind the `anyone` profile and starts only when a run
+  // asks for it.
+  'hub-anon/anonrc',
 ] as const;
 
 /**
@@ -184,19 +208,49 @@ function settlementKeyPair(): { key: string; address: Address } {
 }
 
 /**
+ * Empty the working directory — with ONE exception, kept in place.
+ *
+ * `run/hub-anon/hs/` is the hub daemon's `HiddenServiceDir`: the `.anyone`
+ * address and the private key behind it. Removing it would rotate the
+ * address on every run and silently invalidate every viewer's command — and
+ * the driver could not remove it anyway, because the anon image's entrypoint
+ * chowns it to the container's own unprivileged user, so an unconditional
+ * `rmSync` here would make every LATER run fail on EACCES three layers from
+ * the reason. So everything else goes, and that directory stays exactly
+ * where it is, whichever mode the run is in.
+ */
+function clearWorkDir(): void {
+  if (!existsSync(WORK_DIR)) return;
+  for (const entry of readdirSync(WORK_DIR)) {
+    if (entry === 'hub-anon') continue;
+    rmSync(resolve(WORK_DIR, entry), { recursive: true, force: true });
+  }
+  if (!existsSync(HUB_ANON_DIR)) return;
+  for (const entry of readdirSync(HUB_ANON_DIR)) {
+    if (entry === 'hs') continue;
+    rmSync(resolve(HUB_ANON_DIR, entry), { recursive: true, force: true });
+  }
+}
+
+/**
  * Generate everything, from nothing.
  *
- * The working directory is REMOVED first. A run inherits nothing: a stale
+ * The working directory is REMOVED first (the hidden-service directory
+ * excepted — see {@link clearWorkDir}). A run inherits nothing: a stale
  * `connector.toml` names contracts from a chain that no longer exists, and a
  * stale allowlist authorises a seed the slot app is no longer mounting — both
  * of which fail late and read like something else.
  */
 export function generateCredentials(): DevnetCredentials {
-  rmSync(WORK_DIR, { recursive: true, force: true });
-  for (const directory of [WORK_DIR, HUB_DIR, STATION_DIR]) {
+  clearWorkDir();
+  for (const directory of [WORK_DIR, HUB_DIR, STATION_DIR, HUB_ANON_DIR]) {
     // 0755, so the two container users can traverse to the files inside.
     mkdirSync(directory, { recursive: true, mode: 0o755 });
   }
+  // The daemon's HiddenServiceDir, pre-created so a first `--anyone` run does
+  // not leave its creation to the docker daemon; the image's entrypoint takes
+  // ownership and tightens it to 0700 at container start.
+  mkdirSync(HS_DIR, { recursive: true, mode: 0o755 });
 
   const hubSettlement = settlementKeyPair();
   const stationSettlement = settlementKeyPair();
@@ -252,6 +306,11 @@ export function generateCredentials(): DevnetCredentials {
     createWriteSigner(station.operatorWriteKey).keyid
   );
   write(resolve(STATION_DIR, 'stream.key'), station.streamKey);
+  // The hub daemon's anonrc — configuration, not a credential, and the text
+  // lives in anon.ts beside the fixed addresses it targets. Written on every
+  // run so the manifest above stays unconditional; only an `--anyone` run
+  // starts the service that mounts it.
+  write(resolve(HUB_ANON_DIR, 'anonrc'), hubAnonrc().trimEnd());
   // The broadcaster's announcement keypair seed, beside their other
   // credentials and mounted into nothing — the driver is the broadcaster here,
   // and signs every announcement event from it (ADR 0004).

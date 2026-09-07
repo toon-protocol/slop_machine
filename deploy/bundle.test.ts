@@ -240,6 +240,12 @@ const NOT_SCANNED_FOR_A_PIN = new Set([
   'dist',
   'coverage',
   'pnpm-lock.yaml',
+  // The devnet's generated working directory: gitignored all the way down, so
+  // nothing in it is a committed pin — and after a `pnpm demo --anyone` run it
+  // holds the anon daemon's HiddenServiceDir, which the daemon owns and the
+  // host user cannot even read, so a walk that descends dies on EACCES rather
+  // than finding anything.
+  'run',
 ]);
 
 // ── Healthchecks ─────────────────────────────────────────────────────────────
