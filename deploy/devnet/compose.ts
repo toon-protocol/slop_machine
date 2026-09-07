@@ -26,6 +26,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
+import { ANYONE_PROFILE } from './anon.js';
 import { RELAY_NOSTR_KEY_FILE } from './credentials.js';
 
 const execFileAsync = promisify(execFile);
@@ -156,10 +157,17 @@ export async function requireDockerDaemon(): Promise<string> {
 /** One `docker compose` invocation against this bundle, with the pin supplied. */
 export async function compose(
   args: string[],
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; profiles?: string[] } = {}
 ): Promise<CommandResult> {
+  // `--profile` goes BEFORE the subcommand — it is a top-level compose flag,
+  // and a service behind a profile is invisible to any invocation that does
+  // not name it.
+  const profiles = (options.profiles ?? []).flatMap((profile) => [
+    '--profile',
+    profile,
+  ]);
   try {
-    return await docker(['compose', '-f', COMPOSE_FILE, ...args], {
+    return await docker(['compose', '-f', COMPOSE_FILE, ...profiles, ...args], {
       timeoutMs: options.timeoutMs ?? 600_000,
       env: {
         [CONNECTOR_IMAGE_VAR]: connectorPinOfRecord(),
@@ -181,9 +189,17 @@ export async function compose(
  * declares a healthcheck, so compose already knows the answer, and a service
  * that never becomes healthy fails here rather than three assertions later
  * against a node that was never up.
+ *
+ * A service behind a compose profile is started only by an `up` that names
+ * the profile, so a caller starting one passes it here.
  */
-export async function up(services: string[]): Promise<void> {
-  await compose(['up', '-d', '--wait', ...services]);
+export async function up(
+  services: string[],
+  options: { profiles?: string[] } = {}
+): Promise<void> {
+  await compose(['up', '-d', '--wait', ...services], {
+    profiles: options.profiles,
+  });
 }
 
 /**
@@ -259,8 +275,14 @@ export async function inspect(
 export async function runBeside(options: {
   name: string;
   image: string;
-  network: string;
-  command: string[];
+  /** The docker network to join. The daemon's default bridge when omitted. */
+  network?: string;
+  /** `-p` publishes, host-IP-qualified by the caller like everything else. */
+  ports?: string[];
+  /** `-v` binds, `host:container[:ro]`. */
+  volumes?: string[];
+  /** Replaces the image's CMD when given. */
+  command?: string[];
 }): Promise<void> {
   await docker(
     [
@@ -268,13 +290,59 @@ export async function runBeside(options: {
       '--detach',
       '--name',
       options.name,
-      '--network',
-      options.network,
+      ...(options.network === undefined ? [] : ['--network', options.network]),
+      ...(options.ports ?? []).flatMap((port) => ['--publish', port]),
+      ...(options.volumes ?? []).flatMap((volume) => ['--volume', volume]),
       options.image,
-      ...options.command,
+      ...(options.command ?? []),
     ],
     { timeoutMs: 120_000 }
   );
+}
+
+/**
+ * Build one image from a directory in this bundle.
+ *
+ * The viewer's own anon daemon is the one caller: a remote viewer has this
+ * repository and Docker and nothing else, so the daemon image is built where
+ * it is needed rather than published — the devnet introduces no new published
+ * image, and this does not change that.
+ */
+export async function buildImage(options: {
+  tag: string;
+  context: string;
+}): Promise<void> {
+  await docker(['build', '--tag', options.tag, options.context], {
+    timeoutMs: 600_000,
+  });
+}
+
+/** Whether an image is already on this daemon, so a build can be skipped. */
+export async function imageExists(tag: string): Promise<boolean> {
+  try {
+    const { stdout } = await docker(
+      ['images', '--quiet', '--filter', `reference=${tag}`],
+      { timeoutMs: 30_000 }
+    );
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run a command inside a container of this run's OWN, named rather than found
+ * through compose labels — the sibling of {@link execIn} for what
+ * {@link runBeside} started.
+ */
+export async function execInContainer(
+  container: string,
+  command: string[]
+): Promise<string> {
+  const { stdout } = await docker(['exec', container, ...command], {
+    timeoutMs: 60_000,
+  });
+  return stdout;
 }
 
 /** What a container of this run's own has said, for a failure that needs it. */
@@ -337,8 +405,13 @@ export async function restart(service: string): Promise<void> {
  * asserting against a chain that no longer holds what they remember.
  */
 export async function down(): Promise<void> {
+  // Every profile is named, always: a `down` that did not would leave an
+  // `--anyone` run's daemon standing while the network under it was removed,
+  // and the next run would fail on the leftovers rather than on anything it
+  // did. Naming a profile whose service never started costs nothing.
   await compose(['down', '--volumes', '--remove-orphans', '--timeout', '5'], {
     timeoutMs: 180_000,
+    profiles: [ANYONE_PROFILE],
   });
 }
 

@@ -533,7 +533,10 @@ describe('the devnet', () => {
       token: deployment.token,
       decimals: TOKEN_DECIMALS,
     };
-    renderHubConnectorToml(chain, HUB_ADDRESS);
+    // The endpoint the hub advertises is the loopback publish its payers — the
+    // driver's broadcaster and viber — actually dial; `pnpm demo --anyone`
+    // passes a `.anyone` address here instead, which is why it is an argument.
+    renderHubConnectorToml(chain, HUB_ADDRESS, `${HUB_EDGE_URL}/ilp`);
     renderStationConnectorToml(chain, PLACEHOLDER_STATION_APEX);
 
     await up(NODE_SERVICES);

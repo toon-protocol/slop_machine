@@ -125,7 +125,7 @@ export const PAGE = `<!doctype html>
       <div class="row"><span>to the hub, for carriage</span><span class="hub" id="tohub">0</span></div>
     </div>
 
-    <div class="card">
+    <div class="card" id="broadcastercard">
       <h2>The broadcaster</h2>
       <div class="row"><span>banked, off chain</span><span id="claimed">0</span></div>
       <div class="row"><span>on chain</span><span class="money" id="onchain">0</span></div>
@@ -241,6 +241,11 @@ export const PAGE = `<!doctype html>
     // /now pulls are part of it, so this is not rungs times counts.
     document.getElementById('tostation').textContent = n(state.toStation);
     document.getElementById('tohub').textContent = n(state.toHub);
+
+    // A viewer's player has no redeem — that write is the broadcaster's own —
+    // and the honest rendering of an affordance this side does not hold is no
+    // card at all, not a button that fails.
+    document.getElementById('broadcastercard').hidden = state.redeemable === false;
 
     redeemBtn.disabled = !!state.redeeming || Number(state.claimed) === 0;
     redeemBtn.textContent = state.redeeming ? 'Redeeming…' : 'Redeem on chain';

@@ -62,16 +62,21 @@ addresses = [
 # `http_endpoint` is a fact a node cannot introspect: from inside a container it
 # sees 0.0.0.0 and a private network. What it publishes has to be the address
 # the parties who pay IT can dial, and a hub's payers are a broadcaster and a
-# viber. Here both of those are the driver, on the host, reaching this node
-# through the loopback publish in `../docker-compose.yml` — which is the same
-# shape as on a real hub, where a viber is outside the hub's network too.
+# viber. It is a PLACEHOLDER because the run decides who those payers are: in
+# the ordinary devnet both are the driver, on the host, reaching this node
+# through the loopback publish in `../docker-compose.yml` — the same shape as
+# on a real hub, where a viber is outside the hub's network too — and the
+# callers fill in `http://127.0.0.1:3000/ilp`. Under `pnpm demo --anyone` the
+# payers dial a circuit, and the value is the hub's own `.anyone` address —
+# which does not exist until the daemon that generates it has run, and so
+# cannot be committed here.
 #
 # The station is the mirror image: its only client is this hub, which dials it
 # from inside the compose network, so it publishes its compose service. Nothing
 # on that network ever dials this endpoint — the slot app reaches its own
 # connector through `TOON_OPERATOR_URL`, which is a different address for a
 # different job.
-http_endpoint = "http://127.0.0.1:3000/ilp"
+http_endpoint = "{{HUB_HTTP_ENDPOINT}}"
 
 # ── The quote ────────────────────────────────────────────────────────────────
 # Its own route at its own floor price, exactly as the shipped hub bundle

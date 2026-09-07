@@ -189,8 +189,13 @@ export interface PlayerOptions {
   clip?: ClipMedia;
   /** What the page asks for once a second. */
   state: () => DemoState;
-  /** What the page's one button does: redeem the station's latest claim, on chain. */
-  redeem: () => Promise<void>;
+  /**
+   * What the page's one button does: redeem the station's latest claim, on
+   * chain. It is the HOST's affordance — the broadcaster's own operator write
+   * — so a viewer's player omits it, the page hides the button, and
+   * `/api/redeem` answers by name rather than pretending.
+   */
+  redeem?: () => Promise<void>;
 }
 
 export interface Player {
@@ -417,19 +422,36 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     if (path === '/api/state') {
       // The page's superset: the demo's own extras plus the contract's two
       // facts the page follows — whether the paying side is vibing, and which
-      // rung the guide selected.
+      // rung the guide selected. `redeemable` says whether the redeem
+      // affordance exists at all: it is the broadcaster's own operator write,
+      // so a viewer's player has none and the page hides the button.
       return send(
         response,
         200,
         'application/json',
-        JSON.stringify({ ...options.state(), vibing, rung: selectedRung })
+        JSON.stringify({
+          ...options.state(),
+          vibing,
+          rung: selectedRung,
+          redeemable: options.redeem !== undefined,
+        })
       );
     }
     if (path === '/api/redeem' && request.method === 'POST') {
+      const redeem = options.redeem;
+      if (redeem === undefined) {
+        // A viewer's player: redeeming is the broadcaster's write, and this
+        // side holds no key that could make it. Said by name.
+        return send(
+          response,
+          404,
+          'application/json',
+          JSON.stringify({ error: 'not_the_broadcaster' })
+        );
+      }
       // The answer is the state, so the page learns what moved from the same
       // place it learns everything else rather than from this reply.
-      return void options
-        .redeem()
+      return void redeem()
         .then(() =>
           send(response, 200, 'application/json', JSON.stringify({ ok: true }))
         )

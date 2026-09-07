@@ -63,7 +63,10 @@ export interface PayerFunding {
 export interface OpenPayerOptions {
   /** A name for this party, used in the log line and in its own channel store. */
   who: string;
-  /** The connector's client edge, as the DRIVER reaches it — a loopback publish. */
+  /**
+   * The connector's client edge, as this payer reaches it — a loopback
+   * publish, or in an `--anyone` run the hub's own `.anyone` address.
+   */
   connectorUrl: string;
   /** The chain, as the driver reaches it. */
   rpcUrl: string;
@@ -71,6 +74,21 @@ export interface OpenPayerOptions {
   token: Address;
   key: PayerKey;
   funding: PayerFunding;
+  /**
+   * The `socks5h://` proxy a `.anyone` connector is reached through — a
+   * running anon daemon's SOCKS port. Required by the client for any
+   * hidden-service connector and refused beside a clearnet one, so it is set
+   * exactly when `connectorUrl` is a circuit's.
+   */
+  socksProxy?: string;
+  /**
+   * Whether chain RPC rides the proxy too. The client defaults it to `true`,
+   * which is the right answer for a payer on a strange network reading a
+   * public RPC; the DRIVER's payers set `false`, because their chain is this
+   * machine's own anvil on loopback and the circuit would buy nothing but
+   * latency — `local/anyone`'s payer takes the same documented opt-out.
+   */
+  proxyRpc?: boolean;
 }
 
 /** A payer with an open, funded channel toward one node. */
@@ -106,6 +124,12 @@ export async function openPayer(options: OpenPayerOptions): Promise<Payer> {
     evmPrivateKey: options.key.privateKey,
     chain: 'evm',
     rpcUrl: options.rpcUrl,
+    // Passed through only when set: the client refuses a socksProxy beside a
+    // clearnet connector, and that refusal is right.
+    ...(options.socksProxy === undefined
+      ? {}
+      : { socksProxy: options.socksProxy }),
+    ...(options.proxyRpc === undefined ? {} : { proxyRpc: options.proxyRpc }),
     // A path rather than the in-memory default: the watermark is what stops a
     // claim being re-signed at a nonce the connector has already banked, and a
     // run makes many payments.
