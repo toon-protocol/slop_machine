@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide renders its shell, payment-free by test
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide renders the discovery grid from real relay reads, payment-free by test
 
 This repository is a pnpm workspace with three packages. Two are the toon apps it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -602,11 +602,28 @@ module cannot quietly become a fifth exemption by being new.
 first that is **not a toon app**: a Vite SPA on React, Tailwind and shadcn — browser-only, static
 build, no server of its own — the discovery surface of epic
 [#72](https://github.com/toon-protocol/slop_machine/issues/72), which a hub can host as plain
-static files. What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75))
-is the dark shell with the four routes stubbed and navigable — `/` (the discovery grid),
+static files. What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75),
+[#76](https://github.com/toon-protocol/slop_machine/issues/76))
+is the dark shell with the four routes — `/` (the discovery grid),
 `/categories`, `/categories/:category` and `/b/:handle` (the broadcaster page; no bare vanity
 URLs, because display names are not unique and the handle is the only identity anybody grants) —
-and, from day one, the guard that makes the repo's oldest invariant hold on it by test.
+the guard that makes the repo's oldest invariant hold on it by test, and, since #76, **the
+discovery grid rendered from real relay reads**: `src/relay/` opens one NIP-01 subscription to the
+configured relay (`VITE_RELAY_URL`, falling back to the devnet's `ws://127.0.0.1:7100`) for ADR
+0004's profile, station-announcement and heartbeat kinds, and derives the station list from what
+comes back. One card per station, the rung ladder and per-segment prices **leading** — the real
+number this system has, never an audience figure — categories from the `t` tags, and a live badge
+**exactly while an unexpired heartbeat exists**: NIP-40 expiry is the guide's own to apply, re-asked
+against a ticking clock so a lapsing heartbeat drops the badge with no reload, and the left sidebar
+lists the same live stations. Two announcements claiming one station address resolve
+**first-mover-wins** (earliest `created_at`; later claimants dropped) — ADR 0004's v1 squatter
+defense, applied where the ADR assigns it, in the consumer. The NIP-01 reader is **hand-rolled**
+(`src/relay/nip01.ts`): the obvious dependency is `nostr-tools`, which is the announcement *signer*
+and devnet-only by the bundle guard's fence — the guide only reads, so it takes the smallest thing
+that reads, and it verifies no `sig`, because a signing curve is on the payment-free denylist and
+an announcement is a claim either way. The one place the guide spells the wire's own name for the
+address tag is a single pinned constant, exempted **by exact line** in the payment-free guard —
+which asserts the exemption exists, still bites, and shields nothing else.
 
 **`packages/guide/src/guide/payment-free.test.ts` is that guard**, in the style of the slot app's
 vocabulary test: it reads the package's own source and manifest and fails on a payer dependency
@@ -926,6 +943,13 @@ pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/
                  # Foundry, Rust or submodules; tears everything down, volumes included, and dumps
                  # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
                  # still and runs in `pnpm test` with no daemon at all
+pnpm test:guide  # Playwright, opt-in and NOT part of `pnpm test`: drives the guide's discovery
+                 # grid in real Chromium against the RUNNING demo — `pnpm demo --pattern` must be
+                 # up first, and the first spec fails fast naming that command when the relay is
+                 # not there. Serves the guide itself (the config's own vite web server), asserts
+                 # the demo station's card live with its real two-rung ladder at its real prices,
+                 # and writes everything to packages/guide/e2e/output/ (gitignored) — never to
+                 # deploy/devnet/run/. Playwright is the GLOBAL on the box, never a dependency
 pnpm demo        # NOT a test and asserts nothing: the same topology with a person in it. Brings
                  # deploy/devnet/ up, walks quote/configure/restart, buys the slot, prints the OBS
                  # Server and Stream Key pair, and then leaves a viber buying /now and every segment
@@ -1127,16 +1151,23 @@ mise use -g npm:shadcn
 **Neither is a dependency of this repository and neither may become one.** `pnpm-workspace.yaml`
 refuses auto-installed peers on the grounds that a dependency nothing in the repo asked for is one
 nobody can account for, and the same argument holds here: these two drive and design a page, they
-are linked into no image, and no `pnpm` script calls either. `package.json` gains nothing for them.
+are linked into no image, and no `pnpm` script calls shadcn. `package.json` gains nothing for
+either as a dependency; the one script that touches Playwright (`test:guide`) invokes the
+**global** CLI through `packages/guide/e2e/run.sh`, which finds the global runner's own
+`node_modules` and hands it to the specs over `NODE_PATH` — and
+`packages/guide/e2e/playwright-test.d.ts` is the narrow type shim that keeps the specs typechecked
+without a manifest entry.
 
-### Playwright drives the demo page, which is the one surface no suite can see
+### Playwright drives the surfaces no suite can see: the guide, and the demo page
 
 `pnpm test` boots the real apps and speaks HTTP and real RTMP at them; `pnpm test:devnet` asserts
-the money on chain. **Neither of them ever looks at a picture.** `deploy/devnet/page.ts` — the page
-`pnpm demo` serves on `127.0.0.1:8088` — is the only thing in this repository whose whole job is to
-be *seen*: the rung buttons that make choosing a quality into choosing a price, the split between
-broadcaster and hub derived from the two nodes' own published prices, and the button that redeems a
-claim on chain. Playwright is how that page gets checked without asking a person to look at it.
+the money on chain. **Neither of them ever looks at a picture.** Two things in this repository
+exist to be *seen*: the guide — whose only true test boundary is a browser, and whose opt-in
+harness is `pnpm test:guide` (see [the guide](#the-guide)) — and `deploy/devnet/page.ts`, the page
+`pnpm demo` serves on `127.0.0.1:8088`: the rung buttons that make choosing a quality into
+choosing a price, the split between broadcaster and hub derived from the two nodes' own published
+prices, and the button that redeems a claim on chain. Playwright is how both get checked without
+asking a person to look at them.
 
 Chromium is installed and Firefox and WebKit are not; a run that wants them installs them rather
 than assuming them.
@@ -1156,8 +1187,10 @@ bitten by:
   is fine; a *spec* dropped there is invisible too, which is not.
 
 **Playwright must never join `pnpm test`.** It needs a browser and a running demo, and `pnpm test`
-is the run that has to work on a laptop with no Docker daemon. Wired to a script at all, it is an
-opt-in one beside `test:devnet` and `test:image`, which are opt-in for exactly the same reason.
+is the run that has to work on a laptop with no Docker daemon. It is wired to exactly one script,
+`test:guide`, opt-in beside `test:devnet` and `test:image`, which are opt-in for exactly the same
+reason — and that script's specs live in `packages/guide/e2e/`, covered by prettier, eslint and
+the guide's own tsconfig, with everything a run writes confined to `packages/guide/e2e/output/`.
 
 ### shadcn is the house component source, and its target is the guide
 
