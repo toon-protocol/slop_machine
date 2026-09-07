@@ -121,7 +121,10 @@ export interface ContractRung {
   price: string;
   toStation: string;
   toHub: string;
-  /** Where this rung's synthesized playlist is served, on loopback. */
+  /**
+   * Where this rung's synthesized playlist is served — named from the asking
+   * request's own Host, so the location works for whoever fetched the state.
+   */
   playlist: string;
   edge: number | null;
   bought: number;
@@ -246,7 +249,25 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
   let baseUrl = '';
   const playlistUrl = (rung: string): string => `${baseUrl}/hls/${rung}.m3u8`;
 
-  const contractState = (): ContractState => {
+  /**
+   * The base the ASKING client can actually fetch from. The state's playlist
+   * locations must work for whoever reads them — the local page, a LAN
+   * forward, an https tunnel — so they are named from the request's own Host
+   * (and forwarded proto, when a fronting proxy states one), never from the
+   * loopback bind. The URIs inside a playlist are relative and resolve
+   * against whichever base served it, so this one field is the whole of it.
+   */
+  const requestBase = (request: IncomingMessage): string => {
+    const stated = request.headers['x-forwarded-proto'];
+    const proto = (Array.isArray(stated) ? stated[0] : stated)
+      ?.split(',')[0]
+      ?.trim();
+    const host = request.headers.host;
+    if (host === undefined || host.length === 0) return baseUrl;
+    return `${proto !== undefined && proto.length > 0 ? proto : 'http'}://${host}`;
+  };
+
+  const contractState = (base: string): ContractState => {
     const driver = options.state();
     return {
       contract: CONTRACT_VERSION,
@@ -261,7 +282,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
         price: rung.price,
         toStation: rung.toStation,
         toHub: rung.toHub,
-        playlist: playlistUrl(rung.rung),
+        playlist: `${base}/hls/${rung.rung}.m3u8`,
         edge: rung.edge,
         bought: rung.bought,
         spent: rung.spent,
@@ -330,7 +351,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       if (request.method !== 'GET') {
         return answer(405, { error: 'method_not_allowed' });
       }
-      return answer(200, contractState());
+      return answer(200, contractState(requestBase(request)));
     }
 
     const write = /^\/contract\/v1\/(vibe|stop|rung)$/.exec(path);
@@ -374,11 +395,11 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
             return answer(404, { error: 'unknown_station' });
           }
           vibing = true;
-          return answer(200, contractState());
+          return answer(200, contractState(requestBase(request)));
         }
         case 'stop': {
           vibing = false;
-          return answer(200, contractState());
+          return answer(200, contractState(requestBase(request)));
         }
         case 'rung': {
           if (typeof body['rung'] !== 'string') {
@@ -390,7 +411,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
             return answer(404, { error: 'unknown_rung' });
           }
           selectedRung = body['rung'];
-          return answer(200, contractState());
+          return answer(200, contractState(requestBase(request)));
         }
         default:
           return answer(404, { error: 'unknown_contract_path' });
