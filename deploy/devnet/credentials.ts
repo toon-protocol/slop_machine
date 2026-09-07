@@ -58,14 +58,16 @@ const STATION_DIR = resolve(WORK_DIR, 'station');
 const HUB_ANON_DIR = resolve(WORK_DIR, 'hub-anon');
 
 /**
- * The hub daemon's `HiddenServiceDir` — the one path under `run/` that
- * SURVIVES a fresh run, because the `.anyone` address lives in it and an
+ * The hub daemon's two `HiddenServiceDir`s — the paths under `run/` that
+ * SURVIVE a fresh run, because a `.anyone` address lives in each and an
  * unpersisted one is a new address every start with every viewer's command
- * going stale silently. It is also the one path the driver cannot delete: the
- * anon image's entrypoint chowns it to its own unprivileged user, so it is
- * kept in place rather than kept by copying.
+ * (and every guide reader's bookmark) going stale silently. They are also
+ * paths the driver cannot delete: the anon image's entrypoint chowns them to
+ * its own unprivileged user, so they are kept in place rather than kept by
+ * copying. The first is the hub's paid edge; the second is the guide's page.
  */
 export const HS_DIR = resolve(HUB_ANON_DIR, 'hs');
+export const GUIDE_HS_DIR = resolve(HUB_ANON_DIR, 'guide-hs');
 
 /**
  * Every file a run generates FOR A CONTAINER TO MOUNT, as the compose file
@@ -227,7 +229,7 @@ function clearWorkDir(): void {
   }
   if (!existsSync(HUB_ANON_DIR)) return;
   for (const entry of readdirSync(HUB_ANON_DIR)) {
-    if (entry === 'hs') continue;
+    if (entry === 'hs' || entry === 'guide-hs') continue;
     rmSync(resolve(HUB_ANON_DIR, entry), { recursive: true, force: true });
   }
 }
@@ -247,10 +249,11 @@ export function generateCredentials(): DevnetCredentials {
     // 0755, so the two container users can traverse to the files inside.
     mkdirSync(directory, { recursive: true, mode: 0o755 });
   }
-  // The daemon's HiddenServiceDir, pre-created so a first `--anyone` run does
-  // not leave its creation to the docker daemon; the image's entrypoint takes
-  // ownership and tightens it to 0700 at container start.
+  // The daemon's two HiddenServiceDirs, pre-created so a first `--anyone` run
+  // does not leave their creation to the docker daemon; the image's entrypoint
+  // takes ownership and tightens each to 0700 at container start.
   mkdirSync(HS_DIR, { recursive: true, mode: 0o755 });
+  mkdirSync(GUIDE_HS_DIR, { recursive: true, mode: 0o755 });
 
   const hubSettlement = settlementKeyPair();
   const stationSettlement = settlementKeyPair();

@@ -80,7 +80,15 @@ import {
   restart,
   up,
 } from './compose.js';
-import { ANYONE_PROFILE, HS_HOSTNAME_PATTERN } from './anon.js';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import {
+  ANYONE_PROFILE,
+  GATEWAY_IPV4,
+  GUIDE_PORT,
+  HS_HOSTNAME_PATTERN,
+} from './anon.js';
+import { startGuideServer, type GuideServer } from './guide-server.js';
 import {
   generatePayerKey,
   openPayer,
@@ -212,6 +220,21 @@ const HS_BOOTSTRAP_TIMEOUT_MS = 5 * 60_000;
 /** How many remote viewers an `--anyone` run funds keys for. */
 const VIEWER_KEYS = 3;
 
+/**
+ * The guide's static build, as `vite build` leaves it. The DRIVER never runs
+ * that build — it spawns nothing but docker, and the build bakes this run's
+ * own guide address in as `VITE_RELAY_URL` — so this path either holds a
+ * build the user made or the demo prints the exact command that makes one.
+ */
+const GUIDE_DIST = resolve(
+  import.meta.dirname,
+  '..',
+  '..',
+  'packages',
+  'guide',
+  'dist'
+);
+
 // ── The announcements (ADR 0004) ─────────────────────────────────────────────
 
 /** What a viber's client would render for this broadcaster, anywhere Nostr is read. */
@@ -291,11 +314,28 @@ async function main(): Promise<void> {
   // gates on SOCKS answering; full bootstrap and the address are waited for
   // here, because a container that is Up is not a container with a circuit.
   let hubHiddenService: string | null = null;
+  let guideHiddenService: string | null = null;
+  let guide: GuideServer | null = null;
   if (options.anyone) {
     await up(['hub-anon'], { profiles: [ANYONE_PROFILE] });
     say('anon is up — bootstrapping onto the live Anyone network…');
-    hubHiddenService = await waitForHiddenService();
+    const addresses = await waitForHiddenService();
+    hubHiddenService = addresses.hub;
+    guideHiddenService = addresses.guide;
     say(`the hub's hidden-service address is http://${hubHiddenService}`);
+    say(`the guide's hidden-service address is http://${guideHiddenService}`);
+
+    // ── The guide, when it has been built ────────────────────────────────────
+    //
+    // The daemon forwards the guide service's port 80 to the driver's own
+    // static server on the compose network's GATEWAY address — the one
+    // address on that network that is the host — plus loopback for checking
+    // it here. The BUILD is the user's, never the driver's: the devnet spawns
+    // nothing but docker, and the build bakes VITE_RELAY_URL, which is this
+    // run's stable guide address — one build per address, not per run. A
+    // missing build is an honest absence with the exact command, never a
+    // broken page.
+    guide = await startGuideIfBuilt(guideHiddenService);
   }
 
   // In `--anyone` mode every payer — the broadcaster, this run's own viber,
@@ -503,6 +543,7 @@ async function main(): Promise<void> {
     }
     printViewerInstructions({
       hiddenService: hubHiddenService,
+      guideHiddenService,
       stationPrefix: bought.prefix,
       sealTo,
       keys: viewerKeys,
@@ -566,7 +607,15 @@ async function main(): Promise<void> {
     contract: {
       station: bought.prefix,
       budgetPerSecond: BUDGET_PER_SECOND,
-      allowedOrigins: GUIDE_ORIGINS,
+      // The paying side's own allowlist (ADR 0005), extended AT RUNTIME with
+      // the guide's hidden-service origin when there is one: a page served at
+      // its .anyone address is still this viber's own guide, and the grant
+      // covers both the contract writes and the CORS on the playlists and
+      // segments the state names.
+      allowedOrigins:
+        guideHiddenService === null
+          ? GUIDE_ORIGINS
+          : [...GUIDE_ORIGINS, `http://${guideHiddenService}`],
       vibing: true,
     },
     // The demo's one clip: real sound this run serves itself, free to read.
@@ -649,6 +698,7 @@ async function main(): Promise<void> {
   });
 
   const tearDown = async (): Promise<void> => {
+    await guide?.close();
     await player.close();
     await viber.client.close();
     await broadcaster.client.close();
@@ -864,30 +914,128 @@ function printObsInstructions(streamKey: string): void {
 }
 
 /**
- * Wait for the hub's daemon to have a circuit AND an address.
+ * Serve the guide at its hidden service, when a build exists — and say
+ * exactly how to make one when it does not.
+ *
+ * The build is the USER'S step, once per address: it bakes `VITE_RELAY_URL`,
+ * and the right value is this guide service's own port 7100, which the daemon
+ * forwards to the relay's free NIP-01 reads — so a browser anywhere reads the
+ * announcements over the same circuit it reads the page over.
+ * `VITE_PLAYBACK_URL` is deliberately NOT baked: its default,
+ * `http://127.0.0.1:8088`, is each reader's OWN paying side — this machine's
+ * demo player, or a remote viewer's `pnpm demo:viewer` — which is the seam
+ * working: the page travels, the budget stays home.
+ *
+ * A server that cannot bind (something else on the port — the guide's own
+ * vite harness holds 4173 while `pnpm test:guide` runs) is said out loud and
+ * the demo continues without the page rather than dying over it.
+ */
+async function startGuideIfBuilt(
+  guideAddress: string
+): Promise<GuideServer | null> {
+  const buildCommand = `VITE_RELAY_URL=ws://${guideAddress}:7100 pnpm --filter @toon-protocol/guide build`;
+
+  if (!existsSync(resolve(GUIDE_DIST, 'index.html'))) {
+    printGuideInstructions(guideAddress, buildCommand, 'unbuilt');
+    return null;
+  }
+
+  try {
+    const server = await startGuideServer({
+      distDir: GUIDE_DIST,
+      port: GUIDE_PORT,
+      hosts: [GATEWAY_IPV4, '127.0.0.1'],
+    });
+    say(
+      `the guide is served from ${GUIDE_DIST} on ${server.urls.join(' and ')}`
+    );
+    printGuideInstructions(guideAddress, buildCommand, 'serving');
+    return server;
+  } catch (cause) {
+    say(
+      `the guide's server could not start (${cause instanceof Error ? cause.message : String(cause)}) — usually something else on port ${String(GUIDE_PORT)}, like the guide's own vite harness. Continuing without the page.`
+    );
+    return null;
+  }
+}
+
+/**
+ * How a person actually looks at it — printed either way, because the build
+ * command is the fix for the unbuilt case and the viewing steps are the point
+ * of the built one.
+ */
+function printGuideInstructions(
+  guideAddress: string,
+  buildCommand: string,
+  state: 'serving' | 'unbuilt'
+): void {
+  console.log(
+    [
+      '',
+      '  ┌─ The guide, over the circuit ────────────────────────────────────',
+      ...(state === 'unbuilt'
+        ? [
+            '  │  packages/guide/dist does not exist, so nothing is served yet.',
+            '  │  Build it once for this address (the address is stable across',
+            '  │  runs), then re-run the demo:',
+            '  │',
+            `  │    ${buildCommand}`,
+          ]
+        : [
+            `  │  Browse:  http://${guideAddress}/`,
+            '  │',
+            '  │  Firefox → Settings → Network Settings → Manual proxy:',
+            '  │    SOCKS v5 Host 127.0.0.1  Port 9050   (this machine; a remote',
+            '  │    viewer uses their demo:viewer daemon on port 9250)',
+            '  │    and check "Proxy DNS when using SOCKS v5".',
+            '  │  Loopback is not proxied, which is exactly right: the page and',
+            '  │  the relay ride the circuit, while the contract calls to your',
+            '  │  OWN paying side at 127.0.0.1:8088 stay direct.',
+            '  │',
+            '  │  If the page was built for a different address, rebuild once:',
+            `  │    ${buildCommand}`,
+          ]),
+      '  └──────────────────────────────────────────────────────────────────',
+      '',
+    ].join('\n')
+  );
+}
+
+/** The two addresses one daemon generates: the hub's paid edge, and the guide's page. */
+interface HiddenServiceAddresses {
+  hub: string;
+  guide: string;
+}
+
+/**
+ * Wait for the hub's daemon to have a circuit AND both addresses.
  *
  * The healthcheck already gated on the SOCKS port answering; this waits for
  * `Bootstrapped 100%` in the daemon's own log — the first moment a descriptor
- * can be published — and for the hostname file, read out of the container
- * because the daemon owns that directory. The address is then validated by
- * shape, and an `.onion` answer is diagnosed as what it is: the OLDER daemon,
- * from before upstream renamed the TLD — a wrong build, not a wrong config.
+ * can be published — and for both hostname files, read out of the container
+ * because the daemon owns those directories. Each address is then validated
+ * by shape, and an `.onion` answer is diagnosed as what it is: the OLDER
+ * daemon, from before upstream renamed the TLD — a wrong build, not a wrong
+ * config.
  */
-async function waitForHiddenService(): Promise<string> {
+async function waitForHiddenService(): Promise<HiddenServiceAddresses> {
   const deadline = Date.now() + HS_BOOTSTRAP_TIMEOUT_MS;
-  let address = '';
+  const hostnames: Record<keyof HiddenServiceAddresses, string> = {
+    hub: '/var/lib/anon/hidden_service/hostname',
+    guide: '/var/lib/anon/guide_service/hostname',
+  };
+  const addresses: HiddenServiceAddresses = { hub: '', guide: '' };
   let said = 0;
 
   for (;;) {
-    try {
-      address = (
-        await execIn('hub-anon', [
-          'cat',
-          '/var/lib/anon/hidden_service/hostname',
-        ])
-      ).trim();
-    } catch {
-      // Not generated yet — key generation is seconds in, so this is early.
+    for (const service of ['hub', 'guide'] as const) {
+      try {
+        addresses[service] = (
+          await execIn('hub-anon', ['cat', hostnames[service]])
+        ).trim();
+      } catch {
+        // Not generated yet — key generation is seconds in, so this is early.
+      }
     }
 
     let bootstrapped = false;
@@ -903,11 +1051,12 @@ async function waitForHiddenService(): Promise<string> {
       // `grep -c` exits non-zero on zero matches: still building circuits.
     }
 
-    if (address.length > 0 && bootstrapped) break;
+    if (addresses.hub.length > 0 && addresses.guide.length > 0 && bootstrapped)
+      break;
 
     if (Date.now() > deadline) {
       throw new Error(
-        `the anon daemon did not bootstrap within ${String(HS_BOOTSTRAP_TIMEOUT_MS / 1000)}s — the Anyone network is a live third-party network, so this can be it or the way to it. \`docker compose logs hub-anon\` says which. (Hostname so far: ${JSON.stringify(address)})`
+        `the anon daemon did not bootstrap within ${String(HS_BOOTSTRAP_TIMEOUT_MS / 1000)}s — the Anyone network is a live third-party network, so this can be it or the way to it. \`docker compose logs hub-anon\` says which. (Hostnames so far: ${JSON.stringify(addresses)})`
       );
     }
     if (Date.now() - said > 15_000) {
@@ -917,12 +1066,14 @@ async function waitForHiddenService(): Promise<string> {
     await new Promise((waited) => setTimeout(waited, 5_000));
   }
 
-  if (!HS_HOSTNAME_PATTERN.test(address)) {
-    throw new Error(
-      `the daemon produced "${address}", which is not a 56-character .anyone address. An address ending .onion means the image is anon v0.4.9.7 — the release before upstream renamed the TLD — and the payer refuses that spelling; deploy/devnet/anon/Dockerfile is the build that fixes it.`
-    );
+  for (const service of ['hub', 'guide'] as const) {
+    if (!HS_HOSTNAME_PATTERN.test(addresses[service])) {
+      throw new Error(
+        `the daemon produced "${addresses[service]}" for the ${service} service, which is not a 56-character .anyone address. An address ending .onion means the image is anon v0.4.9.7 — the release before upstream renamed the TLD — and the payer refuses that spelling; deploy/devnet/anon/Dockerfile is the build that fixes it.`
+      );
+    }
   }
-  return address;
+  return addresses;
 }
 
 /**
@@ -933,6 +1084,8 @@ async function waitForHiddenService(): Promise<string> {
  */
 function printViewerInstructions(options: {
   hiddenService: string;
+  /** The guide's own address, so the viewer's paying side can allowlist the page. */
+  guideHiddenService: string | null;
   stationPrefix: string;
   sealTo: string;
   keys: PayerKey[];
@@ -953,6 +1106,9 @@ function printViewerInstructions(options: {
       `  │      --station ${options.stationPrefix} \\`,
       `  │      --seal-to ${options.sealTo} \\`,
       `  │      ${pricePairs} \\`,
+      ...(options.guideHiddenService === null
+        ? []
+        : [`  │      --guide-origin http://${options.guideHiddenService} \\`]),
       '  │      --key <one of the keys below>',
       '  │',
       "  │  One funded key per viewer (gas and token, on this run's chain):",

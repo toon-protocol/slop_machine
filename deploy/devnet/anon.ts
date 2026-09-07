@@ -38,6 +38,34 @@ export const CHAIN_IPV4 = '10.213.0.20';
 /** The daemon itself. Pinned only so the topology is the same every run. */
 export const HUB_ANON_IPV4 = '10.213.0.30';
 
+/**
+ * The relay's free NIP-01 reads — what the guide service's port 7100 forwards
+ * to, so a browser anywhere can subscribe to the announcements. Free reads
+ * over the circuit are the design working, not a leak: reads are free by
+ * design, and being reachable is what costs.
+ */
+export const HUB_RELAY_IPV4 = '10.213.0.40';
+
+/**
+ * The compose network's GATEWAY — the HOST's own address on the bridge, which
+ * docker derives deterministically as the subnet's first host address when
+ * only a subnet is pinned (verified against a live network: `Gateway:
+ * "10.213.0.1"`). It is what the guide service's port 80 forwards to, because
+ * the guide's static server runs in the DRIVER, on the host — a container
+ * dialing `127.0.0.1` reaches itself, and this is the one address on the
+ * network that is the host instead.
+ */
+export const GATEWAY_IPV4 = '10.213.0.1';
+
+/**
+ * Where the driver's guide server listens, on the gateway address and on
+ * loopback. 4173 is the origin the paying sides already allowlist for the
+ * guide's own harness (`pnpm test:guide` serves vite there), so one number
+ * means one origin story — and it also means the two cannot run at once,
+ * which the README says out loud.
+ */
+export const GUIDE_PORT = 4173;
+
 /** The compose profile that keeps `hub-anon` out of every non-anyone `up`. */
 export const ANYONE_PROFILE = 'anyone';
 
@@ -118,6 +146,21 @@ HiddenServiceDir /var/lib/anon/hidden_service
 # pays over, so its settlement address is never broadcast from its own IP.
 HiddenServicePort 80 ${HUB_CONNECTOR_IPV4}:3000
 HiddenServicePort 8545 ${CHAIN_IPV4}:8545
+
+# ── The GUIDE's own address — a SECOND service on this same daemon ──────────
+# A HiddenServicePort binds to the HiddenServiceDir above it, so this block's
+# order is load-bearing: the guide's ports must follow the guide's dir.
+#
+# The dir is the bind mount of ./run/hub-anon/guide-hs, preserved across runs
+# exactly like the hub's, so the page's address is as stable as the hub's.
+# Port 80 forwards to the driver's own static server on the HOST — reached at
+# the network's gateway address, the one address here that is the host rather
+# than a container — and port 7100 to the relay's FREE NIP-01 reads, so the
+# page's websocket works from anywhere. Free reads over the circuit are the
+# design working: reads are free by design, and being reachable is what costs.
+HiddenServiceDir /var/lib/anon/guide_service
+HiddenServicePort 80 ${GATEWAY_IPV4}:${String(GUIDE_PORT)}
+HiddenServicePort 7100 ${HUB_RELAY_IPV4}:7100
 
 Log notice stdout
 Log notice file /var/lib/anon/notice.log

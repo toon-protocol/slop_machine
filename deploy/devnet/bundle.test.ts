@@ -50,8 +50,10 @@ import { parse as parseYaml } from 'yaml';
 import {
   CHAIN_IPV4,
   DEVNET_SUBNET,
+  GATEWAY_IPV4,
   HUB_ANON_IPV4,
   HUB_CONNECTOR_IPV4,
+  HUB_RELAY_IPV4,
   hubAnonrc,
 } from './anon.js';
 import { DRIVER_HELD_FILES, GENERATED_FILES } from './credentials.js';
@@ -437,11 +439,35 @@ const EXPECTED_FIXED_IPS: Record<string, string> = {
   'hub-connector': '10.213.0.10',
   chain: '10.213.0.20',
   'hub-anon': '10.213.0.30',
+  // The relay's free NIP-01 reads — the guide service forwards its port 7100
+  // here, so a browser anywhere can subscribe to the announcements.
+  'hub-relay': '10.213.0.40',
 };
+
+/**
+ * The compose network's GATEWAY — the HOST's address on the bridge, derived
+ * by docker as the pinned subnet's first host address. It is where the guide
+ * service's port 80 forwards, because the guide's static server runs in the
+ * DRIVER on the host: the one target in the anonrc that is not a container.
+ */
+const EXPECTED_GATEWAY = '10.213.0.1';
+
 /** What the generated anonrc must target: the hub's edge, and the chain. */
 const EXPECTED_HS_FORWARDS = [
   'HiddenServicePort 80 10.213.0.10:3000',
   'HiddenServicePort 8545 10.213.0.20:8545',
+];
+
+/**
+ * And the GUIDE service's own two forwards: the driver's static server on the
+ * gateway, and the relay's free reads. A `HiddenServicePort` binds to the
+ * `HiddenServiceDir` above it, so the ordering test below is not pedantry —
+ * a forward written before its dir belongs to the WRONG address.
+ */
+const GUIDE_HS_DIR_LINE = 'HiddenServiceDir /var/lib/anon/guide_service';
+const EXPECTED_GUIDE_HS_FORWARDS = [
+  'HiddenServicePort 80 10.213.0.1:4173',
+  'HiddenServicePort 7100 10.213.0.40:7100',
 ];
 
 /**
@@ -453,6 +479,10 @@ const EXPECTED_HS_FORWARDS = [
  * `credentials.ts` keeps it across runs for the same reason.
  */
 const THE_ADDRESS_MOUNT = './run/hub-anon/hs:/var/lib/anon/hidden_service';
+/** The guide's address, on exactly the same terms — the daemon's second service. */
+const THE_GUIDE_ADDRESS_MOUNT =
+  './run/hub-anon/guide-hs:/var/lib/anon/guide_service';
+const THE_ADDRESS_MOUNTS = [THE_ADDRESS_MOUNT, THE_GUIDE_ADDRESS_MOUNT];
 
 // ── The payer ────────────────────────────────────────────────────────────────
 
@@ -1182,6 +1212,15 @@ describe('devnet bundle', () => {
     expect(HUB_CONNECTOR_IPV4).toBe(EXPECTED_FIXED_IPS['hub-connector']);
     expect(CHAIN_IPV4).toBe(EXPECTED_FIXED_IPS['chain']);
     expect(HUB_ANON_IPV4).toBe(EXPECTED_FIXED_IPS['hub-anon']);
+    expect(HUB_RELAY_IPV4).toBe(EXPECTED_FIXED_IPS['hub-relay']);
+
+    // The gateway is not a service to pin: docker derives it from the pinned
+    // subnet as its first host address, so pinning the subnet IS pinning the
+    // gateway — the guard holds anon.ts to the literal that derivation gives.
+    expect(
+      GATEWAY_IPV4,
+      `anon.ts names the gateway ${GATEWAY_IPV4}; the pinned subnet ${EXPECTED_SUBNET} puts the host at ${EXPECTED_GATEWAY}`
+    ).toBe(EXPECTED_GATEWAY);
 
     // And the generated anonrc actually targets them — the generator and the
     // compose file held to each other the way the mounts-vs-manifest check
@@ -1203,6 +1242,38 @@ describe('devnet bundle', () => {
     expect(anonrc).toContain(
       `HiddenServiceDir ${THE_ADDRESS_MOUNT.split(':')[1] ?? ''}`
     );
+
+    // The GUIDE service: its dir is the second mount's container side, its
+    // two forwards are present, and — because a HiddenServicePort binds to
+    // the HiddenServiceDir ABOVE it — every guide forward sits after the
+    // guide dir line, and the guide dir sits after the hub's own forwards.
+    // Out of order, the ports belong to the wrong address and nothing says so
+    // until a browser dials the guide and reaches the hub.
+    expect(GUIDE_HS_DIR_LINE).toBe(
+      `HiddenServiceDir ${THE_GUIDE_ADDRESS_MOUNT.split(':')[1] ?? ''}`
+    );
+    const guideDirAt = anonrc.indexOf(GUIDE_HS_DIR_LINE);
+    expect(
+      guideDirAt,
+      `the generated anonrc does not declare "${GUIDE_HS_DIR_LINE}" — the guide has no address`
+    ).toBeGreaterThan(-1);
+    for (const forward of EXPECTED_HS_FORWARDS) {
+      expect(
+        anonrc.indexOf(forward),
+        `"${forward}" must come BEFORE the guide's HiddenServiceDir, or it binds to the guide's address`
+      ).toBeLessThan(guideDirAt);
+    }
+    for (const forward of EXPECTED_GUIDE_HS_FORWARDS) {
+      const at = anonrc.indexOf(forward);
+      expect(
+        at,
+        `the generated anonrc does not carry "${forward}" — the guide service would forward to nothing`
+      ).toBeGreaterThan(-1);
+      expect(
+        at,
+        `"${forward}" must come AFTER the guide's HiddenServiceDir, or it binds to the hub's address`
+      ).toBeGreaterThan(guideDirAt);
+    }
   });
 
   it('builds the anon daemon at its verified release, sha-checked before it runs', () => {
@@ -1275,7 +1346,7 @@ describe('devnet bundle', () => {
         // The one writable bind, by literal: the daemon's own HiddenServiceDir,
         // which holds what the daemon writes rather than what the driver
         // generated. Everything else stays read-only.
-        if (mount === THE_ADDRESS_MOUNT) continue;
+        if (THE_ADDRESS_MOUNTS.includes(mount)) continue;
         // A credential a container can rewrite is a credential a compromised
         // container can rotate out from under whoever generated it.
         expect(
@@ -1427,7 +1498,7 @@ describe('devnet bundle', () => {
       // is a DIRECTORY the container writes rather than a file the driver
       // generates — docker creating it when absent is the wanted behavior, so
       // it belongs in neither direction of this check.
-      .filter((mount) => mount !== THE_ADDRESS_MOUNT)
+      .filter((mount) => !THE_ADDRESS_MOUNTS.includes(mount))
       .map((mount) => mount.slice(WORK_DIR_MOUNT_PREFIX.length).split(':')[0]);
 
     for (const mount of mounted) {

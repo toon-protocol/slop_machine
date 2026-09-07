@@ -234,6 +234,12 @@ services:
   # publishes this same port for this same reason.
   hub-relay:
     image: ghcr.io/toon-protocol/relay:release
+    networks:
+      default:
+        # FIXED, because hub-anon's guide service forwards its port 7100 to
+        # this address — resolved when anon PARSES its config, like the other
+        # three pins, and held to `anon.ts` by the bundle guard.
+        ipv4_address: 10.213.0.40
     environment:
       TOON_BLS_PORT: '3100' # paid writes — PRIVATE, only hub-connector dials it
       TOON_RELAY_PORT: '7100' # free reads — published below, for the driver
@@ -362,9 +368,13 @@ services:
     init: true
     volumes:
       - ./run/hub-anon/anonrc:/etc/anon/anonrc:ro
-      # The HiddenServiceDir — the .anyone address and the key behind it.
-      # WRITABLE, uniquely: the daemon generates and maintains what is in it.
+      # The two HiddenServiceDirs — each holds a .anyone address and the key
+      # behind it. WRITABLE, uniquely: the daemon generates and maintains what
+      # is in them. The first is the hub's paid edge; the second is the
+      # GUIDE's page, a second service on this same daemon, its address just
+      # as stable across runs.
       - ./run/hub-anon/hs:/var/lib/anon/hidden_service
+      - ./run/hub-anon/guide-hs:/var/lib/anon/guide_service
     networks:
       default:
         ipv4_address: 10.213.0.30

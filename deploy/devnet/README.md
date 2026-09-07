@@ -243,6 +243,44 @@ Running the viewer **on the same machine as the host** — the full-circuit rehe
 the viewer's daemon takes its own SOCKS port so it never fights the host's 9050, but the page
 defaults to the same 8088 the host's page holds, so add `--port 8090`.
 
+### The guide, over the circuit
+
+The same daemon hosts a **second** hidden service: the guide — the discovery grid, categories and
+broadcaster pages of [`packages/guide`](../../packages/guide/) — at its own stable `.anyone`
+address (persisted in `run/hub-anon/guide-hs/`, exactly like the hub's). The service's port 80
+forwards to a small static server the **driver** runs on the host (the compose network's gateway
+address, `10.213.0.1:4173`), and its port 7100 forwards to the relay's **free NIP-01 reads**, so
+the page's websocket works from anywhere — free reads over the circuit are the design working:
+reads are free by design, and being reachable is what costs.
+
+**The build is yours, once per address.** The driver spawns nothing but docker, and the build
+bakes the relay URL — which is this run's own guide address — so the demo prints the one-liner
+when `packages/guide/dist` is missing (or whenever the address changed):
+
+```
+VITE_RELAY_URL=ws://<guide-address>.anyone:7100 pnpm --filter @toon-protocol/guide build
+```
+
+then re-run the demo. `VITE_PLAYBACK_URL` is deliberately **not** baked: its default,
+`http://127.0.0.1:8088`, is each reader's *own* paying side — the host's demo player, or a remote
+viewer's `pnpm demo:viewer` on its default port — which is ADR 0005's seam working: the page
+travels, the budget stays home. (A viewer whose player was moved with `--port` — the same-machine
+rehearsal above uses 8090 — will see the hosted-mode explanation instead of the theater, because
+the page probes 8088.)
+
+**Viewing it**: Firefox → Settings → Network Settings → Manual proxy configuration → SOCKS v5
+Host `127.0.0.1`, Port `9050` (the host's own daemon; a remote viewer uses their `demo:viewer`
+daemon on `9250`), and check **Proxy DNS when using SOCKS v5**. Firefox does not proxy loopback,
+which is exactly right: the page and the relay ride the circuit while the guide's contract calls
+to your own `127.0.0.1:8088` stay direct. The demo adds the guide's origin to its player's
+allowlist at runtime, and a remote viewer passes the printed `--guide-origin` flag so their own
+paying side does the same — the allowlist is the paying side's own configuration, and no request
+across the line can extend it.
+
+Port 4173 is also the guide harness's own vite origin, so `pnpm test:guide` and an `--anyone`
+demo's guide server cannot run at the same time; the demo says so and continues without the page
+rather than dying over it.
+
 [`bundle.test.ts`](bundle.test.ts) is this bundle's guard, the sibling of
 [`../bundle.test.ts`](../bundle.test.ts) and [`../hub/bundle.test.ts`](../hub/bundle.test.ts). It
 reads the real committed files, keeps every expected value as a literal declared in the test, needs

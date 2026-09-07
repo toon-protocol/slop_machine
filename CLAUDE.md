@@ -877,7 +877,15 @@ the release that routes `.anyone`) fronts the hub's client edge and the chain's 
 `.anyone` address, every payer — the broadcaster, the demo's own viber, and remote viewers — pays
 over the circuit, and the run prints three funded keys plus the exact `pnpm demo:viewer` command a
 remote viewer runs from any machine with Docker and this repo. The address persists in
-`run/hub-anon/hs/` across runs; the station stays internal, its only client being the hub. Since #78 **the demo's clip event points at
+`run/hub-anon/hs/` across runs; the station stays internal, its only client being the hub. The
+same daemon hosts a **second** hidden service for the guide (`run/hub-anon/guide-hs/`, equally
+stable): port 80 forwards to a static server the driver runs on the host at the compose network's
+gateway (`10.213.0.1:4173`, serving `packages/guide/dist` with SPA fallback), port 7100 to the
+relay's free NIP-01 reads — the **build is the user's, never the driver's** (it bakes
+`VITE_RELAY_URL=ws://<guide-addr>.anyone:7100`; the demo prints the one-liner when `dist/` is
+missing, since the driver spawns nothing but docker), `VITE_PLAYBACK_URL` stays unbaked because
+its `127.0.0.1:8088` default is each reader's own paying side, and both paying sides allowlist the
+guide's origin (the demo at runtime, a viewer via the printed `--guide-origin`). Since #78 **the demo's clip event points at
 media the run itself serves**: `deploy/devnet/clip-media.ts` synthesizes a few seconds of sound in
 pure TypeScript (a clip may be sound alone — the glossary says so), the player serves it on
 loopback at `/clips/first-light.wav`, and the clip event names that URL — so the guide's

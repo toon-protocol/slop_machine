@@ -128,6 +128,13 @@ interface Arguments {
   toStation: Map<string, bigint>;
   socks: string | null;
   port: number;
+  /**
+   * `--guide-origin`, when given: the guide's own hidden-service origin,
+   * added to THIS paying side's allowlist (ADR 0005 — the allowlist is the
+   * paying side's own configuration, so it is a flag here and never a request
+   * across the line). The demo host prints it in the Remote-viewers block.
+   */
+  guideOrigin: string | null;
 }
 
 async function main(): Promise<void> {
@@ -330,6 +337,14 @@ async function main(): Promise<void> {
         contract: {
           station: options.station,
           budgetPerSecond: BUDGET_PER_SECOND,
+          // The guide's hidden-service origin, when the host handed one out:
+          // this viewer's own allowlist grants that page the contract writes
+          // and the CORS on its playlists and segments — so the SAME guide
+          // everyone reads over the circuit vibes against THIS viewer's own
+          // paying side at its default http://127.0.0.1:8088.
+          ...(options.guideOrigin === null
+            ? {}
+            : { allowedOrigins: [options.guideOrigin] }),
           vibing: true,
         },
         state,
@@ -440,6 +455,7 @@ function readArguments(argv: string[]): Arguments {
   let key: string | null = null;
   let socks: string | null = null;
   let port = DEFAULT_PORT;
+  let guideOrigin: string | null = null;
   const toStation = new Map<string, bigint>();
 
   const value = (at: number, flag: string): string => {
@@ -473,6 +489,10 @@ function readArguments(argv: string[]): Arguments {
         socks = value(at, argument);
         at += 1;
         break;
+      case '--guide-origin':
+        guideOrigin = value(at, argument);
+        at += 1;
+        break;
       case '--port': {
         const wanted = Number(value(at, argument));
         if (!Number.isInteger(wanted) || wanted < 1 || wanted > 65_535) {
@@ -496,7 +516,7 @@ function readArguments(argv: string[]): Arguments {
       }
       default:
         throw new Error(
-          `the viewer takes --connector, --station, --seal-to, --key, --price, --socks and --port, and does not know "${String(argument)}"`
+          `the viewer takes --connector, --station, --seal-to, --key, --price, --socks, --guide-origin and --port, and does not know "${String(argument)}"`
         );
     }
   }
@@ -535,6 +555,7 @@ function readArguments(argv: string[]): Arguments {
     toStation,
     socks,
     port,
+    guideOrigin,
   };
 }
 
