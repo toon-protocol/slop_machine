@@ -203,7 +203,7 @@ const IGNORES_TS_BY_EXTENSION = /(^|\/)\*\.ts$/;
  * is `deny_unknown_fields` and its startup is fail-closed, so a schema drift
  * under a moving tag would be an outage rather than a degraded run.
  */
-const EXPECTED_CONNECTOR_TAG = 'rust-2026.08.28.1';
+const EXPECTED_CONNECTOR_TAG = 'rust-sha-97f45a0';
 const EXPECTED_CONNECTOR_IMAGE = `ghcr.io/toon-protocol/connector:${EXPECTED_CONNECTOR_TAG}`;
 
 /** Anything that reads as a connector build handle, in config or in prose. */

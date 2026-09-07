@@ -297,7 +297,7 @@ const PLAINTEXT_VAR = 'TOON_ALLOW_PLAINTEXT_STATION_URLS';
  * this build.
  */
 const EXPECTED_CONNECTOR_IMAGE =
-  'ghcr.io/toon-protocol/connector:rust-2026.08.28.1';
+  'ghcr.io/toon-protocol/connector:rust-sha-97f45a0';
 const IMMUTABLE_CONNECTOR_TAG =
   /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/;
 const MOUNTED_CONNECTOR_CONFIG =
