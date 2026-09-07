@@ -165,6 +165,18 @@ export interface ContractOptions {
   vibing?: boolean;
 }
 
+/**
+ * A clip the run itself serves, so the clip event can name a URL something
+ * genuinely answers. Held whole in memory — a clip here is a few seconds of
+ * sound, not a broadcast — and served free, because reading a clip costs
+ * nobody anything.
+ */
+export interface ClipMedia {
+  fileName: string;
+  contentType: string;
+  body: Uint8Array;
+}
+
 export interface PlayerOptions {
   /** `0` binds an ephemeral port, which is how a suite runs players side by side. */
   port: number;
@@ -173,6 +185,8 @@ export interface PlayerOptions {
   /** Where the window lives. The demo's run directory unless a suite moves it. */
   directory?: string;
   contract: ContractOptions;
+  /** The demo's clip, served at `/clips/<fileName>` when given. */
+  clip?: ClipMedia;
   /** What the page asks for once a second. */
   state: () => DemoState;
   /** What the page's one button does: redeem the station's latest claim, on chain. */
@@ -182,6 +196,8 @@ export interface PlayerOptions {
 export interface Player {
   /** Where a human points a browser. */
   url: string;
+  /** Where the clip is served, for the clip event to name. Null without one. */
+  clipUrl: string | null;
   /** What ffplay or VLC is given instead, when a browser is not wanted. */
   playlistUrl: (rung: string) => string;
   /** What the paying side reads to know whether to buy at all. */
@@ -417,6 +433,14 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
         );
     }
 
+    if (
+      options.clip !== undefined &&
+      path === `/clips/${options.clip.fileName}`
+    ) {
+      // The free fetch a clip is: media the run holds, to anyone who asks.
+      return send(response, 200, options.clip.contentType, options.clip.body);
+    }
+
     const playlist = /^\/hls\/([a-z0-9]+)\.m3u8$/.exec(path);
     if (playlist) {
       return sendFile(
@@ -457,6 +481,10 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
 
   return {
     url: `${baseUrl}/`,
+    clipUrl:
+      options.clip === undefined
+        ? null
+        : `${baseUrl}/clips/${options.clip.fileName}`,
     playlistUrl,
     vibing: () => vibing,
     selectedRung: () => selectedRung,

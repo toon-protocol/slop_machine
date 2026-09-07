@@ -604,7 +604,8 @@ build, no server of its own — the discovery surface of epic
 [#72](https://github.com/toon-protocol/slop_machine/issues/72), which a hub can host as plain
 static files. What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75),
 [#76](https://github.com/toon-protocol/slop_machine/issues/76),
-[#77](https://github.com/toon-protocol/slop_machine/issues/77))
+[#77](https://github.com/toon-protocol/slop_machine/issues/77),
+[#78](https://github.com/toon-protocol/slop_machine/issues/78))
 is the dark shell with the four routes — `/` (the discovery grid),
 `/categories`, `/categories/:category` and `/b/:handle` (the broadcaster page; no bare vanity
 URLs, because display names are not unique and the handle is the only identity anybody grants) —
@@ -632,6 +633,20 @@ that reads, and it verifies no `sig`, because a signing curve is on the payment-
 an announcement is a claim either way. The one place the guide spells the wire's own name for the
 address tag is a single pinned constant, exempted **by exact line** in the payment-free guard —
 which asserts the exemption exists, still bites, and shields nothing else.
+
+Since #78 the **broadcaster page is real**: `/b/:handle` finds its station in the same deduped set
+the grid renders — the handle IS the address's last segment, exactly what the cards link with —
+and shows the kind 0 profile (display name, avatar, about), the full rung ladder at the station's
+own per-segment prices, the live badge on the heartbeat's terms, and **the clip list from the
+broadcaster's kind 1063 events**, newest first (posted-at is the event's own `created_at`), each
+playable in-page with a plain `<video>` element from a free fetch of the event's `url` tag — an
+Arweave gateway in production, and in the demo a URL the run itself serves (see the devnet below).
+Clips are the page's own NIP-01 subscription (kind 1063, author-filtered to the station's pubkey),
+accumulated per event id in `src/relay/clips.ts` — never through the replaceable log, because
+every clip event is its own clip. The **viber-count slot renders empty**: a visibly reserved spot
+with no value, because no source produces the number yet and a fake figure would be worse than
+none. A handle nobody announced still renders an honest page, and a station with no profile or no
+clips degrades to the handle, the ladder and "No clips yet."
 
 **`packages/guide/src/guide/payment-free.test.ts` is that guard**, in the style of the slot app's
 vocabulary test: it reads the package's own source and manifest and fails on a payer dependency
@@ -828,7 +843,12 @@ as it is left running. A page on loopback shows the picture arriving, what each 
 splits between the broadcaster and the hub **derived from the two nodes' own published prices**, and
 a button that redeems the station's newest claim on chain while the channel stays open. Ctrl-C
 prints what was paid and tears everything down. `--pattern` swaps OBS for the run's own ffmpeg test
-pattern, so it still runs with nobody at the keyboard.
+pattern, so it still runs with nobody at the keyboard. Since #78 **the demo's clip event points at
+media the run itself serves**: `deploy/devnet/clip-media.ts` synthesizes a few seconds of sound in
+pure TypeScript (a clip may be sound alone — the glossary says so), the player serves it on
+loopback at `/clips/first-light.wav`, and the clip event names that URL — so the guide's
+broadcaster page plays it from a genuinely free fetch instead of an Arweave URL nothing stands
+behind. On a real station that URL is an Arweave gateway's; the event's shape is identical.
 
 **No playlist is served from a station, so the demo synthesizes one.** Every `.ts` file
 [`deploy/devnet/player.ts`](deploy/devnet/player.ts) writes into its rolling window arrived as the
@@ -952,12 +972,15 @@ pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/
                  # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
                  # still and runs in `pnpm test` with no daemon at all
 pnpm test:guide  # Playwright, opt-in and NOT part of `pnpm test`: drives the guide's discovery
-                 # grid and category browsing in real Chromium against the RUNNING demo — `pnpm demo --pattern` must be
-                 # up first, and the first spec fails fast naming that command when the relay is
-                 # not there. Serves the guide itself (the config's own vite web server), asserts
-                 # the demo station's card live with its real two-rung ladder at its real prices,
-                 # and writes everything to packages/guide/e2e/output/ (gitignored) — never to
-                 # deploy/devnet/run/. Playwright is the GLOBAL on the box, never a dependency
+                 # grid, category browsing AND the broadcaster page in real Chromium against the
+                 # RUNNING demo — `pnpm demo --pattern` must be up first, and the specs fail fast
+                 # naming that command when the relay is not there. Serves the guide itself (the
+                 # config's own vite web server), asserts the demo station's card live with its
+                 # real two-rung ladder at its real prices, browses by category, clicks through to
+                 # the broadcaster page, and PLAYS the demo's clip for real — the media element's
+                 # currentTime advancing past zero on the free fetch. Writes everything to
+                 # packages/guide/e2e/output/ (gitignored) — never to deploy/devnet/run/.
+                 # Playwright is the GLOBAL on the box, never a dependency
 pnpm demo        # NOT a test and asserts nothing: the same topology with a person in it. Brings
                  # deploy/devnet/ up, walks quote/configure/restart, buys the slot, prints the OBS
                  # Server and Stream Key pair, and then leaves a viber buying /now and every segment

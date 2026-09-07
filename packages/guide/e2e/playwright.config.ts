@@ -32,6 +32,12 @@ export default defineConfig({
   timeout: 120_000,
   use: {
     baseURL: GUIDE_URL,
+    launchOptions: {
+      // The broadcaster-page spec plays a clip with sound; a headless run has
+      // no gesture history for Chromium's autoplay policy to credit, and a
+      // spec must not depend on one.
+      args: ['--autoplay-policy=no-user-gesture-required'],
+    },
   },
   webServer: {
     command:
