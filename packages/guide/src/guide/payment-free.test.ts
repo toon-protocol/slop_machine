@@ -24,9 +24,12 @@
  *      comment or copy. The banned copy words ride along: a viber vibes,
  *      never watches or listens, and a clip is never a VOD.
  *
- * This file is the one exemption from rules two and three, because it has to
- * spell what it forbids in order to forbid it — and each pattern is asserted
- * to bite on a sample, so an exemption can never quietly become a hole.
+ * This file is the one file-level exemption from rules two and three,
+ * because it has to spell what it forbids in order to forbid it — and each
+ * pattern is asserted to bite on a sample, so an exemption can never quietly
+ * become a hole. One further exemption exists and it is a single LINE,
+ * pinned exactly below: ADR 0004 names the station-address tag for the wire,
+ * and the constant that reads it cannot be written without spelling it.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -132,11 +135,28 @@ const FORBIDDEN_IN_SOURCE: { pattern: RegExp; why: string }[] = [
   },
 ];
 
-/** Every source file the package holds: `src/**` plus the page shell. */
+/**
+ * Lines exempt from the source rules — the WHOLE line, verbatim, one file
+ * each, pinned by its own test below so a widened exemption is a change made
+ * on purpose. A dangling exemption (the line gone from the file) and a
+ * toothless one (a line no rule would catch anyway) both fail.
+ */
+const EXEMPT_LINES: { file: string; line: string; why: string }[] = [
+  {
+    file: 'src/relay/announcements.ts',
+    line: "export const STATION_ADDRESS_TAG = 'ilp';",
+    why: 'ADR 0004 names the station-address tag for the wire, and the one constant that reads it cannot be spelled otherwise — it names an address, and the guide still knows nothing of what carries a payment to one',
+  },
+];
+
+/** Every source file the package holds: `src/**`, `e2e/**`, the page shell. */
 function sources(dir: string = SRC): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) return sources(path);
+    // `e2e/output/` is what a Playwright run writes — artifacts, not source.
+    if (entry.isDirectory()) {
+      return entry.name === 'output' ? [] : sources(path);
+    }
     return entry.isFile() && /\.(tsx?|css)$/.test(entry.name) ? [path] : [];
   });
 }
@@ -153,9 +173,11 @@ function offending(text: string, pattern: RegExp): string[] {
     .map((line) => line.trim());
 }
 
-const files = [...sources().map(read), read(join(ROOT, 'index.html'))].filter(
-  (file) => file.name !== 'src/guide/payment-free.test.ts'
-);
+const files = [
+  ...sources().map(read),
+  ...sources(join(ROOT, 'e2e')).map(read),
+  read(join(ROOT, 'index.html')),
+].filter((file) => file.name !== 'src/guide/payment-free.test.ts');
 
 const manifest = JSON.parse(
   readFileSync(join(ROOT, 'package.json'), 'utf8')
@@ -192,6 +214,9 @@ describe('the guide is payment-free, by test and not only by review', () => {
       'src/routes/broadcaster-page.tsx'
     );
     expect(files.map((file) => file.name)).toContain('index.html');
+    // The scan reaches the Playwright specs too — they are guide source, and
+    // a spec that named a payer would be as much a hole as a route that did.
+    expect(files.map((file) => file.name)).toContain('e2e/discovery.spec.ts');
     // And it really is reading the manifest it claims to.
     expect(manifest.name).toBe('@toon-protocol/guide');
     expect(dependencyNames).toContain('react');
@@ -234,13 +259,48 @@ describe('the guide is payment-free, by test and not only by review', () => {
 
   it('names no payment surface, no key material and no banned word in any source', () => {
     for (const file of files) {
+      const exempt = EXEMPT_LINES.filter(
+        (exemption) => exemption.file === file.name
+      ).map((exemption) => exemption.line);
       for (const rule of FORBIDDEN_IN_SOURCE) {
         expect({
           file: file.name,
           why: rule.why,
-          lines: offending(file.whole, rule.pattern),
+          lines: offending(file.whole, rule.pattern).filter(
+            (line) => !exempt.includes(line)
+          ),
         }).toEqual({ file: file.name, why: rule.why, lines: [] });
       }
+    }
+  });
+
+  it('pins the exempt lines, and each one both exists and would otherwise be caught', () => {
+    // Pinned exactly, like the denylist: widening this list is a change made
+    // on purpose, with a reason beside it.
+    expect(
+      EXEMPT_LINES.map((exemption) => `${exemption.file}:${exemption.line}`)
+    ).toEqual([
+      "src/relay/announcements.ts:export const STATION_ADDRESS_TAG = 'ilp';",
+    ]);
+
+    for (const exemption of EXEMPT_LINES) {
+      const file = files.find((candidate) => candidate.name === exemption.file);
+      // A dangling exemption — the file or the line gone — is a hole waiting
+      // for a different line to fill it.
+      expect(
+        file,
+        `${exemption.file} is not among the scanned sources`
+      ).toBeDefined();
+      expect(
+        file?.whole.split('\n').map((line) => line.trim()),
+        `${exemption.file} no longer holds the exempted line`
+      ).toContain(exemption.line);
+      // And a toothless one — a line no rule catches — is a stale exemption
+      // that should be deleted, not carried.
+      expect(
+        FORBIDDEN_IN_SOURCE.some((rule) => rule.pattern.test(exemption.line)),
+        `"${exemption.line}" matches no forbidden pattern, so it exempts nothing`
+      ).toBe(true);
     }
   });
 

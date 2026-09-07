@@ -92,6 +92,12 @@ recordings/
 media-out/
 *.m3u8
 
+# What a `pnpm test:guide` Playwright run writes — traces, screenshots, the
+# last-run record. Confined to this one directory by the harness's own config
+# (`outputDir`), and NEVER `deploy/devnet/run/`, which the toolchain excludes
+# wholesale because bought segments share TypeScript's extension.
+packages/guide/e2e/output/
+
 # ─── Build output ─────────────────────────────────────────────────────────
 #
 # The stack is TypeScript on Node (see CLAUDE.md); the Rust shape is left

@@ -9,10 +9,11 @@
     "test": "vitest run",
     "test:image": "vitest run --config vitest.image.config.ts",
     "test:devnet": "vitest run --config vitest.devnet.config.ts",
+    "test:guide": "bash packages/guide/e2e/run.sh",
     "demo": "vite-node deploy/devnet/demo.ts --",
     "lint": "eslint .",
-    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"deploy/**/*.ts\"",
-    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"deploy/**/*.ts\"",
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/e2e/**/*.ts\" \"deploy/**/*.ts\"",
+    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/e2e/**/*.ts\" \"deploy/**/*.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p packages/guide/tsconfig.json --noEmit"
   },
   "keywords": [

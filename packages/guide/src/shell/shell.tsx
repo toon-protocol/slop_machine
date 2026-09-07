@@ -1,5 +1,6 @@
 import { Link, NavLink, Outlet } from 'react-router';
 import { Radio } from 'lucide-react';
+import { useStations } from '@/relay/stations-context';
 
 /**
  * The dark shell every route renders inside: a top bar, a left sidebar that
@@ -47,17 +48,42 @@ function TopBar() {
 }
 
 function Sidebar() {
+  // Every station with an unexpired heartbeat, from the same provider the
+  // grid reads — so a heartbeat lapsing takes a station out of this list on
+  // the next clock tick, with no reload.
+  const { live } = useStations();
+
   return (
     <aside className="hidden w-60 shrink-0 border-r bg-card/50 p-4 md:block">
       <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
         Live stations
       </h2>
-      {/* #76 fills this from the hub relay's announcements: every station
-          with an unexpired heartbeat, its handle linking to /b/:handle. */}
-      <p className="mt-3 text-sm text-muted-foreground">
-        No stations are on the air yet. Live stations land here as broadcasters
-        announce them.
-      </p>
+      {live.length === 0 ? (
+        <p className="mt-3 text-sm text-muted-foreground">
+          No stations are on the air yet. Live stations land here as
+          broadcasters announce them.
+        </p>
+      ) : (
+        <ul className="mt-3 flex flex-col gap-1">
+          {live.map((station) => (
+            <li key={station.address}>
+              <Link
+                to={`/b/${station.handle}`}
+                data-testid="live-station"
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+              >
+                <span
+                  className="size-2 shrink-0 rounded-full bg-destructive"
+                  aria-hidden
+                />
+                <span className="truncate">
+                  {station.name ?? station.handle}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
     </aside>
   );
 }
