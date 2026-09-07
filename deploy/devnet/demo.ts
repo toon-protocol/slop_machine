@@ -176,7 +176,16 @@ const BUDGET_PER_SECOND = 1000n;
  * (ADR 0005): it is wired HERE, on the paying side, and nothing across the
  * line can extend it.
  */
-const GUIDE_ORIGINS = ['http://127.0.0.1:4173', 'http://localhost:4173'];
+const GUIDE_ORIGINS = [
+  'http://127.0.0.1:4173',
+  'http://localhost:4173',
+  // The guide as GitHub Pages hosts it — this repository's own static build
+  // at its canonical Pages origin. An https page may still reach loopback
+  // (browsers exempt 127.0.0.1 from mixed-content rules), so the hosted page
+  // talks to THIS paying side and to the relay's local reads exactly as the
+  // vite-served one does.
+  'https://toon-protocol.github.io',
+];
 
 /** What the devnet's origin is configured to cut, and what the playlist declares. */
 const SEGMENT_SECONDS = 2;

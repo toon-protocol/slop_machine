@@ -337,14 +337,17 @@ async function main(): Promise<void> {
         contract: {
           station: options.station,
           budgetPerSecond: BUDGET_PER_SECOND,
-          // The guide's hidden-service origin, when the host handed one out:
-          // this viewer's own allowlist grants that page the contract writes
-          // and the CORS on its playlists and segments — so the SAME guide
-          // everyone reads over the circuit vibes against THIS viewer's own
+          // The guide origins this viewer's own allowlist grants the contract
+          // writes and the CORS on its playlists and segments: the repo's own
+          // GitHub Pages build always (an https page still reaches loopback —
+          // browsers exempt 127.0.0.1 from mixed-content rules), plus the
+          // guide's hidden-service origin when the host handed one out — so
+          // the SAME guide everyone reads vibes against THIS viewer's own
           // paying side at its default http://127.0.0.1:8088.
-          ...(options.guideOrigin === null
-            ? {}
-            : { allowedOrigins: [options.guideOrigin] }),
+          allowedOrigins: [
+            'https://toon-protocol.github.io',
+            ...(options.guideOrigin === null ? [] : [options.guideOrigin]),
+          ],
           vibing: true,
         },
         state,
