@@ -8,16 +8,16 @@ A Vite SPA on React, Tailwind and shadcn. **Browser-only, static build, no serve
 `pnpm build` writes `dist/`, and a hub hosts that output the way it hosts any static file. It is
 this repo's first package that is not a toon app, and its first `.tsx`.
 
-## What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75), [#76](https://github.com/toon-protocol/slop_machine/issues/76))
+## What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75), [#76](https://github.com/toon-protocol/slop_machine/issues/76), [#77](https://github.com/toon-protocol/slop_machine/issues/77))
 
 The dark shell with four routes, and the discovery half rendered from **real relay reads**:
 
 | Route                   | What it is                                                          |
 | ----------------------- | ------------------------------------------------------------------- |
 | `/`                     | **the discovery grid** — one station card per announced station, ladder and per-segment prices leading, a live badge exactly while an unexpired heartbeat exists (#76) |
-| `/categories`           | every category any station announces itself under (#77 fills it)    |
-| `/categories/:category` | the stations announced under one category (#77 fills it)            |
-| `/b/:handle`            | the broadcaster page — profile, clips, rung ladder (#77), playback (#78) |
+| `/categories`           | a tile per announced category, derived from the `t` tags — curation (a small featured list in the route) decides prominence only, never existence (#77) |
+| `/categories/:category` | every station announced under that tag, as the same cards the grid uses; a multi-category station appears under each (#77) |
+| `/b/:handle`            | the broadcaster page — profile, clips, rung ladder, playback (#78)  |
 
 No bare vanity URLs: display names are not unique, and the handle is the only identity anybody
 grants.
@@ -45,6 +45,10 @@ that — never a write, never anything paid. The layer is the seam every route c
   wins and the later claimant is dropped, ADR 0004's v1 squatter defense. `isLive` applies NIP-40
   against a caller-supplied clock, because a consumer that trusted a non-pruning relay would show
   dead stations live.
+- [`categories.ts`](src/relay/categories.ts) — pure derivation from `Station[]` to the announced
+  categories with their station and live counts. A category exists because a station announced
+  itself under it, and for no other reason; the featured list lives with the tiles' route, because
+  curation is presentation.
 - [`stations-context.tsx`](src/relay/stations-context.tsx) — one subscription for the whole page
   and a ticking clock, so a heartbeat that lapses while the tab sits open drops the live badge on
   the next tick, with no reload.

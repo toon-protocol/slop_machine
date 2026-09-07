@@ -22,7 +22,7 @@ enough to be called out in the glossary itself: **slot is not peering**
 ([ADR 0003](docs/adr/0003-a-slot-is-bought-a-peering-is-still-only-created.md) depends on the
 distinction) and **segment is not packet**.
 
-## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide renders the discovery grid from real relay reads, payment-free by test
+## Status: the station origin ingests, encodes, serves and deploys; the slot app boots, quotes, sells, funds, routes, renews, lapses and reconciles; the guide renders the discovery grid and category browsing from real relay reads, payment-free by test
 
 This repository is a pnpm workspace with three packages. Two are the toon apps it ships —
 `packages/station-origin` (`@toon-protocol/station-origin`) and `packages/slot-app`
@@ -603,7 +603,8 @@ first that is **not a toon app**: a Vite SPA on React, Tailwind and shadcn — b
 build, no server of its own — the discovery surface of epic
 [#72](https://github.com/toon-protocol/slop_machine/issues/72), which a hub can host as plain
 static files. What exists today ([#75](https://github.com/toon-protocol/slop_machine/issues/75),
-[#76](https://github.com/toon-protocol/slop_machine/issues/76))
+[#76](https://github.com/toon-protocol/slop_machine/issues/76),
+[#77](https://github.com/toon-protocol/slop_machine/issues/77))
 is the dark shell with the four routes — `/` (the discovery grid),
 `/categories`, `/categories/:category` and `/b/:handle` (the broadcaster page; no bare vanity
 URLs, because display names are not unique and the handle is the only identity anybody grants) —
@@ -617,7 +618,14 @@ number this system has, never an audience figure — categories from the `t` tag
 against a ticking clock so a lapsing heartbeat drops the badge with no reload, and the left sidebar
 lists the same live stations. Two announcements claiming one station address resolve
 **first-mover-wins** (earliest `created_at`; later claimants dropped) — ADR 0004's v1 squatter
-defense, applied where the ADR assigns it, in the consumer. The NIP-01 reader is **hand-rolled**
+defense, applied where the ADR assigns it, in the consumer. Since #77, **browsing by the vibes**:
+`/categories` renders a tile per announced category, derived (`src/relay/categories.ts`) from the
+`t` tags of that same deduplicated station set, with a small featured list in the route curating
+**prominence, never existence** — a featured name nobody announced gets no tile — and
+`/categories/:category` lists every station announced under that tag with the grid's own
+`StationCard`, so a multi-category station appears under each and an unannounced category renders
+an honest empty state. A category describes the vibes, not the medium: no audio-versus-video
+split, because that is a rung's business. The NIP-01 reader is **hand-rolled**
 (`src/relay/nip01.ts`): the obvious dependency is `nostr-tools`, which is the announcement *signer*
 and devnet-only by the bundle guard's fence — the guide only reads, so it takes the smallest thing
 that reads, and it verifies no `sig`, because a signing curve is on the payment-free denylist and
@@ -944,7 +952,7 @@ pnpm test:devnet # vitest, opt-in and NOT part of `pnpm test`: brings up deploy/
                  # every node's logs on a failure. deploy/devnet/bundle.test.ts holds the topology
                  # still and runs in `pnpm test` with no daemon at all
 pnpm test:guide  # Playwright, opt-in and NOT part of `pnpm test`: drives the guide's discovery
-                 # grid in real Chromium against the RUNNING demo — `pnpm demo --pattern` must be
+                 # grid and category browsing in real Chromium against the RUNNING demo — `pnpm demo --pattern` must be
                  # up first, and the first spec fails fast naming that command when the relay is
                  # not there. Serves the guide itself (the config's own vite web server), asserts
                  # the demo station's card live with its real two-rung ladder at its real prices,
