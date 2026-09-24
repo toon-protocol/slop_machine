@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Slop Load Bench</title>
+<style>
+  :root { --bg:#0e1116; --fg:#e8eaed; --dim:#9aa0a6; --card:#1a1f27; --accent:#7cc4ff; --bad:#ff8a80; --ok:#a5d6a7; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, sans-serif; padding:12px 16px 40px; }
+  h1 { font-size:18px; margin:4px 0 8px; }
+  nav { display:flex; gap:6px; margin:8px 0; }
+  nav button, .btn { flex:1; padding:10px; border:0; border-radius:8px; background:var(--card); color:var(--fg); font:inherit; }
+  nav button[aria-pressed=true] { background:var(--accent); color:#000; }
+  .btn.primary { background:var(--accent); color:#000; }
+  label { display:block; margin:8px 0 4px; color:var(--dim); font-size:13px; }
+  select, input { width:100%; padding:8px; border-radius:8px; border:1px solid #333; background:var(--card); color:var(--fg); font:inherit; }
+  .row { display:flex; gap:8px; margin:10px 0; }
+  table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; margin-top:8px; }
+  th, td { text-align:right; padding:3px 4px; border-bottom:1px solid #2a2f37; }
+  th:first-child, td:first-child { text-align:left; }
+  .err { color:var(--bad); } .ok { color:var(--ok); }
+  #status { color:var(--dim); font-size:13px; min-height:1.4em; }
+  #stage { width:180px; height:320px; margin:8px auto; background:#000; }
+  #stage iframe { width:100%; height:100%; border:0; }
+  #feed { position:fixed; inset:0; background:#000; display:none; touch-action:none; }
+  #feed iframe { position:absolute; inset:0; width:100%; height:100%; border:0; pointer-events:none; }
+  #feed .hud { position:absolute; left:0; right:0; top:env(safe-area-inset-top); padding:8px 12px; font-size:13px; background:#0009; }
+  #feed .card { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:#000c; font-size:18px; }
+  #feed .quit { position:absolute; right:10px; bottom:calc(10px + env(safe-area-inset-bottom)); padding:10px 14px; border-radius:8px; background:#fff2; color:#fff; border:0; font:inherit; }
+  pre { white-space:pre-wrap; font-size:11px; background:var(--card); padding:8px; border-radius:8px; }
+</style>
+</head>
+<body>
+<h1>Slop Load Bench</h1>
+<label>Network (as set on the phone right now)</label>
+<select id="net">
+  <option>Wi-Fi</option><option>LTE</option><option>5G</option><option>NLC 3G</option><option>NLC LTE</option><option>NLC Edge</option><option>other</option>
+</select>
+<input id="note" placeholder="note: carrier, signal bars, place…" style="margin-top:6px">
+<nav>
+  <button data-tab="bench" aria-pressed="true">Bench</button>
+  <button data-tab="feed">Feed</button>
+  <button data-tab="gw">Gateway</button>
+</nav>
+
+<section data-panel="bench">
+  <p style="color:var(--dim);font-size:13px">Loads each synthetic Slop (S ≈100 KB, M ≈2 MB, L ≈9.9 MB) in a cross-site-style iframe. <b>Cold</b> = new URLs (browser and CDN miss), <b>warm</b> = same URLs again (CDN hit, browser cache bypassed). Keep the screen on.</p>
+  <div class="row"><label style="margin:0;flex:1">Reps per cell <input id="reps" type="number" value="3" min="1" max="10"></label></div>
+  <div class="row"><button class="btn primary" id="runBench">Run bench</button></div>
+</section>
+
+<section data-panel="feed" hidden>
+  <p style="color:var(--dim);font-size:13px">A one-ahead Feed: the Slop you see is landed, and the next one preloads behind it. Flick up to Pull. Flick at your natural pace, then try skimming as fast as you can. Every flick is logged with its dwell time and whether the next Slop was ready or you waited on a loading card.</p>
+  <label>Slop size mix</label>
+  <select id="mix">
+    <option value="s:50,m:35,l:15">Mixed: 50% S / 35% M / 15% L</option>
+    <option value="s:1">All S (≈100 KB)</option><option value="m:1">All M (≈2 MB)</option><option value="l:1">All L (≈9.9 MB)</option>
+  </select>
+  <label>Gateway cache</label>
+  <select id="feedCache"><option value="warm">Warm (the index's admission check already fetched it)</option><option value="cold">Cold</option></select>
+  <label>Pull round trip before the next Slop starts preloading (the paid GET's FULFILL carries it)</label>
+  <select id="rtt"><option value="0">0 ms</option><option value="500" selected>500 ms</option><option value="1500">1500 ms</option></select>
+  <div class="row"><button class="btn primary" id="runFeed">Start Feed</button></div>
+</section>
+
+<section data-panel="gw" hidden>
+  <p style="color:var(--dim);font-size:13px">Picks random old Arweave data of Slop-like sizes (via Goldsky GraphQL) and fetches each one twice through a public ar.io gateway: the first fetch is almost certainly a gateway <b>cold</b> miss, and the second is <b>warm</b>. This is the Arweave-retrieval penalty our cache-only gateway pays on a miss.</p>
+  <label>Gateway</label>
+  <select id="gw"><option>ardrive.net</option><option>permagate.io</option><option>arweave.net</option></select>
+  <div class="row"><button class="btn primary" id="runGw">Run gateway probe</button></div>
+</section>
+
+<div id="status"></div>
+<div id="stage"></div>
+<div id="results"></div>
+<div class="row"><button class="btn" id="copy">Copy all results</button><button class="btn" id="clear">Clear</button></div>
+<pre id="dump" hidden></pre>
+
+<div id="feed"><div class="hud" id="hud"></div><button class="quit" id="quit">End</button></div>
+<script src="harness.js"></script>
+</body>
+</html>

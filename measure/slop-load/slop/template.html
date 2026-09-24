@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;height:100%;background:#123;overflow:hidden}</style>
+</head>
+<body>
+<script>
+// Stand-in for the shim `slop publish` injects. It loads this Version's files, then reports timings to the Feed:
+//   slop-load  : the window `load` event (the earliest point a naive shim could send `slop-ready`)
+//   slop-ready : every file fetched and every script run (the engine booted, assets in memory)
+//   slop-frame : the first frame the game has drawn after that (what the Player sees on landing)
+// Every file is fetched with `?a=<nonce>` and `cache: 'no-store'`, so the browser cache never helps.
+// A new nonce misses the host's CDN too (cold); a reused nonce hits the CDN (warm).
+(() => {
+  const FILES = /*FILES*/[];
+  const q = new URLSearchParams(location.search);
+  const run = q.get('run');
+  const nonce = q.get('a') ?? String(Math.random());
+  const post = (type, extra) => parent.postMessage({ type, run, t: performance.now(), ...extra }, '*');
+  addEventListener('load', () => post('slop-load'));
+
+  const fetched = FILES.map(async (f) => {
+    const res = await fetch(`${f.path}?a=${nonce}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`${f.path}: HTTP ${res.status}`);
+    return { ...f, blob: await res.blob(), cache: res.headers.get('x-cache') ?? res.headers.get('x-cache-status') ?? res.headers.get('cf-cache-status') };
+  });
+  (async () => {
+    const got = await Promise.all(fetched);
+    const fetchedAt = performance.now();
+    for (const f of got.filter((f) => f.kind === 'script')) {
+      await new Promise((ok, fail) => {
+        const s = document.createElement('script');
+        s.src = URL.createObjectURL(f.blob);
+        s.onload = ok;
+        s.onerror = () => fail(new Error(`${f.path}: script error`));
+        document.body.append(s);
+      });
+    }
+    const bytes = got.reduce((n, f) => n + f.blob.size, 0);
+    const res = performance.getEntriesByType('resource').filter((e) => e.name.includes('?a='));
+    const transfer = res.reduce((n, e) => n + (e.transferSize || 0), 0);
+    const nav = performance.getEntriesByType('navigation')[0];
+    const cache = [...new Set(got.map((f) => f.cache).filter(Boolean))].join(',');
+    post('slop-ready', { bytes, transfer, fetchedAt, htmlAt: nav?.responseEnd, cache });
+    window.__game(() => post('slop-frame'));
+  })().catch((e) => post('slop-error', { error: String(e.message ?? e) }));
+})();
+</script>
+</body>
+</html>
