@@ -40,8 +40,12 @@ How much a Player can still spend on Pulls and Purchases before their money runs
 _Avoid_: balance, credits, tokens
 
 **Refill**:
-A Player adding more Runway to their channel, with mock USDC they draw from the TOON faucet themselves.
+A Player adding more Runway to their channel from money their own key already holds; when it holds none, they first draw more from a faucet themselves.
 _Avoid_: top-up, deposit (the on-chain mechanism, not the Player's act)
+
+**Recovery phrase**:
+The twelve words that are a Player's key. Whoever holds them controls the Player's Runway and wallet money, on any device or wallet app. The Feed only shows them when the Player asks, and the Player can restore from them on a new device.
+_Avoid_: seed (the implementation), password, account
 
 **Save**:
 A Slop's progress for one Player, kept by the Feed on the Player's device. It belongs to the Slop, not to a Version, so it carries over when the Creator publishes again.
@@ -51,6 +55,7 @@ _Avoid_: save game, progress, state (the live game, which a Save only snapshots)
 
 - A **Creator** publishes many **Slop**
 - A **Slop** has many **Versions** and plays exactly one, its current Version
+- A **Version** can load and reach only its own files, never the network, so what a Slop does is fixed when it is published; each Version is complete on its own
 - Unpublishing a **Slop** takes it out of the **Feed**; its **Versions** can never be deleted
 - A **Takedown** is made by the platform, unpublishing by the **Creator**; either takes a **Slop** out of the **Feed**
 - A **Player** makes many **Pulls**; each **Pull** lands on exactly one **Slop**
@@ -68,6 +73,8 @@ _Avoid_: save game, progress, state (the live game, which a Save only snapshots)
 - A **Player** can go back through every **Slop** they pulled past for free; going back never costs a **Pull**
 - A **Slop** has at most one **Save** per **Player** device, which only that Slop can read or write; a Slop opened outside the **Feed** keeps no Save across **Versions**
 - A **Purchase** is remembered by the **Feed** apart from the **Save**, so a Slop can see what the **Player** bought even after its Save is gone
+- A **Player** is their key: a Player who loses it without their **Recovery phrase** starts again as a new Player, and the money it held stays with the lost key
+- A **Recovery phrase** moves a **Player** to a new device; it doesn't bring their **Saves** or remembered **Purchases**, which stay on the old device
 
 ## Flagged ambiguities
 
