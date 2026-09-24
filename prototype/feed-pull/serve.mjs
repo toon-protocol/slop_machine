@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FEED_PORT = Number(process.env.PORT ?? 5173);
 const SLOP_PORT = FEED_PORT + 1;
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.webmanifest': 'application/manifest+json' };
 
 function serve(root, port) {
   http
