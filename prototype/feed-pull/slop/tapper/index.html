@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- PROTOTYPE Slop: portrait, discrete taps. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>Cookie Slop</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #2b1b0e; color: #fff; font: 16px system-ui; touch-action: manipulation; overscroll-behavior: none; user-select: none; -webkit-user-select: none; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; overflow: hidden; }
+      #c { font-size: 120px; background: none; border: 0; transition: transform 0.05s; cursor: pointer; }
+      #c:active { transform: scale(0.9); }
+      #n { font-size: 44px; font-weight: 800; }
+      #alive { position: fixed; bottom: 8px; left: 8px; font-size: 12px; opacity: 0.6; }
+      .p { position: fixed; pointer-events: none; font-weight: 800; animation: up 0.7s forwards; }
+      @keyframes up { to { transform: translateY(-60px); opacity: 0; } }
+    </style>
+  </head>
+  <body>
+    <div id="alive"></div>
+    <div id="n">0</div>
+    <button id="c">🍪</button>
+    <div>tap the cookie</div>
+    <script>
+      let n = 0;
+      const t0 = Date.now();
+      document.getElementById('c').addEventListener('pointerdown', (e) => {
+        document.getElementById('n').textContent = ++n;
+        const p = document.createElement('div');
+        p.className = 'p';
+        p.textContent = '+1';
+        p.style.left = e.clientX + 'px';
+        p.style.top = e.clientY + 'px';
+        document.body.append(p);
+        setTimeout(() => p.remove(), 700);
+      });
+      setInterval(() => (document.getElementById('alive').textContent = `alive ${Math.round((Date.now() - t0) / 1000)}s`), 500);
+    </script>
+  </body>
+</html>

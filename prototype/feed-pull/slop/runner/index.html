@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- PROTOTYPE Slop: landscape (16:9), tap anywhere to jump. Letterboxes itself inside whatever box it's given. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>Sideways Runner</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; overscroll-behavior: none; user-select: none; -webkit-user-select: none; }
+      body { display: grid; place-items: center; }
+      canvas { display: block; width: min(100vw, 177.78vh); aspect-ratio: 16 / 9; }
+    </style>
+  </head>
+  <body>
+    <canvas width="640" height="360"></canvas>
+    <script>
+      const g = document.querySelector('canvas').getContext('2d');
+      const t0 = Date.now(), GROUND = 300;
+      let y = GROUND, vy = 0, obs = [], spawn = 1, score = 0, best = 0, flash = 0, x = 0, last = performance.now();
+      const jump = () => y >= GROUND && (vy = -620);
+      addEventListener('pointerdown', jump);
+      addEventListener('keydown', (e) => e.key === 'w' && jump());
+
+      function loop(now) {
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        const speed = 260 + score * 6;
+        x += speed * dt;
+        vy += 1700 * dt;
+        y = Math.min(GROUND, y + vy * dt);
+        spawn -= dt;
+        if (spawn <= 0) (obs.push({ x: 680, h: 26 + Math.random() * 30 }), (spawn = 0.9 + Math.random() * 0.9));
+        for (const o of obs) {
+          o.x -= speed * dt;
+          if (!o.hit && o.x < 110 && o.x > 70 && y > GROUND - o.h) ((o.hit = true), (score = 0), (flash = 0.3));
+          if (!o.hit && !o.done && o.x < 70) ((o.done = true), score++, (best = Math.max(best, score)));
+        }
+        obs = obs.filter((o) => o.x > -40);
+        flash = Math.max(0, flash - dt);
+
+        g.fillStyle = flash ? '#7f1d1d' : '#fde68a';
+        g.fillRect(0, 0, 640, 360);
+        g.fillStyle = '#92400e';
+        g.fillRect(0, GROUND, 640, 60);
+        for (let i = 0; i < 12; i++) g.fillRect(((i * 70 - x * 0.5) % 700 + 700) % 700 - 30, GROUND + 18, 20, 4);
+        g.fillStyle = '#15803d';
+        for (const o of obs) g.fillRect(o.x, GROUND - o.h, 22, o.h);
+        g.fillStyle = '#1e3a8a';
+        g.fillRect(80, y - 40, 26, 40);
+        g.fillStyle = '#111';
+        g.font = '800 28px system-ui';
+        g.fillText(score, 20, 40);
+        g.font = '13px system-ui';
+        g.fillText(`best ${best} · tap to jump · alive ${Math.round((Date.now() - t0) / 1000)}s`, 20, 62);
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html>

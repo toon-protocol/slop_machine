@@ -1,0 +1,83 @@
+/* PROTOTYPE, throwaway styles. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #0b0b10; color: #f4f4f6; font: 15px/1.3 system-ui, sans-serif; overscroll-behavior: none; }
+body { overflow: hidden; }
+button { font: inherit; color: inherit; }
+iframe { border: 0; display: block; width: 100%; height: 100%; background: #000; }
+
+/* On desktop, frame the Feed like a phone so it's judged at phone size. */
+#app { position: fixed; inset: 0; margin: 0 auto; max-width: 430px; overflow: hidden; background: #000; }
+@media (min-width: 700px) { #app { top: 24px; bottom: 24px; border-radius: 28px; outline: 8px solid #222; } }
+
+.chip { background: #ffffff1a; border-radius: 99px; padding: 3px 10px; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slide { position: absolute; inset: 0; transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.toast { position: absolute; top: 56px; left: 50%; transform: translateX(-50%); background: #16a34a; color: #fff; font-weight: 700; padding: 6px 14px; border-radius: 99px; z-index: 50; pointer-events: none; animation: toast 1.2s forwards; }
+.toast.bad { background: #dc2626; }
+@keyframes toast { 0% { opacity: 0; transform: translate(-50%, 10px); } 15%, 70% { opacity: 1; transform: translate(-50%, 0); } 100% { opacity: 0; transform: translate(-50%, -20px); } }
+
+/* Prototype chrome: switcher + state panel, deliberately loud so it isn't mistaken for the design. */
+#switcher { position: fixed; top: 6px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; align-items: center; gap: 4px; background: #facc15; color: #111; border-radius: 99px; padding: 2px 4px; font-size: 12px; font-weight: 700; box-shadow: 0 2px 10px #0008; white-space: nowrap; }
+#switcher button { background: none; border: 0; font-size: 18px; padding: 0 8px; cursor: pointer; }
+#stateToggle { position: fixed; top: 8px; left: 8px; z-index: 100; background: #facc15; color: #111; border: 0; border-radius: 99px; font-size: 11px; font-weight: 700; padding: 3px 8px; }
+#statePanel { position: fixed; top: 36px; left: 8px; z-index: 100; margin: 0; max-width: min(420px, calc(100vw - 16px)); max-height: 60vh; overflow: auto; background: #111c; border: 1px solid #facc15; border-radius: 8px; padding: 8px; font-size: 11px; line-height: 1.35; white-space: pre-wrap; pointer-events: none; }
+@media (min-width: 900px) { #app { left: 440px; margin: 0; } }
+
+/* ---------- A · Edge lever ---------- */
+.a { position: absolute; inset: 0; }
+.a-stage { position: absolute; inset: 0 56px 0 0; overflow: hidden; }
+.a-letterbox { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; background: #000; }
+.a-letterbox iframe { height: auto; aspect-ratio: 16 / 9; }
+.a-caption { text-align: center; font-size: 12px; opacity: 0.6; padding: 8px; }
+.a-rail { position: absolute; top: 0; right: 0; bottom: 0; width: 56px; background: linear-gradient(#27131f, #120a10); border-left: 1px solid #ffffff22; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 44px 0 max(14px, env(safe-area-inset-bottom)); touch-action: none; user-select: none; -webkit-user-select: none; }
+.a-price { font-weight: 800; font-size: 16px; color: #fbbf24; text-align: center; font-variant-numeric: tabular-nums; }
+.a-price small { display: block; font-size: 9px; opacity: 0.7; }
+.a-track { position: relative; flex: 1; width: 8px; margin: 14px 0; border-radius: 4px; background: #ffffff1a; }
+.a-knob { position: absolute; top: 10%; left: 50%; margin-left: -22px; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font-size: 22px; background: radial-gradient(circle at 35% 30%, #f87171, #991b1b); box-shadow: 0 3px 10px #000a; transition: transform 0.35s cubic-bezier(0.3, 1.6, 0.5, 1); }
+.a-rail.armed .a-knob { box-shadow: 0 0 0 4px #fbbf24, 0 3px 10px #000a; }
+.a-hint { font-size: 10px; text-align: center; opacity: 0.55; line-height: 1.2; }
+.a-bal { font-size: 11px; opacity: 0.8; margin-top: 8px; font-variant-numeric: tabular-nums; }
+
+/* ---------- B · Chrome swipe, dwell charge ---------- */
+.b { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.b-bar { flex: none; background: #111; touch-action: none; user-select: none; -webkit-user-select: none; position: relative; z-index: 2; }
+.b-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 36px 12px 8px; border-bottom: 1px solid #ffffff1a; }
+.b-top small { display: block; opacity: 0.6; font-size: 12px; }
+.b-bottom { height: calc(76px + env(safe-area-inset-bottom)); padding: 8px 12px env(safe-area-inset-bottom); text-align: center; font-size: 13px; border-top: 1px solid #ffffff1a; overflow: hidden; }
+.b-handle { width: 44px; height: 5px; border-radius: 3px; background: #fff6; margin: 2px auto 10px; }
+.b-meter { position: absolute; left: 0; bottom: 0; height: 4px; background: #fbbf24; }
+.b-stage { flex: 1; position: relative; overflow: hidden; transition: transform 0.2s; }
+.b-cover { position: absolute; inset: 0; border: 0; background: radial-gradient(circle, #2a1f3d, #0b0b10); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 20px; font-weight: 700; cursor: pointer; }
+.b-cover span { font-size: 72px; }
+.b-cover small { font-size: 13px; font-weight: 400; opacity: 0.7; }
+.b-rot { container-type: size; }
+.b-rot iframe { position: absolute; top: 50%; left: 50%; width: 100cqh; height: 100cqw; transform: translate(-50%, -50%) rotate(90deg); }
+
+/* ---------- C · Slot reel ---------- */
+.c { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 36px 10px max(10px, env(safe-area-inset-bottom)); gap: 10px; background: radial-gradient(ellipse at top, #3b0d2c, #0b0b10 70%); }
+.c-meta { display: flex; justify-content: space-between; align-items: baseline; padding: 0 4px; }
+.c-meta small { opacity: 0.6; }
+.c-card { flex: 1; position: relative; border-radius: 18px; overflow: hidden; background: #000; border: 3px solid #fbbf24; box-shadow: 0 0 24px #fbbf2455; }
+.c-card iframe { position: absolute; inset: 0; visibility: hidden; }
+.c-card iframe.on { visibility: visible; }
+.c-card.landscape iframe.on { top: 50%; bottom: auto; height: auto; aspect-ratio: 16 / 9; transform: translateY(-50%); }
+.c-rotate { display: none; position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: #fbbf24; color: #111; font-weight: 700; font-size: 13px; padding: 6px 12px; border-radius: 99px; z-index: 3; }
+.c-card.landscape .c-rotate { display: block; }
+.c-reel { position: absolute; inset: 0; z-index: 5; display: grid; grid-template-columns: repeat(3, 1fr); align-content: center; gap: 6px; padding: 8px; background: #140814ee; }
+.c-reel[hidden] { display: none; }
+.c-win { height: 100px; overflow: hidden; border-radius: 10px; background: #fff; box-shadow: inset 0 8px 12px -6px #0006, inset 0 -8px 12px -6px #0006; }
+.c-strip { height: 100px; transition-property: transform; transition-timing-function: cubic-bezier(0.15, 0.7, 0.2, 1.05); }
+.c-strip div { height: 100px; display: grid; place-items: center; font-size: 56px; }
+.c-controls { flex: none; display: flex; align-items: center; gap: 10px; }
+.c-pull { flex: 1; height: 68px; border: 0; border-radius: 16px; background: linear-gradient(#ef4444, #991b1b); font-size: 24px; font-weight: 900; letter-spacing: 2px; box-shadow: 0 5px 0 #450a0a; cursor: pointer; }
+.c-pull:active { transform: translateY(4px); box-shadow: 0 1px 0 #450a0a; }
+.c-pull small { display: block; font-size: 12px; letter-spacing: 0; font-weight: 600; opacity: 0.85; }
+.c-back { width: 48px; height: 48px; border-radius: 50%; border: 1px solid #fff4; background: #ffffff10; font-size: 20px; }
+@media (orientation: landscape) and (max-height: 500px) {
+  .c { flex-direction: row; padding: 8px max(8px, env(safe-area-inset-right)) 8px max(8px, env(safe-area-inset-left)); }
+  .c-meta { display: none; }
+  .c-controls { flex-direction: column; width: 96px; }
+  .c-pull { flex: 1; width: 100%; }
+  .c-card.landscape iframe.on { top: 0; height: 100%; aspect-ratio: auto; transform: none; }
+  .c-card.landscape .c-rotate { display: none; }
+  #app { max-width: none; }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "slop-machine",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prototype:feed": "node prototype/feed-pull/serve.mjs"
+  }
+}

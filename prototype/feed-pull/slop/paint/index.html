@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- PROTOTYPE Slop: portrait, continuous drag in every direction. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>Finger Paint</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #fafafa; overflow: hidden; touch-action: none; overscroll-behavior: none; user-select: none; -webkit-user-select: none; font: 14px system-ui; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #clear { position: fixed; top: 44px; right: 10px; border: 0; background: #111; color: #fff; border-radius: 99px; padding: 6px 12px; }
+      #alive { position: fixed; bottom: 8px; left: 8px; font-size: 12px; opacity: 0.6; }
+      #hint { position: fixed; top: 48px; left: 10px; opacity: 0.5; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <canvas></canvas>
+    <div id="hint">drag anywhere to paint</div>
+    <button id="clear">clear</button>
+    <div id="alive"></div>
+    <script>
+      const cv = document.querySelector('canvas');
+      const g = cv.getContext('2d');
+      const fit = () => ((cv.width = innerWidth * devicePixelRatio), (cv.height = innerHeight * devicePixelRatio));
+      fit();
+      addEventListener('resize', fit);
+      const t0 = Date.now();
+      let hue = 0, prev = null;
+      cv.addEventListener('pointerdown', (e) => (prev = [e.clientX, e.clientY]));
+      cv.addEventListener('pointermove', (e) => {
+        if (!prev) return;
+        const d = devicePixelRatio;
+        g.strokeStyle = `hsl(${(hue += 3)}, 90%, 55%)`;
+        g.lineWidth = 14 * d;
+        g.lineCap = 'round';
+        g.beginPath();
+        g.moveTo(prev[0] * d, prev[1] * d);
+        g.lineTo(e.clientX * d, e.clientY * d);
+        g.stroke();
+        prev = [e.clientX, e.clientY];
+      });
+      addEventListener('pointerup', () => (prev = null));
+      addEventListener('pointercancel', () => (prev = null));
+      document.getElementById('clear').addEventListener('click', () => g.clearRect(0, 0, cv.width, cv.height));
+      setInterval(() => (document.getElementById('alive').textContent = `alive ${Math.round((Date.now() - t0) / 1000)}s`), 500);
+    </script>
+  </body>
+</html>
