@@ -1,7 +1,7 @@
 {
   "name": "Slop Machine (prototype)",
   "short_name": "Slop",
-  "start_url": "./?variant=D",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",

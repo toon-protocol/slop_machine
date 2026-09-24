@@ -7,8 +7,19 @@ import * as D from './variant-d.js';
 import * as E from './variant-e.js';
 
 const variants = { A, B, C, D, E };
-const key = new URLSearchParams(location.search).get('variant') ?? 'A';
-const variant = variants[key] ?? A;
+// The home-screen app launches with a baked-in URL, so there the last-picked variant wins over the URL's.
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+const param = new URLSearchParams(location.search).get('variant');
+let stored = null;
+try {
+  stored = localStorage.getItem('variant');
+} catch {}
+const picked = (standalone ? stored ?? param : param ?? stored) ?? 'E';
+const key = variants[picked] ? picked : 'E';
+const variant = variants[key];
+try {
+  localStorage.setItem('variant', key);
+} catch {}
 
 state.variant = `${key} · ${variant.name}`;
 setupStatePanel();

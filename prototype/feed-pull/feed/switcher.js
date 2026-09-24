@@ -3,6 +3,9 @@ export function mountSwitcher(el, names, current) {
   const keys = Object.keys(names);
   const go = (delta) => {
     const next = keys[(keys.indexOf(current) + delta + keys.length) % keys.length];
+    try {
+      localStorage.setItem('variant', next);
+    } catch {}
     const url = new URL(location.href);
     url.searchParams.set('variant', next);
     location.replace(url);
