@@ -28,3 +28,28 @@
     }
   });
 })();
+
+// PROTOTYPE Purchase API (ticket #16). Also injected at publish, so a Creator calls `slop.pay(...)` with no script to include.
+//   const r = await slop.pay({ tier: 5, item: 'golden-cookie', label: 'Golden Cookie' });
+//   r.status: 'paid' | 'declined' | 'failed' | 'refused'   (never throws; a refusal carries r.reason)
+// Slop → Feed is a *request*; only the Feed can pay. The receipt that comes back can be forged from devtools (accepted).
+(() => {
+  const waiting = new Map();
+  let seq = 0;
+  addEventListener('message', (e) => {
+    if (e.source !== parent || e.data?.type !== 'slop-receipt') return;
+    const done = waiting.get(e.data.id);
+    if (!done) return;
+    waiting.delete(e.data.id);
+    done(e.data);
+    dispatchEvent(new CustomEvent('slop:receipt', { detail: e.data }));
+  });
+  window.slop = {
+    pay({ tier, item, label }) {
+      const id = `${Date.now().toString(36)}-${++seq}`;
+      // '*' because a Slop can't know which Feed host embeds it; the request carries nothing secret.
+      parent.postMessage({ type: 'slop-pay', id, tier, item: String(item ?? ''), label: String(label ?? '') }, '*');
+      return new Promise((resolve) => waiting.set(id, resolve));
+    },
+  };
+})();

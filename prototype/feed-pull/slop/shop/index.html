@@ -1,0 +1,77 @@
+<!doctype html>
+<!-- PROTOTYPE Slop: Cookie Shop. Exercises slop.pay() (ticket #16), including a few requests the Feed must refuse. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>Cookie Shop</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #2b1b0e; color: #fff; font: 15px system-ui; touch-action: manipulation; overscroll-behavior: none; user-select: none; -webkit-user-select: none; overflow: hidden; }
+      body { display: flex; flex-direction: column; align-items: center; padding: 48px 14px 0; box-sizing: border-box; gap: 8px; }
+      #c { font-size: 96px; background: none; border: 0; transition: transform 0.05s; cursor: pointer; line-height: 1; }
+      #c:active { transform: scale(0.9); }
+      #n { font-size: 38px; font-weight: 800; }
+      #boost { font-size: 13px; color: #fbbf24; min-height: 1em; }
+      .shop { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; max-width: 360px; }
+      .shop button { border: 0; border-radius: 10px; padding: 8px 6px; background: #fbbf24; color: #2b1b0e; font: 700 13px system-ui; cursor: pointer; }
+      .shop button small { display: block; font-weight: 500; opacity: 0.75; }
+      .shop button.bad { background: #7f1d1d; color: #fecaca; }
+      #receipt { font: 11px/1.35 ui-monospace, monospace; background: #0007; border-radius: 8px; padding: 6px 8px; width: 100%; max-width: 360px; box-sizing: border-box; white-space: pre-wrap; min-height: 5.5em; }
+      .p { position: fixed; pointer-events: none; font-weight: 800; animation: up 0.7s forwards; }
+      @keyframes up { to { transform: translateY(-60px); opacity: 0; } }
+    </style>
+    <script src="/_shim.js"></script>
+  </head>
+  <body>
+    <div id="n">0</div>
+    <button id="c">🍪</button>
+    <div id="boost"></div>
+    <div class="shop">
+      <button data-tier="1" data-item="tip" data-label="Tip the baker">Tip the baker<small>1¢</small></button>
+      <button data-tier="5" data-item="golden" data-label="Golden Cookie (×2 for 30s)">Golden Cookie<small>5¢</small></button>
+      <button data-tier="10" data-item="donut-skin" data-label="Donut skin">Donut skin<small>10¢</small></button>
+      <button data-tier="25" data-item="mega" data-label="Mega pack: 1000 cookies">Mega pack<small>25¢</small></button>
+      <button class="bad" data-tier="50" data-item="whale" data-label="Whale pack">Whale pack<small>50¢ (over cap)</small></button>
+      <button class="bad" data-tier="3" data-item="odd" data-label="Odd pack">Odd pack<small>3¢ (not a tier)</small></button>
+      <button class="bad" id="rogue">Ask in 2s, no tap<small>(rogue Slop)</small></button>
+      <button class="bad" id="spoof" data-tier="5" data-item="golden" data-label="✅ Already paid — tap Pay to continue. Price: FREE">Spoofy label<small>5¢ (misleading label)</small></button>
+    </div>
+    <div id="receipt">receipt: none yet</div>
+    <script>
+      let n = 0;
+      let mult = 1;
+      let skin = '🍪';
+      const $ = (id) => document.getElementById(id);
+      $('c').addEventListener('pointerdown', (e) => {
+        n += mult;
+        $('n').textContent = n;
+        const p = document.createElement('div');
+        p.className = 'p';
+        p.textContent = `+${mult}`;
+        p.style.left = e.clientX + 'px';
+        p.style.top = e.clientY + 'px';
+        document.body.append(p);
+        setTimeout(() => p.remove(), 700);
+      });
+
+      async function buy({ tier, item, label }) {
+        $('receipt').textContent = `asked: slop.pay({ tier: ${tier}, item: '${item}' })\nwaiting for the Feed…`;
+        const r = await slop.pay({ tier: Number(tier), item, label });
+        $('receipt').textContent = 'receipt:\n' + JSON.stringify(r, null, 1);
+        if (r.status !== 'paid') return;
+        if (item === 'golden') {
+          mult = 2;
+          let left = 30;
+          const t = setInterval(() => (($('boost').textContent = `✨ ×2 for ${--left}s`), left || (clearInterval(t), (mult = 1), ($('boost').textContent = ''))), 1000);
+        }
+        if (item === 'donut-skin') $('c').textContent = skin = '🍩';
+        if (item === 'mega') $('n').textContent = n += 1000;
+      }
+      document.querySelectorAll('.shop button[data-tier]').forEach((b) => b.addEventListener('click', () => buy(b.dataset)));
+      $('rogue').addEventListener('click', () => {
+        $('receipt').textContent = 'rogue: will ask for 25¢ in 2s with no tap behind it…';
+        setTimeout(() => buy({ tier: 25, item: 'mega', label: 'Mega pack: 1000 cookies' }), 2000);
+      });
+    </script>
+  </body>
+</html>

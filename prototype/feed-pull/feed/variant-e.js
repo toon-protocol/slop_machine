@@ -3,7 +3,7 @@
 // press-and-hold-then-drag) is forwarded into the Slop via postMessage (Feed → Slop only) and replayed by a shim.
 // A Slop whose listing declares vertical flicks (Swipe Dodge) keeps them; Pulls on it only start in a bottom zone.
 // Charge: on pull. Cost: price chip. Autoplay: yes. Landscape: letterboxed.
-import { state, slopAt, makeFrame, charge, goTo, createSlides, onPullKeys, subscribe, event, SLOP_ORIGIN, TOLL } from './common.js';
+import { state, slopAt, makeFrame, charge, goTo, createSlides, onPullKeys, subscribe, event, hooks, SLOP_ORIGIN, TOLL } from './common.js';
 
 export const name = 'Swipe-anywhere, no modes';
 const HOLD_MS = 120; // press this long without moving and the touch belongs to the Slop
@@ -38,7 +38,10 @@ export function mount(root) {
     return el;
   });
 
+  hooks.currentFrame = () => frames.get(state.index);
+
   function next() {
+    if (state.sheetOpen) return;
     const i = state.index + 1;
     if (!state.paid.has(i) && !charge(i, 'on flick')) return;
     goTo(i);
@@ -46,7 +49,7 @@ export function mount(root) {
     render();
   }
   function prev() {
-    if (state.index === 0) return;
+    if (state.sheetOpen || state.index === 0) return;
     goTo(state.index - 1);
     slides.sync();
     render();
@@ -58,6 +61,7 @@ export function mount(root) {
     if (!f?.isConnected) return;
     const r = f.getBoundingClientRect();
     f.contentWindow.postMessage({ type: 'slop-input', kind, x: x - r.left, y: y - r.top }, SLOP_ORIGIN);
+    if (kind === 'up') state.lastTap = { index: state.index, at: Date.now() }; // a Purchase request must follow one closely
   }
 
   // Intent recogniser: pending → pull | game.

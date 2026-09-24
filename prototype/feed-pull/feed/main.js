@@ -1,5 +1,6 @@
 import { state, render, setupStatePanel } from './common.js';
 import { mountSwitcher } from './switcher.js';
+import { mountPurchases, SHEETS } from './purchase.js';
 import * as A from './variant-a.js';
 import * as B from './variant-b.js';
 import * as C from './variant-c.js';
@@ -25,4 +26,17 @@ state.variant = `${key} · ${variant.name}`;
 setupStatePanel();
 variant.mount(document.getElementById('app'));
 mountSwitcher(document.getElementById('switcher'), Object.fromEntries(Object.entries(variants).map(([k, v]) => [k, v.name])), key);
+
+const sheetParam = new URLSearchParams(location.search).get('sheet');
+let sheetStored = null;
+try {
+  sheetStored = localStorage.getItem('sheet');
+} catch {}
+const sheetPicked = (standalone ? sheetStored ?? sheetParam : sheetParam ?? sheetStored) ?? 'A';
+const sheetKey = SHEETS[sheetPicked] ? sheetPicked : 'A';
+try {
+  localStorage.setItem('sheet', sheetKey);
+} catch {}
+mountPurchases(document.getElementById('app'), sheetKey);
+mountSwitcher(document.getElementById('sheetSwitcher'), Object.fromEntries(Object.entries(SHEETS).map(([k, v]) => [k, v.name])), sheetKey, 'sheet');
 render();
