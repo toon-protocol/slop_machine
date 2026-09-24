@@ -3,7 +3,7 @@ export const SLOP_ORIGIN = `${location.protocol}//${location.hostname}:${Number(
 
 export const SLOPS = [
   { path: 'tapper', title: 'Cookie Slop', creator: 'npub…alice', icon: '🍪', orientation: 'portrait' },
-  { path: 'dodge', title: 'Swipe Dodge', creator: 'npub…bob', icon: '🚧', orientation: 'portrait' },
+  { path: 'dodge', title: 'Swipe Dodge', creator: 'npub…bob', icon: '🚧', orientation: 'portrait', verticalFlicks: true },
   { path: 'runner', title: 'Sideways Runner', creator: 'npub…carol', icon: '🏃', orientation: 'landscape' },
   { path: 'paint', title: 'Finger Paint', creator: 'npub…dave', icon: '🎨', orientation: 'portrait' },
 ];
