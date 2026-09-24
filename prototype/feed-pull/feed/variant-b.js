@@ -2,7 +2,7 @@
 // Charge: only after 3 s on the Slop landed on; pulling away sooner is free. Cost: a countdown in the bottom bar.
 // Autoplay: no, a Feed-owned "tap to play" cover; the iframe doesn't even load until tapped.
 // Conflict: swipe up/down only on the top and bottom chrome bars. Landscape: the iframe is rotated 90° to fill portrait.
-import { state, slopAt, makeFrame, charge, goTo, createSlides, onPullKeys, subscribe, event, render, TOLL } from './common.js';
+import { state, slopAt, makeFrame, charge, goTo, createSlides, onDrag, onPullKeys, subscribe, event, render, TOLL } from './common.js';
 
 export const name = 'Chrome swipe, dwell charge';
 const DWELL = 3000;
@@ -70,22 +70,18 @@ export function mount(root) {
     render();
   }
 
-  for (const bar of [root.querySelector('#top'), root.querySelector('#bottom')]) {
-    let startY = null;
-    bar.addEventListener('pointerdown', (e) => ((startY = e.clientY), bar.setPointerCapture(e.pointerId), (stage.style.transition = 'none')));
-    bar.addEventListener('pointermove', (e) => startY !== null && (stage.style.transform = `translateY(${(e.clientY - startY) * 0.4}px)`));
-    const release = (e) => {
-      if (startY === null) return;
-      const dy = e.clientY - startY;
-      startY = null;
-      stage.style.transition = '';
-      stage.style.transform = '';
-      if (dy < -40) next();
-      else if (dy > 40) prev();
-    };
-    bar.addEventListener('pointerup', release);
-    bar.addEventListener('pointercancel', release);
-  }
+  for (const bar of [root.querySelector('#top'), root.querySelector('#bottom')])
+    onDrag(bar, {
+      start: () => (stage.style.transition = 'none'),
+      move: (dy) => (stage.style.transform = `translateY(${dy * 0.4}px)`),
+      end: (dy) => {
+        stage.style.transition = '';
+        stage.style.transform = '';
+        if (dy < -40) next();
+        else if (dy > 40) prev();
+        else event(`swipe too short (${Math.round(dy)}px), no pull`);
+      },
+    });
 
   onPullKeys(next, prev);
   subscribe(() => {

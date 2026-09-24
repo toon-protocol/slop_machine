@@ -24,13 +24,22 @@
       const move = (d) => (lane = Math.max(0, Math.min(2, lane + d)));
       const jump = () => (jumpUntil = performance.now() + 650);
 
-      let sx, sy;
-      addEventListener('pointerdown', (e) => ((sx = e.clientX), (sy = e.clientY)));
-      addEventListener('pointerup', (e) => {
-        const dx = e.clientX - sx, dy = e.clientY - sy;
-        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 25) move(Math.sign(dx));
-        else if (dy < -25) jump();
-      });
+      // Touch events with preventDefault, so the browser never claims the swipe; fires as soon as the swipe is clear.
+      let sx = null, sy = null;
+      const down = (x, y) => ((sx = x), (sy = y));
+      const drag = (x, y) => {
+        if (sx === null) return;
+        const dx = x - sx, dy = y - sy;
+        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 25) (move(Math.sign(dx)), (sx = null));
+        else if (dy < -25) (jump(), (sx = null));
+      };
+      const t = (e) => e.changedTouches[0];
+      addEventListener('touchstart', (e) => (e.preventDefault(), down(t(e).clientX, t(e).clientY)), { passive: false });
+      addEventListener('touchmove', (e) => (e.preventDefault(), drag(t(e).clientX, t(e).clientY)), { passive: false });
+      addEventListener('touchend', () => (sx = null));
+      addEventListener('mousedown', (e) => down(e.clientX, e.clientY));
+      addEventListener('mousemove', (e) => drag(e.clientX, e.clientY));
+      addEventListener('mouseup', () => (sx = null));
       addEventListener('keydown', (e) => {
         if (e.key === 'a') move(-1);
         if (e.key === 'd') move(1);

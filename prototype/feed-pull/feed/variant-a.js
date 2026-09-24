@@ -2,7 +2,7 @@
 // Charge: on pull (prepaid, instant). Cost: printed on the lever, always visible.
 // Autoplay: yes, the next Slop is already running. Conflict: the gesture lives only in a Feed-owned right-edge rail;
 // the whole rest of the screen is the Slop's. Landscape: letterboxed inside portrait.
-import { state, slopAt, makeFrame, charge, goTo, createSlides, onPullKeys, subscribe, event, TOLL } from './common.js';
+import { state, slopAt, makeFrame, charge, goTo, createSlides, onDrag, onPullKeys, subscribe, event, TOLL } from './common.js';
 
 export const name = 'Edge lever';
 
@@ -43,32 +43,22 @@ export function mount(root) {
     slides.sync();
   }
 
-  let startY = null;
-  let dy = 0;
-  rail.addEventListener('pointerdown', (e) => {
-    startY = e.clientY;
-    dy = 0;
-    rail.setPointerCapture(e.pointerId);
-    knob.style.transition = 'none';
+  onDrag(rail, {
+    start: () => (knob.style.transition = 'none'),
+    move: (dy) => {
+      dy = Math.max(-80, Math.min(160, dy));
+      knob.style.transform = `translateY(${dy}px)`;
+      rail.classList.toggle('armed', dy > 110);
+    },
+    end: (dy) => {
+      knob.style.transition = '';
+      knob.style.transform = '';
+      rail.classList.remove('armed');
+      if (dy > 110) next();
+      else if (dy < -60) prev();
+      else event(`lever released short (${Math.round(dy)}px), no pull`);
+    },
   });
-  rail.addEventListener('pointermove', (e) => {
-    if (startY === null) return;
-    dy = Math.max(-80, Math.min(160, e.clientY - startY));
-    knob.style.transform = `translateY(${dy}px)`;
-    rail.classList.toggle('armed', dy > 110);
-  });
-  const release = () => {
-    if (startY === null) return;
-    startY = null;
-    knob.style.transition = '';
-    knob.style.transform = '';
-    rail.classList.remove('armed');
-    if (dy > 110) next();
-    else if (dy < -60) prev();
-    else if (Math.abs(dy) > 10) event('lever released short, no pull');
-  };
-  rail.addEventListener('pointerup', release);
-  rail.addEventListener('pointercancel', release);
 
   onPullKeys(next, prev);
   subscribe(() => (root.querySelector('#bal').textContent = state.balance.toFixed(2)));

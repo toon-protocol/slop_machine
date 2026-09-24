@@ -89,6 +89,30 @@ export function createSlides(container, build) {
   return { sync, get: (i) => slides.get(i) };
 }
 
+// Drag tracking for Feed-owned hit areas. Touch events with preventDefault on touch devices, because mobile browsers
+// cancel a pointer stream they claim for scrolling, pull-to-refresh or toolbar gestures; pointer events for the mouse.
+export function onDrag(el, { start, move, end }) {
+  let from = null;
+  let last = null;
+  const begin = (x, y) => ((from = { x, y }), (last = { x, y }), start?.());
+  const step = (x, y) => from && ((last = { x, y }), move?.(y - from.y, x - from.x));
+  const finish = () => {
+    if (!from) return;
+    const dy = last.y - from.y;
+    const dx = last.x - from.x;
+    from = null;
+    end(dy, dx);
+  };
+  const touch = (e) => e.changedTouches[0];
+  el.addEventListener('touchstart', (e) => (e.preventDefault(), begin(touch(e).clientX, touch(e).clientY)), { passive: false });
+  el.addEventListener('touchmove', (e) => (e.preventDefault(), step(touch(e).clientX, touch(e).clientY)), { passive: false });
+  el.addEventListener('touchend', (e) => (step(touch(e).clientX, touch(e).clientY), finish()));
+  el.addEventListener('touchcancel', finish);
+  el.addEventListener('pointerdown', (e) => e.pointerType === 'mouse' && (el.setPointerCapture(e.pointerId), begin(e.clientX, e.clientY)));
+  el.addEventListener('pointermove', (e) => e.pointerType === 'mouse' && step(e.clientX, e.clientY));
+  el.addEventListener('pointerup', (e) => e.pointerType === 'mouse' && finish());
+}
+
 export function onPullKeys(next, prev) {
   addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown' || e.key === ' ') (e.preventDefault(), next());
@@ -128,4 +152,6 @@ export function setupStatePanel() {
   panel.hidden = innerWidth < 900;
   document.getElementById('stateToggle').addEventListener('click', () => (panel.hidden = !panel.hidden));
   setInterval(() => state.pending && render(), 100);
+  // Stop the Feed page itself from rubber-banding or pull-to-refreshing under a gesture.
+  document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
 }

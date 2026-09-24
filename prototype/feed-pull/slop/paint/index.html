@@ -25,22 +25,30 @@
       fit();
       addEventListener('resize', fit);
       const t0 = Date.now();
-      let hue = 0, prev = null;
-      cv.addEventListener('pointerdown', (e) => (prev = [e.clientX, e.clientY]));
-      cv.addEventListener('pointermove', (e) => {
-        if (!prev) return;
+      let hue = 0;
+      const strokes = new Map(); // touch identifier (or 'mouse') -> last point
+      const line = (id, x, y) => {
+        const p = strokes.get(id);
+        if (!p) return;
         const d = devicePixelRatio;
         g.strokeStyle = `hsl(${(hue += 3)}, 90%, 55%)`;
         g.lineWidth = 14 * d;
         g.lineCap = 'round';
         g.beginPath();
-        g.moveTo(prev[0] * d, prev[1] * d);
-        g.lineTo(e.clientX * d, e.clientY * d);
+        g.moveTo(p[0] * d, p[1] * d);
+        g.lineTo(x * d, y * d);
         g.stroke();
-        prev = [e.clientX, e.clientY];
-      });
-      addEventListener('pointerup', () => (prev = null));
-      addEventListener('pointercancel', () => (prev = null));
+        strokes.set(id, [x, y]);
+      };
+      // Touch events with preventDefault, so the browser never claims the drag for scrolling.
+      cv.addEventListener('touchstart', (e) => { e.preventDefault(); for (const t of e.changedTouches) strokes.set(t.identifier, [t.clientX, t.clientY]); }, { passive: false });
+      cv.addEventListener('touchmove', (e) => { e.preventDefault(); for (const t of e.changedTouches) line(t.identifier, t.clientX, t.clientY); }, { passive: false });
+      const lift = (e) => { for (const t of e.changedTouches) strokes.delete(t.identifier); };
+      cv.addEventListener('touchend', lift);
+      cv.addEventListener('touchcancel', lift);
+      cv.addEventListener('mousedown', (e) => strokes.set('mouse', [e.clientX, e.clientY]));
+      cv.addEventListener('mousemove', (e) => line('mouse', e.clientX, e.clientY));
+      addEventListener('mouseup', () => strokes.delete('mouse'));
       document.getElementById('clear').addEventListener('click', () => g.clearRect(0, 0, cv.width, cv.height));
       setInterval(() => (document.getElementById('alive').textContent = `alive ${Math.round((Date.now() - t0) / 1000)}s`), 500);
     </script>
