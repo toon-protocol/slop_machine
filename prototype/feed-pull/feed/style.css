@@ -92,6 +92,7 @@ iframe { border: 0; display: block; width: 100%; height: 100%; background: #000;
 .e-zone[hidden] { display: none; }
 .e-zone span { font-size: 12px; font-weight: 700; color: #fbbf24; }
 .e .d-caption, .e .d-price { bottom: calc(16% + 8px); }
+.e-unmute { position: absolute; left: 12px; top: 40px; border: 0; background: #0008; z-index: 5; }
 
 @media (orientation: landscape) and (max-height: 500px) {
   .c { flex-direction: row; padding: 8px max(8px, env(safe-area-inset-right)) 8px max(8px, env(safe-area-inset-left)); }

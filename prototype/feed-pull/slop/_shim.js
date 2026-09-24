@@ -2,7 +2,6 @@
 // The Feed owns every touch and forwards non-Pull input here (Feed → Slop only); this replays it as pointer + mouse
 // events. The Slop can't talk back, so it can never trigger a Pull.
 (() => {
-  const FEED = `${location.protocol}//${location.hostname}:${Number(location.port) - 1}`;
   let target = null;
   let downAt = null;
   const fire = (el, type, x, y, Ctor) =>
@@ -10,7 +9,8 @@
       new Ctor(type, { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, buttons: type.endsWith('up') ? 0 : 1, pointerId: 1, pointerType: 'touch', isPrimary: true }),
     );
   addEventListener('message', (e) => {
-    if (e.origin !== FEED || e.data?.type !== 'slop-input') return;
+    if (e.source !== parent || e.data?.type !== 'slop-input') return; // the Feed is on another site; trust only the parent frame
+
     const { kind, x, y } = e.data;
     if (kind === 'down') {
       target = document.elementFromPoint(x, y) ?? document.body;

@@ -1,8 +1,12 @@
 // Shared fake Feed state: a fake balance, a fake toll, and a fake Creator split. No real payments.
-export const SLOP_ORIGIN = `${location.protocol}//${location.hostname}:${Number(location.port || 80) + 1}`;
+// Serve Slop from a different *site*, as production will (Feed domain vs Arweave gateway): same-site frames share
+// user activation in Chrome, which would fake a pass on the audio test. localhost → 127.0.0.1; a LAN IP → <ip>.nip.io.
+const slopHost = location.hostname === 'localhost' ? '127.0.0.1' : /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ? `${location.hostname.replaceAll('.', '-')}.nip.io` : location.hostname;
+export const SLOP_ORIGIN = `${location.protocol}//${slopHost}:${Number(location.port || 80) + 1}`;
 
 export const SLOPS = [
   { path: 'tapper', title: 'Cookie Slop', creator: 'npub…alice', icon: '🍪', orientation: 'portrait' },
+  { path: 'sound', title: 'Beep Test', creator: 'npub…erin', icon: '🔊', orientation: 'portrait' },
   { path: 'dodge', title: 'Swipe Dodge', creator: 'npub…bob', icon: '🚧', orientation: 'portrait', verticalFlicks: true },
   { path: 'runner', title: 'Sideways Runner', creator: 'npub…carol', icon: '🏃', orientation: 'landscape' },
   { path: 'paint', title: 'Finger Paint', creator: 'npub…dave', icon: '🎨', orientation: 'portrait' },
@@ -62,6 +66,7 @@ export function goTo(i) {
 export function makeFrame(slop, { load = true } = {}) {
   const f = document.createElement('iframe');
   f.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  f.setAttribute('allow', 'autoplay; fullscreen');
   f.title = slop.title;
   if (load) f.src = `${SLOP_ORIGIN}/${slop.path}/`;
   return f;

@@ -19,6 +19,7 @@ export function mount(root) {
       <div class="d-caption"><b id="title"></b><small id="creator"></small></div>
       <span class="chip d-price">${TOLL.toFixed(2)} USDC / pull</span>
       <span class="chip d-bal" id="bal"></span>
+      <button class="chip e-unmute" id="unmute">🔇 unmute</button>
     </div>`;
   const stage = root.querySelector('#stage');
   const zone = root.querySelector('#zone');
@@ -115,6 +116,24 @@ export function mount(root) {
   stage.addEventListener('pointerdown', (e) => e.pointerType === 'mouse' && (stage.setPointerCapture(e.pointerId), begin(e.clientX, e.clientY)));
   stage.addEventListener('pointermove', (e) => e.pointerType === 'mouse' && moveTo(e.clientX, e.clientY));
   stage.addEventListener('pointerup', (e) => e.pointerType === 'mouse' && finish());
+
+  // Fallback if forwarded input can't unlock audio (iOS?): let exactly one real tap through to the Slop.
+  const unmute = root.querySelector('#unmute');
+  unmute.addEventListener('click', () => {
+    const shield = slides.get(state.index)?.querySelector('.e-shield');
+    if (!shield) return;
+    shield.style.pointerEvents = 'none';
+    unmute.textContent = '👆 tap the Slop once';
+    event('unmute: next tap goes straight into the Slop');
+    const restore = () => {
+      shield.style.pointerEvents = '';
+      unmute.textContent = '🔇 unmute';
+      removeEventListener('blur', restore);
+      clearTimeout(timer);
+    };
+    addEventListener('blur', restore); // focus moving into the iframe means the tap landed there
+    const timer = setTimeout(restore, 5000);
+  });
 
   function render() {
     zone.hidden = !slopAt(state.index).verticalFlicks;
