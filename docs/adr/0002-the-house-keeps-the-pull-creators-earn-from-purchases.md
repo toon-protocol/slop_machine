@@ -2,7 +2,7 @@
 
 The platform keeps 100% of every Pull toll: one platform-wide price of 1¢ (`10000` base units of 6-decimal USDC). A Creator earns nothing from Pulls. Creators earn from **Purchases**: in-game payments their Slop asks for and the Player confirms, all of which go to the Creator. The platform takes no cut. So the platform and Creators compete for the same Player. The house earns when the Player pulls away, and a Creator earns when the Player stays and buys. That rivalry is the pitch.
 
-A Purchase is paid like a Pull, as a claim from the Player's browser payer to the platform's connector. It uses one flat-priced route per tier: 1¢, 5¢, 10¢ and 25¢, with 25¢ as the cap. The connector charges and reports only a route's configured price, so an amount the payer chooses can't be expressed. Behind those routes sits the **treasury service**. It is one platform program that also does the Player sponsoring decided in ADR 0001. On each cleared Purchase it:
+A Purchase is paid like a Pull, as a claim from the Player's browser payer to the platform's connector. It uses one flat-priced route per tier: 1¢, 5¢, 10¢ and 25¢, with 25¢ as the cap. The connector charges and reports only a route's configured price, so an amount the payer chooses can't be expressed. Behind those routes sits the **treasury service**. It is one platform program. It sponsors no Players (ADR 0001). On each cleared Purchase it:
 
 - adds the amount to the Creator's running total
 - signs a cumulative EIP-712 balance proof on a platform → Creator payment channel on Base Sepolia
