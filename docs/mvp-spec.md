@@ -4,7 +4,7 @@ Slop Machine is a doom-scroll Feed of small web games (**Slop**). Every swipe to
 
 This spec assembles decisions from the [Slop Machine MVP map][map] and decides nothing new. Every section cites the ticket or ADR it comes from. Where the record has a gap, the spec names an **open item** and links the ticket that will close it. Terms are defined in [`CONTEXT.md`](../CONTEXT.md). The ADRs are in [`docs/adr/`](adr/).
 
-**Status:** build-ready except for three open items (see [Open items](#open-items)).
+**Status:** build-ready except for two open items (see [Open items](#open-items)).
 
 ---
 
@@ -222,7 +222,7 @@ Receipts can be forged from devtools. This is accepted on devnet, because a forg
 
 - A **Slop** is its Creator's **addressable Nostr listing** on the TOON relay (`d` = a Creator-chosen slug), signed by the Creator's key and written as a paid write. It points at its current **Version** (ADR 0003, [t10]).
 - A **Version** is one immutable ar.io **path manifest** uploaded through the TOON store: one `kind:5094` write per file, plus one for the manifest. Versions live on Arweave mainnet, so they are **permanent** ([t4], ADR 0003).
-- **Open item 2: the listing kind number** isn't decided yet → [Which Nostr kinds do the Slop listing and the operator lists use?][t33]
+- **The listing is kind `37567`** (addressable), so a Slop's address is `37567:<pubkey>:<slug>`. The number is fresh: it is unassigned upstream and in the fleet, and no existing kind means "listing" without pulling other apps' events into the index's subscription. It is this repo's to keep stable, since every Feed entry, share link and `payout` lookup embeds it ([t33]).
 
 ### 5.2 Bundle rules
 
@@ -403,7 +403,7 @@ The connector passes paid and zero-priced routes to the index over HTTP with `X-
 ### 7.6 Operator lists
 
 - The **blocklist** (Slop addresses, Version txids, Creator pubkeys) and the **featured list** (Slop addresses) are operator-signed replaceable Nostr list events (NIP-51-style) on the relay. The operator signs them **from their own machine**, never on the box ([t11], [t27]).
-- **Open item 2: the kind numbers** for both lists → [t33].
+- **Kinds:** the blocklist is `17567` and the featured list `17568`. Both are plain replaceable events, one of each per operator key (NIP-51 *standard lists*, whose meaning is carried by the kind, not by `d`). The index reads both with `{kinds:[17567,17568], authors:[<operator>]}`. Kinds `10032`–`10099` are avoided, because the TOON relay stores that range keyed on `d` ([t33]).
 - **Takedown enforcement:** in the index (never dealt, status `blocked`) and in the Feed app (refuses to frame). Not at the relay or gateway ([t11], ADR 0004).
 
 ---
@@ -524,7 +524,9 @@ A cache-only `ar-io-core` (`ar-io-core` container) ([ADR 0004](adr/0004-slop-is-
 Each is a ticket on the map. Its resolution replaces the item here.
 
 1. **Gateway upstream and cache TTL.** [Which upstream should our Slop gateway fetch cold Versions from?][t32] ([§10](#10-slop-gateway))
-2. **Nostr kind numbers** for the listing, blocklist and featured list. [Which Nostr kinds do the Slop listing and the operator lists use?][t33] ([§5.1](#51-slop-and-version), [§7.6](#76-operator-lists))
+
+*Resolved:* item 2, the Nostr kind numbers, is now listing `37567`, blocklist `17567` and featured list `17568`. See [Which Nostr kinds do the Slop listing and the operator lists use?][t33] ([§5.1](#51-slop-and-version), [§7.6](#76-operator-lists)).
+
 3. **Redeem relay transport and gas protection.** [How does slop cashout reach the treasury service to relay a redeem?][t34] ([§8](#8-treasury-service))
 
 ## Known unverified assumptions
