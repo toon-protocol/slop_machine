@@ -4,7 +4,7 @@ A Slop is an addressable Nostr listing signed by its Creator's key, keyed by a C
 
 The Creator pays the store and the relay directly, from a devnet wallet derived from their own seed. No platform publish service is involved.
 
-Arweave only works if the fleet turns on the store's paid uploads, which means funding the store's key with **mainnet $ARIO**. The free tier caps each file at ~105 KB and allows about 10 MiB for the whole fleet, which is about five real games. That is real money, and it breaks the "devnet only, no mainnet money" rule on purpose. The rule protects Players and Creators from real payments. A few dollars of infrastructure storage (~$0.08/MiB at 2026-09 Turbo prices) spent by the operator is a different category, and the TOON store is half of what the showcase shows. The Version caps (1.5 MiB per file, 10 MiB and 200 files per Version) bound that spend.
+Arweave only works if the fleet turns on the store's paid uploads, which means funding the store's key with **mainnet $ARIO**. The free tier caps each file at ~105 KB and allows about 10 MiB for the whole fleet, which is about five real games. That is real money, and it breaks the "devnet only, no mainnet money" rule on purpose. The rule protects Players and Creators from real payments. A few dollars of infrastructure storage (~$0.08/MiB at 2026-09 Turbo prices) spent by the operator is a different category, and the TOON store is half of what the showcase shows. The Version caps (1.5 MiB per file, 4 MiB and 200 files per Version) bound that spend.
 
 ## Considered Options
 
@@ -18,4 +18,5 @@ Arweave only works if the fleet turns on the store's paid uploads, which means f
 - MVP publishing depends on a fleet decision outside Slop Machine. The fleet said yes (slop_machine#18): $5 of mainnet $ARIO on the store key, `STORE_TURBO_MAX_ARIO_PER_UPLOAD=120`, topped up by hand.
 - Versions are permanent. `slop unpublish` deletes the listing (NIP-09), which only takes the Slop out of the Feed.
 - Feed entries and share links address the listing (`<kind>:<pubkey>:<slug>`), not a single event id.
+- **Amended 2026-09-24 (slop_machine#31): the Version cap is 4 MiB, down from 10 MiB.** On iPhone Wi-Fi a 10 MiB Version took 2–4 s to be ready, longer than a Player dwells before a Pull, so the Player lands on the loading card (slop_machine#28). At 4 MiB it takes about 1–1.5 s. The lower cap also stretches the $5 float from about 6 to about 15 cap-sized Versions. `slop publish` refuses a Version over the cap before upload. The Feed index measures each Version during admission and never deals one over the cap, although it still opens by its link. Raising the cap later is easy. Lowering it once Creators have shipped is not.
 - store#132 (refused writes are still charged) makes resumable, content-hash-deduplicated uploads a requirement of `slop publish`, not a nicety.
