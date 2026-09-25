@@ -4,7 +4,7 @@ Slop Machine is a doom-scroll Feed of small web games (**Slop**). Every swipe to
 
 This spec assembles decisions from the [Slop Machine MVP map][map] and decides nothing new. Every section cites the ticket or ADR it comes from. Where the record has a gap, the spec names an **open item** and links the ticket that will close it. Terms are defined in [`CONTEXT.md`](../CONTEXT.md). The ADRs are in [`docs/adr/`](adr/).
 
-**Status:** build-ready except for two open items (see [Open items](#open-items)).
+**Status:** build-ready except for one open item (see [Open items](#open-items)).
 
 ---
 
@@ -364,6 +364,7 @@ A keyless service (`feed-index` container). Its state can all be rebuilt from th
 
 Before a Version is ever dealt, and again whenever the listing's pointer moves ([t11], [t26], [t28], [t31]):
 - **Fetch the whole Version through our gateway** (`*.slopmachine.fun`), which warms its cache so no Player pays a cold miss.
+- **A failed fetch is not a verdict.** A 404, 5xx or timeout leaves the Version `pending`, and admission retries with backoff. A Version fresh from `slop publish` can take ~10 s or more to reach the upstream, and upstreams fail transiently. Only a Version that still can't be fetched after the retries is `rejected: unreachable` ([t32]).
 - **Check:**
   - `index.html` is at the root
   - ≤ 200 files, each ≤ 1.5 MiB, and **≤ 4 MiB measured total** (otherwise `too-large`)
@@ -456,14 +457,14 @@ The stock `ghcr.io/toon-protocol/connector` image at a pinned tag. It is **the o
 
 A cache-only `ar-io-core` (`ar-io-core` container) ([ADR 0004](adr/0004-slop-is-served-locked-down-from-our-own-gateway.md), [t27]):
 - Config: `ARNS_ROOT_HOST=slopmachine.fun`, `START_WRITERS=false` and `RUN_OBSERVER=false`, with no envoy, observer or redis.
-- `TRUSTED_NODE_URL` direct. The cache TTL cleanup is set.
+- **Upstream** ([t32]): `TRUSTED_GATEWAYS_URLS={"https://turbo-gateway.com":1,"https://ar-io.dev":2}`, `ON_DEMAND_RETRIEVAL_ORDER=trusted-gateways` and `TRUSTED_GATEWAYS_REQUEST_TIMEOUT_MS=30000`. Turbo is where the store uploads land, so it serves a fresh Version first (~10 s after upload, against ~48 s for ar-io.dev). ar-io.dev covers turbo's `429`s and misses. **Not arweave.net:** it answers `429` to any request carrying ar-io-core's `X-AR-IO-*` headers, which core sends even to `trusted:false` upstreams. **Not chunks:** a cache-only node without an index can't locate a data item inside its bundle. The 10 s default timeout cut off slow cold fetches.
+- **Cache TTL: none.** Leave `CONTIGUOUS_DATA_CACHE_CLEANUP_THRESHOLD` unset, so the node never evicts. A Version stays dealable indefinitely, an evicted one would cost a Player a cold miss of about the ~10 s load-failure timeout, and every Slop byte ever stored is bounded by the store float (~63 MiB per $5) ([t32], [t18]).
 - `mem_limit` ~1.25 GiB, with `restart: unless-stopped`.
 - Each Version gets its sandbox origin at `<base32(txid)>.slopmachine.fun`. Caddy terminates TLS with a `*.slopmachine.fun` wildcard cert issued by DNS-01 through Porkbun, and adds the lockdown CSP and `frame-ancestors` headers, which core can't set.
 - **No fallback to public gateways.** An outage is a load failure and goes down the re-deal path.
 - **No Takedowns at the gateway, and no PSL entry** for the MVP.
 - The Feed and Slop must never share a gateway domain.
-- Measured: ~0.7–0.8 GiB RSS, <1 GB disk plus cache. A cold fetch took 5–10 s, and a cached one <10 ms.
-- **Open item 1: which upstream to fetch cold Versions from, and the cache TTL.** ADR 0004 and [t27] use `ar-io.dev`, because arweave.net 429s gateway hops, while [t28] recommends arweave.net → [Which upstream should our Slop gateway fetch cold Versions from?][t32]
+- Measured: ~0.7–0.8 GiB RSS, <1 GB disk plus cache. A cold cap-sized (4 MiB) Version takes ~4–6 s through the two-tier upstream, and a cached one ≤0.13 s. Every single upstream failed some fetches (`429`, `504`, timeouts), so admission retries ([§7.2](#72-admission)) ([t27], [t32]).
 
 ---
 
@@ -516,6 +517,7 @@ A cache-only `ar-io-core` (`ar-io-core` container) ([ADR 0004](adr/0004-slop-is-
 | Ordering | ×5 recency decaying over 72 h, ×3 featured | [t11] |
 | Creator channel | $5 open, then +$5 top-ups; 7-day settle timeout | [t19] |
 | Store float | $5 of $ARIO ≈ 63 MiB ≈ 15 cap-sized Versions | [t18], [t31] |
+| Gateway upstream timeout / cache eviction | 30 s / never | [t32] |
 
 ---
 
@@ -523,7 +525,7 @@ A cache-only `ar-io-core` (`ar-io-core` container) ([ADR 0004](adr/0004-slop-is-
 
 Each is a ticket on the map. Its resolution replaces the item here.
 
-1. **Gateway upstream and cache TTL.** [Which upstream should our Slop gateway fetch cold Versions from?][t32] ([§10](#10-slop-gateway))
+*Resolved:* item 1, the gateway upstream, is now `turbo-gateway.com` with `ar-io.dev` as fallback, a 30 s upstream timeout and no cache eviction. See [Which upstream should our Slop gateway fetch cold Versions from?][t32] ([§10](#10-slop-gateway)).
 
 *Resolved:* item 2, the Nostr kind numbers, is now listing `37567`, blocklist `17567` and featured list `17568`. See [Which Nostr kinds do the Slop listing and the operator lists use?][t33] ([§5.1](#51-slop-and-version), [§7.6](#76-operator-lists)).
 
