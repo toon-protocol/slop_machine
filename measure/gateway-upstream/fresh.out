@@ -1,0 +1,20 @@
+manifest dy2jzFcKMDaDSFAyij2B_oR1Ci6i-zfA-g7QrHCFvHE {
+  'a.bin': 'JUviqmseTBJn8emMGupJj_017oNhrmN346H5o04yd3U',
+  'b.bin': 'kmW4ecPWpMkMCWcBKQp59jWeAT3gcVgW1PV6ixRiYaw',
+  'c.bin': 'hLsPj25UDAGK99JCqUyNoWygsKyR4Ao24wN7WNLPdCE'
+}
+turbo              manifest served after 9.605s
+turbo              file     served after 9.667s
+ario               manifest served after 48.253s
+ario               file     served after 48.451s
+ario               path     NOT served
+arweave-trusted    manifest NOT served
+arweave-trusted    file     NOT served
+arweave-trusted    path     NOT served
+arweave-untrusted  manifest NOT served
+arweave-untrusted  file     NOT served
+arweave-untrusted  path     NOT served
+turbo              path     NOT served
+chunks             manifest NOT served
+chunks             file     NOT served
+chunks             path     NOT served
