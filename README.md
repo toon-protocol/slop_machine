@@ -2,7 +2,7 @@
 
 Slop Machine is a TOON showcase. Creators publish Slop (static web games), and Players pull them through a mobile-first web Feed, paying a small devnet-USDC toll per Pull. Creators earn from Purchases made inside their Slop. It all runs on the TOON relay and store.
 
-It is devnet only, so no mainnet money is involved. This repository is for planning and specification, and it has no code yet.
+It is devnet only, so no mainnet money is involved.
 
 ## Where the plan is
 
