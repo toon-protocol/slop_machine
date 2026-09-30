@@ -87,3 +87,11 @@ test('a gate job with no runnable step runs nothing, and says so', () => {
 test('a ci.yml that is not valid YAML is an error, not a silent empty gate', () => {
   assert.throws(() => gateFromCi('jobs: [unclosed'));
 });
+
+test('a GitHub expression in env or working-directory skips the step too', () => {
+  const { steps, notes } = gateFromCi(
+    'jobs:\n  gate:\n    steps:\n      - name: Secretive\n        env:\n          T: ${{ secrets.T }}\n        run: make\n'
+  );
+  assert.deepEqual(steps, []);
+  assert.match(notes.join('\n'), /Secretive/);
+});

@@ -104,6 +104,10 @@ function hasOpenPr(number: number): boolean {
 function reasonToSkip(issue: IssueFacts): string | null {
   if (issue.state !== 'OPEN') return 'not open';
   if (!issue.labels.nodes.some((l) => l.name === READY_LABEL)) return `no ${READY_LABEL} label`;
+  // Wayfinder tickets are HITL or research. Only ready-for-agent starts the factory, and
+  // a wayfinder ticket that somehow carries it is still not the factory's to build.
+  const wayfinder = issue.labels.nodes.find((l) => l.name.startsWith('wayfinder:'));
+  if (wayfinder) return `a ${wayfinder.name} ticket, for a human`;
   if (issue.subIssues.totalCount > 0) return 'has sub-issues (a spec, not a ticket)';
   if (/^##\s+User Stories\s*$/im.test(issue.body)) return 'written from the to-spec template';
 

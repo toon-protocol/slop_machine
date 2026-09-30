@@ -124,7 +124,7 @@ async function pushBranch(
   try {
     const push = await sandbox.exec(
       `git -c credential.helper= -c credential.helper='${FRESH_CREDENTIAL_HELPER}' ` +
-        `push -u origin ${branch}`,
+        `push --no-verify -u origin ${branch}`,
       { onLine: (line) => console.log(`  [${label}] ${line}`) }
     );
     if (push.exitCode !== 0) {

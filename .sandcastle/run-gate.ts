@@ -48,7 +48,7 @@ export interface GateResult {
   readonly failure: GateFailure | null;
 }
 
-/** Keep fed-back output useful but bounded — a full cargo build log is megabytes. */
+/** Keep fed-back output useful but bounded — a full build log is megabytes. */
 const MAX_OUTPUT_CHARS = 12_000;
 
 export interface Gate {
@@ -95,8 +95,8 @@ export function gateFromCi(ciYaml: string | null): Gate {
       notes.push(`Skipped "${name}": it has an \`if:\` condition this runner cannot evaluate.`);
       return;
     }
-    if (step.run.includes('${{')) {
-      notes.push(`Skipped "${name}": it uses a \${{ }} expression this runner cannot evaluate.`);
+    if (JSON.stringify(step).includes('${{')) {
+      notes.push(`Skipped "${name}": it uses a ${{ }} expression this runner cannot evaluate.`);
       return;
     }
     let command = step.run.replace(/\n$/, '');
@@ -186,7 +186,7 @@ export function fixPrompt(failure: GateFailure, attempt: number, maxAttempts: nu
     '',
     'Fix the cause and commit. Rules:',
     `- Re-run \`${failure.command}\` yourself and confirm it passes before you finish.`,
-    '- Fix the code. Do NOT weaken, skip, delete or #[ignore] a test, and do not',
+    '- Fix the code. Do NOT weaken, skip, delete or ignore a test, and do not',
     '  loosen a lint to make this pass — if the test is genuinely wrong, say so',
     '  explicitly in the commit message and explain why.',
     '- Change only what this failure requires. Do not refactor beyond it.',

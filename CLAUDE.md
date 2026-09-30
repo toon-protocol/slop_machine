@@ -23,6 +23,8 @@ carries it and its blockers are closed, `.github/workflows/agent-implement.yml` 
 and issues with an open PR are skipped. The `wayfinder:*` tickets are planning work for a
 human, never queued: only `ready-for-agent` starts the factory.
 
+Only `ready-for-agent` starts it; ready-issues.ts also refuses any issue labelled `wayfinder:*`.
+
 **The gate reads its steps from CI.** The gate is the `run:` steps of the `gate` job
 (else the `checks` job) of `.github/workflows/ci.yml` **on `main`**, in order. If there is
 no `ci.yml`, no such job, or no runnable step, the gate runs nothing and logs that loudly.
