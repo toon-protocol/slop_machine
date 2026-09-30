@@ -95,3 +95,8 @@ test('a GitHub expression in env or working-directory skips the step too', () =>
   assert.deepEqual(steps, []);
   assert.match(notes.join('\n'), /Secretive/);
 });
+
+test('the expression note names the expression syntax literally', () => {
+  const { notes } = gateFromCi('jobs:\n  gate:\n    steps:\n      - run: echo ${{ x }}\n');
+  assert.match(notes.join('\n'), /a \$\{\{ \}\} expression/);
+});

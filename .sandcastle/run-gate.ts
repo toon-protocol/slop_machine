@@ -96,7 +96,7 @@ export function gateFromCi(ciYaml: string | null): Gate {
       return;
     }
     if (JSON.stringify(step).includes('${{')) {
-      notes.push(`Skipped "${name}": it uses a ${{ }} expression this runner cannot evaluate.`);
+      notes.push(`Skipped "${name}": it uses a \${{ }} expression this runner cannot evaluate.`);
       return;
     }
     let command = step.run.replace(/\n$/, '');
